@@ -1,0 +1,16 @@
+# local Claude Code settings — not part of the deliverable
+.claude/
+
+# runtime output: verify/deploy JSONL logs and drift-runner logs
+*.jsonl
+logs/
+ves-verify/
+
+# generated baselines and manifests (captured per host, never source)
+baselines/
+*.manifest.json
+
+# editor / OS noise
+*.swp
+*~
+Thumbs.db
