@@ -23,6 +23,7 @@ Deploy-Processor.ps1         gate -> stop -> backup -> copy -> restart -> verify
 processors/                  one thin deploy script per system (template inside)
 targets.json                 drift-runner target list (example values)
 sample.config.json           example config contract
+SERVERS.md                   authoritative server + processor path map
 ```
 
 ## Where this runs (OMS)
@@ -31,18 +32,25 @@ This suite targets the OMS Legacy on-prem Windows tier, which deploys by
 "RDP + Copy" and has no CI/CD. It does NOT target the Salesforce (Copado) or
 CDK-managed AWS paths, which already have pipelines. Two execution contexts:
 
-- On-prem Windows servers, where files/services/tasks/logs physically live:
-  outbound egress VESEMSEGRESS01/02/03 (UAT: vesemsegressuat), the ingress
-  servers, Java hosts VESOMSVEMS01/02 and VESMERA01, and SQL VESSQLOMS101 (OMS2).
-  Run locally on each box or from a central runner over WinRM.
+- On-prem Windows servers, where files/services/tasks/logs physically live.
+  Outbound egress: UAT VESMSEGRESSUAT (all three processors on one box), PROD
+  split across VESEMSEGRESS01/02/03 (VEMS-5346). Inbound: UAT VESEMSINGRESUAT,
+  PROD VESEMSINGRESS01 (real-time) / VESEMSINGRESS02 (Handler). Java hosts
+  VESOMSVEMS01/02 and VESMERA01. SQL VESSQLOMS101 (OMS2) in PROD. See SERVERS.md
+  for the full per-server/per-processor path map. Run locally on each box or
+  from a central runner over WinRM.
 - AWS GovCloud access (us-gov-east-1) for the SSM leg of config-verify. The
   on-prem<->AWS VPN already exists; the runner needs a GovCloud read-only role
   to read the pinned hashes / expected values.
 
-Two target shapes drive the -ServiceName vs -ScheduledTasks split: the outbound
-.exe processors run as Task Scheduler jobs with no health endpoint (prove life
-via task last-run + a fresh log line), while the Java services run as Windows
-services with a Spring Boot actuator endpoint.
+Two target shapes drive the -ServiceName vs -ScheduledTasks split. The Java
+services run as Windows services with a Spring Boot actuator endpoint. The
+outbound processors are console EXEs with no health endpoint: a single
+VES.OutboundDBQProcessor.exe is deployed per processor folder and launched by a
+.bat (mode by arg: Ack/XML = RTP, DBQ = RTPDP), typically triggered by Task
+Scheduler. Prove those alive via task last-run + a fresh log line. Note the same
+exe name runs 2-3 times per box, so an instance is identified by its working
+dir / arg, not by process name (see SERVERS.md).
 
 Capture, file verify, and config verify are modes of one script rather than
 three tools. Replaces the older Verify-Deployment.ps1.
@@ -171,7 +179,15 @@ PowerBuilder or native, that check needs a LoadLibrary variant.
   copy it per confirmed system and server (3-5 person-days each incl. pilot).
 - Server split (VEMS-5346): PROD spreads the outbound processors across
   VESEMSEGRESS01/02/03 while UAT runs all three on one box, so deploy is
-  server-aware (set -ScheduledTasks per server).
+  server-aware (set the processor list per server). See SERVERS.md.
+- Stop mechanism for the outbound processors is unimplemented. They are console
+  EXEs (VES.OutboundDBQProcessor.exe launched by .bat, mode by arg), not Windows
+  services, and the same exe name runs 2-3 times per box. Deploy-Processor today
+  can stop a Windows service or disable a scheduled task, but disabling the task
+  does not kill an already-running instance holding the folder's files open.
+  Deploying these needs killing the specific instance matched by working dir /
+  command-line arg (RTP/RTPDP) before the copy, then relaunching its .bat. Decide
+  and wire this before using the deploy scripts on the outbound processors.
 - SSM region. Examples default to us-gov-west-1, but the OMS SSM convention
   (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1. Set -Region per
   the confirmed parameter path before running config-verify/preflight for real.
