@@ -1,0 +1,5 @@
+{
+  "format": "keyvalue",
+  "requiredKeys": ["outbound.queue"],
+  "expectedValues": { "outbound.enabled": "true", "tls.min": "1.2" }
+}

@@ -1,0 +1,5 @@
+{
+  "format": "json",
+  "requiredKeys": ["Outbound:QueueName"],
+  "expectedValues": { "Outbound:Enabled": "true", "Tls:MinVersion": "1.2" }
+}

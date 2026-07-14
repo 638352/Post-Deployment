@@ -24,6 +24,8 @@ processors/                  one thin deploy script per system (template inside)
 targets.json                 drift-runner target list (example values)
 sample.config.json           example config contract
 SERVERS.md                   authoritative server + processor path map
+Invoke-Tests.ps1             dev-time Pester runner (see Testing)
+tests/                       Pester test suite + fixtures
 ```
 
 ## Where this runs (OMS)
@@ -197,6 +199,44 @@ PowerBuilder or native, that check needs a LoadLibrary variant.
 - Break-glass: the gate supports -AllowOverride with a mandatory reason and an
   audit line, but Deploy-Processor doesn't pass it. Decide hard-block vs
   audited override before prod.
+
+## Testing
+
+There is a Pester test suite under `tests/`. It is **dev-time only** — run it on
+the workstation/CI where this suite is maintained, NOT on the legacy PS 5.1
+production boxes. It needs Pester 5.x (the in-box Pester 3.4 will not parse the
+tests); install it once:
+
+```powershell
+Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+```
+
+Run the suite under Windows PowerShell 5.1 (the target runtime), so the tests
+exercise the same engine as production:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1
+```
+
+`Invoke-Tests.ps1` exits with the failed-test count (0 = green), ready to wire into
+CI later. What's covered:
+
+- **Unit** (`tests/VesVerify.Module.Tests.ps1`): the module's pure functions —
+  manifest hashing (stable, order-independent, change-sensitive), the
+  export/import round-trip and tamper detection, `Compare-VesFiles` drift
+  detection, and the `Write-VesLog` JSONL format. No AWS/host needed.
+- **End-to-end**: each entry script is driven as a real `powershell.exe` child
+  process and asserted against the documented exit-code contract
+  (`0/1/2/3/10`) plus its `-Json` output — `Invoke-Verification` (capture / verify
+  / drift / usage), `Verify-Config` (all three contract formats),
+  `Invoke-HealthCheck` (fresh-log liveness + assembly load), and `Invoke-Preflight`
+  (usage + manifest/contract self-check).
+
+Deliberately out of scope this round (would need mocking): the trust-anchored
+paths that read/write SSM (`Get-/Set-VesTrustedHash`, the gate, and
+verify-with-`-TrustParam`), and the health check's service / scheduled-task / HTTP
+branches. No test requires AWS, a running service, a scheduled task, or the
+network.
 
 ## Host prerequisites
 
