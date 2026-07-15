@@ -1,8 +1,5 @@
 #Requires -Version 5.1
 <#
-.SYNOPSIS
-    Registers (or removes) the Task Scheduler job that runs Start-DriftRunner.ps1
-    on a fixed cadence. Run elevated on the verification host.
 .DESCRIPTION
     Creates a task running as SYSTEM that re-verifies every target in the
     targets file. The runner writes a timestamped JSONL log per target under its
@@ -26,18 +23,21 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# -Uninstall path: just remove the task and exit
 if ($Uninstall) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
     Write-Host "Removed scheduled task '$TaskName'."
     return
 }
 
+# locate the runner this task will invoke; warn (don't fail) if targets aren't in place yet
 $runner = Join-Path $PSScriptRoot 'Start-DriftRunner.ps1'
 if (-not (Test-Path $runner)) { throw "Start-DriftRunner.ps1 not found next to this script: $runner" }
 if (-not (Test-Path $TargetsFile)) {
     Write-Warning "Targets file $TargetsFile does not exist yet; task will fail until it does."
 }
 
+# action: run the drift runner under Windows PowerShell against the targets file
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
     '-NoProfile -ExecutionPolicy Bypass -File "{0}" -TargetsFile "{1}"' -f $runner, $TargetsFile)
 
@@ -48,10 +48,12 @@ $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) `
     -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
     -RepetitionDuration (New-TimeSpan -Days 3650)
 
+# run as SYSTEM (elevated); skip overlapping runs and catch up if a run was missed
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 $settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable `
     -ExecutionTimeLimit (New-TimeSpan -Hours 1)
 
+# register (or overwrite) the task from the pieces above
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
     -Principal $principal -Settings $settings -Force | Out-Null
 

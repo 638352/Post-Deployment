@@ -1,9 +1,5 @@
 #Requires -Version 5.1
 <#
-.SYNOPSIS
-    Pre-deploy self-check. Validates the plumbing the deploy/verify scripts depend
-    on WITHOUT touching prod files or staging a release, so an operator can confirm
-    SSM connectivity and baseline integrity before running a real deploy.
 .DESCRIPTION
     Read-only. Runs a set of checks and reports PASS / WARN / FAIL per check:
 
@@ -46,6 +42,7 @@ param(
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
 
+# every check appends one row here; the final exit code is derived from their statuses
 $checks = New-Object System.Collections.Generic.List[object]
 function Add-Check([string]$Name, [string]$Status, [string]$Detail) {
     # Status is PASS, WARN, or FAIL. Only FAIL flips the exit code.
@@ -68,15 +65,18 @@ function Test-AwsCli {
 function Test-SsmParam([string]$ParamName) {
     if ([string]::IsNullOrWhiteSpace($ParamName)) { return }
     Test-AwsCli
+    # attempt the decrypted read, capturing stderr so we can classify the failure below
     $out = & aws ssm get-parameter --name $ParamName --with-decryption `
         --region $Region --query 'Parameter.Value' --output text 2>&1
     $code = $LASTEXITCODE
+    # success: report readability by length only (the value may be a secret)
     if ($code -eq 0 -and -not [string]::IsNullOrWhiteSpace(($out | Out-String))) {
         # don't echo the value; it may be a secret. show length only.
         $val = ($out | Out-String).Trim()
         Add-Check "ssm:$ParamName" 'PASS' ("readable ({0} chars)" -f $val.Length)
         return $val
     }
+    # failure: translate the CLI's error text into an actionable reason
     $msg = ($out | Out-String).Trim()
     if ($msg -match 'ParameterNotFound') { $why = 'parameter does not exist (check path/region)' }
     elseif ($msg -match 'AccessDenied')   { $why = 'access denied (IAM ssm:GetParameter / kms:Decrypt)' }
@@ -90,6 +90,7 @@ function Test-SsmParam([string]$ParamName) {
 # --- baseline manifest integrity + trust anchor, no prod files needed ---
 function Test-Manifest([string]$Path, [string]$Trust) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    # must exist, load, and be self-consistent before we bother with the trust anchor
     if (-not (Test-Path -LiteralPath $Path)) {
         Add-Check 'manifest' 'FAIL' "not found: $Path"
         return
@@ -100,6 +101,7 @@ function Test-Manifest([string]$Path, [string]$Trust) {
         Add-Check 'manifest' 'FAIL' "self-hash mismatch (edited/corrupt): stored=$($m.StoredHash) recomputed=$($m.RecomputedHash)"
         return
     }
+    # if a trust param is given, the manifest hash must match the SSM-pinned value
     if (-not [string]::IsNullOrWhiteSpace($Trust)) {
         $pinned = Test-SsmParam $Trust
         if ($null -eq $pinned) {
@@ -116,6 +118,7 @@ function Test-Manifest([string]$Path, [string]$Trust) {
 
 function Test-ConfigContract([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    # the contract must exist, be valid JSON, and declare a format the verifier understands
     if (-not (Test-Path -LiteralPath $Path)) { Add-Check 'config' 'FAIL' "contract not found: $Path"; return }
     try { $c = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json }
     catch { Add-Check 'config' 'FAIL' "contract not valid JSON: $($_.Exception.Message)"; return }
@@ -128,6 +131,7 @@ function Test-ConfigContract([string]$Path) {
 }
 
 try {
+    # Mode A: -TargetsFile validates SSM + manifest + contract for every drift target at once
     if ($TargetsFile) {
         if (-not (Test-Path -LiteralPath $TargetsFile)) {
             Write-VesLog ERROR "Targets file not found: $TargetsFile" -LogFile $LogFile
@@ -135,6 +139,7 @@ try {
             exit $VES_EXIT_USAGE
         }
         Test-AwsCli
+        # run the manifest + config checks per target, reading each target's own params
         $targets = Get-Content -LiteralPath $TargetsFile -Raw | ConvertFrom-Json
         foreach ($t in $targets) {
             $p = if ($t.PSObject.Properties['processor']) { $t.processor } else { '?' }
@@ -146,6 +151,7 @@ try {
             Test-ConfigContract $cc
         }
     }
+    # Mode B: per-processor invocation validates whichever of the params were supplied
     else {
         if (-not $ApprovedCommitParam -and -not $TrustParam -and -not $ManifestPath) {
             Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ApprovedCommitParam / -TrustParam / -ManifestPath.' -LogFile $LogFile
@@ -161,6 +167,7 @@ try {
         Test-ConfigContract $ConfigContract
     }
 
+    # tally the results: any FAIL means NOT READY (exit 2); WARNs are allowed
     $fails = @($checks | Where-Object { $_.status -eq 'FAIL' })
     $warns = @($checks | Where-Object { $_.status -eq 'WARN' })
     $ready = ($fails.Count -eq 0)
@@ -174,6 +181,7 @@ try {
     }
     exit ($(if ($ready) { $VES_EXIT_OK } else { $VES_EXIT_NOBASE }))
 }
+# unexpected failure (bad targets JSON, module error, etc.): treat as not-ready
 catch {
     Write-VesLog ERROR "Preflight error: $($_.Exception.Message)" -LogFile $LogFile
     if ($Json) { @{ status='error'; error=$_.Exception.Message } | ConvertTo-Json -Compress }

@@ -1,7 +1,5 @@
 #Requires -Version 5.1
 <#
-.SYNOPSIS
-    Baseline capture and post-deployment verification for manual-copy systems.
 .DESCRIPTION
     Modes:
       Capture       snapshot the UAT-approved release into a manifest and pin its hash to SSM
@@ -11,12 +9,7 @@
 
     Exit codes: 0 match, 1 drift, 2 no baseline / trust failure, 10 usage.
     Replaces the earlier Verify-Deployment.ps1 Capture/Verify script.
-.EXAMPLE
-    # at UAT sign-off
-    .\Invoke-Verification.ps1 -Mode Capture -ReleaseRoot D:\uat\PROCESSOR -ManifestPath D:\baselines\PROCESSOR.json -TrustParam /ves/PROCESSOR/baseline-hash -Processor PROCESSOR -CommitSha (git rev-parse HEAD)
-.EXAMPLE
-    # in prod after deploy
-    .\Invoke-Verification.ps1 -Mode All -ReleaseRoot E:\apps\PROCESSOR -ManifestPath D:\baselines\PROCESSOR.json -TrustParam /ves/PROCESSOR/baseline-hash -ConfigContract D:\baselines\PROCESSOR.config.json -ConfigPath E:\apps\PROCESSOR\app.config -Json
+/ves/PROCESSOR/baseline-hash -ConfigContract D:\baselines\PROCESSOR.config.json -ConfigPath E:\apps\PROCESSOR\app.config -Json
 #>
 [CmdletBinding()]
 param(
@@ -39,8 +32,10 @@ param(
 
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+# accumulates the machine-readable result emitted when -Json is set
 $result = [ordered]@{ mode=$Mode; processor=$Processor; status=$null; detail=@{} }
 
+# single exit point: optionally print the JSON result, then exit with the given code
 function Out-Result([int]$code) {
     if ($Json) { ($result | ConvertTo-Json -Depth 6 -Compress) }
     exit $code
@@ -49,12 +44,15 @@ function Out-Result([int]$code) {
 try {
     switch ($Mode) {
 
+        # Capture: snapshot the UAT-approved tree into a manifest and (optionally) pin its hash to SSM
         'Capture' {
             if (-not $ManifestPath) { Write-VesLog ERROR '-ManifestPath required for Capture' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
+            # hash the release tree and write the manifest to disk
             Write-VesLog INFO "Capturing baseline: $ReleaseRoot" -Data @{processor=$Processor} -LogFile $LogFile
             $manifest = Get-VesManifest -ReleaseRoot $ReleaseRoot -ExcludePattern $ExcludePattern
             $hash = Export-VesManifest -Manifest $manifest -Path $ManifestPath -CommitSha $CommitSha -Processor $Processor
             Write-VesLog OK "Manifest written: $($manifest.Count) files, hash=$hash" -LogFile $LogFile
+            # anchor trust: pin the manifest hash to SSM so later verifies can detect tampering
             if ($TrustParam) {
                 Set-VesTrustedHash -ParameterName $TrustParam -Value $hash -Region $Region
                 Write-VesLog OK "Trusted hash pinned to SSM $TrustParam" -LogFile $LogFile
@@ -66,9 +64,11 @@ try {
             Out-Result $VES_EXIT_OK
         }
 
+        # VerifyFiles (and the file leg of All): hash-compare the deployed tree to the baseline
         { $_ -in 'VerifyFiles','All' } {
             if (-not $ManifestPath) { Write-VesLog ERROR '-ManifestPath required' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
 
+            # load the baseline and reject it up front if its own self-hash doesn't match
             $m = Import-VesManifest -Path $ManifestPath
             if (-not $m.Consistent) {
                 # manifest was edited or corrupted after capture
@@ -76,6 +76,7 @@ try {
                 $result.status='no-baseline'; Out-Result $VES_EXIT_NOBASE
             }
 
+            # trust anchor: confirm the baseline still matches the hash pinned in SSM
             if ($TrustParam) {
                 $trusted = Get-VesTrustedHash -ParameterName $TrustParam -Region $Region
                 if ($m.RecomputedHash -ne $trusted) {
@@ -87,6 +88,7 @@ try {
                 Write-VesLog WARN 'No -TrustParam; skipping trust anchor (drift-only check).' -LogFile $LogFile
             }
 
+            # compare live tree vs baseline and record the missing/changed/extra breakdown
             $cmp = Compare-VesFiles -Baseline $m.Doc.files -ReleaseRoot $ReleaseRoot -ExcludePattern $ExcludePattern
             $result['detail']['files'] = @{ missing=@($cmp.Missing); changed=@($cmp.Changed); extra=@($cmp.Extra) }
             if ($cmp.Match) {
@@ -98,6 +100,7 @@ try {
                 foreach ($x in $cmp.Changed) { Write-VesLog DRIFT "  CHANGED $($x.RelPath)" -LogFile $LogFile }
                 foreach ($x in $cmp.Extra)   { Write-VesLog DRIFT "  EXTRA   $x" -LogFile $LogFile }
             }
+            # files-only mode returns here; All mode stashes the result and falls through to config
             $filesOk = $cmp.Match
             if ($Mode -eq 'VerifyFiles') {
                 $result.status = if ($filesOk) {'match'} else {'drift'}
@@ -107,14 +110,17 @@ try {
         }
     }
 
+    # Config leg: runs for VerifyConfig, or as the second half of All
     if ($Mode -in 'VerifyConfig','All') {
         if (-not $ConfigContract -or -not $ConfigPath) {
             Write-VesLog ERROR '-ConfigContract and -ConfigPath required for config verify' -LogFile $LogFile
             Out-Result $VES_EXIT_USAGE
         }
+        # delegate the structural config check to Verify-Config.ps1 and capture its pass/fail
         $cfg = & (Join-Path $PSScriptRoot 'Verify-Config.ps1') -ContractPath $ConfigContract -ConfigPath $ConfigPath -Region $Region -LogFile $LogFile
         $result['detail']['config'] = $cfg
         $configOk = [bool]$cfg.pass
+        # config-only mode returns on config alone; All mode requires BOTH files and config to pass
         if ($Mode -eq 'VerifyConfig') {
             $result.status = if ($configOk) {'match'} else {'drift'}
             Out-Result ($(if ($configOk) { $VES_EXIT_OK } else { $VES_EXIT_DRIFT }))
@@ -124,6 +130,7 @@ try {
         Out-Result ($(if ($allOk) { $VES_EXIT_OK } else { $VES_EXIT_DRIFT }))
     }
 }
+# any unhandled error (bad SSM read, unreadable tree, etc.) lands here
 catch {
     Write-VesLog ERROR "Verification error: $($_.Exception.Message)" -LogFile $LogFile
     $result.status = 'error'; $result['detail']['error'] = $_.Exception.Message

@@ -1,8 +1,5 @@
 #Requires -Version 5.1
 <#
-.SYNOPSIS
-    Post-deploy functional health check. Independent of the UAT baseline, so it
-    can catch a defect that UAT signed off on (missing dependency, dead service).
 .DESCRIPTION
     Checks, any failure exits 3:
       1. required assemblies load AND their referenced types resolve
@@ -44,8 +41,10 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+# every check appends a reason string here; a non-empty list at the end = unhealthy (exit 3)
 $fail = New-Object System.Collections.Generic.List[string]
 
+# Check 1: each required .NET assembly loads and its types resolve (catches a missing dependency)
 foreach ($dll in $RequiredAssemblies) {
     try {
         if (-not (Test-Path -LiteralPath $dll)) { throw 'file not found' }
@@ -65,6 +64,7 @@ foreach ($dll in $RequiredAssemblies) {
     }
 }
 
+# Check 2: liveness by Windows service state (Java services) or, failing that, a running process
 if ($ServiceName) {
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if (-not $svc -or $svc.Status -ne 'Running') {
@@ -130,6 +130,7 @@ if ($FreshLogDir) {
     }
 }
 
+# Check 5 (optional): HTTP probe for Java/Spring Boot actuator endpoints
 if ($HealthUrl) {
     try {
         # UseBasicParsing avoids the IE dependency on server core
@@ -144,6 +145,7 @@ if ($HealthUrl) {
     }
 }
 
+# healthy only if no check added a failure; summarize, optionally emit JSON, exit 0 or 3
 $healthy = ($fail.Count -eq 0)
 if (-not $healthy) {
     Write-VesLog ERROR "HEALTH FAIL $Processor -> $($fail -join ' | ')" -LogFile $LogFile

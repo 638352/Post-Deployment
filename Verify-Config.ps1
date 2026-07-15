@@ -39,6 +39,7 @@ param(
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
 
+# both inputs must exist; then load the contract that says what the config must satisfy
 if (-not (Test-Path $ContractPath)) { throw "Contract not found: $ContractPath" }
 if (-not (Test-Path $ConfigPath))   { throw "Config not found: $ConfigPath" }
 $contract = Get-Content $ContractPath -Raw | ConvertFrom-Json
@@ -47,11 +48,13 @@ function Get-FlatConfig([string]$path, [string]$format) {
     # flatten whatever format into key -> value, keys colon-delimited
     $map = @{}
     switch ($format) {
+        # .NET App.config/web.config: pull appSettings and connectionStrings entries
         'appconfig' {
             [xml]$xml = Get-Content -LiteralPath $path -Raw
             foreach ($n in $xml.SelectNodes('//appSettings/add')) { $map[$n.key] = $n.value }
             foreach ($n in $xml.SelectNodes('//connectionStrings/add')) { $map["ConnectionStrings:$($n.name)"] = $n.connectionString }
         }
+        # JSON config: recursively flatten nested objects into colon-joined leaf keys
         'json' {
             $obj = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
             function Walk($o, $prefix) {
@@ -63,6 +66,7 @@ function Get-FlatConfig([string]$path, [string]$format) {
             }
             $script:__m = @{}; Walk $obj ''; $map = $script:__m
         }
+        # Java .properties style: key=value per line, skipping comments
         'keyvalue' {
             foreach ($line in (Get-Content -LiteralPath $path)) {
                 if ($line -match '^\s*#') { continue }
@@ -74,13 +78,16 @@ function Get-FlatConfig([string]$path, [string]$format) {
     return $map
 }
 
+# flatten the live config once, then accumulate the two failure kinds below
 $live = Get-FlatConfig -path $ConfigPath -format $contract.format
 $missingRequired = New-Object System.Collections.Generic.List[string]
 $valueMismatch   = New-Object System.Collections.Generic.List[object]
 
+# requiredKeys: presence only, value irrelevant
 foreach ($k in @($contract.requiredKeys)) {
     if (-not $live.ContainsKey($k)) { $missingRequired.Add($k) }
 }
+# expectedValues: must be present AND equal to the value pinned in the contract file
 foreach ($p in $contract.expectedValues.PSObject.Properties) {
     if (-not $live.ContainsKey($p.Name)) { $missingRequired.Add($p.Name); continue }
     if ($live[$p.Name] -ne $p.Value) {
@@ -102,6 +109,7 @@ if ($contract.PSObject.Properties['ssmExpectedValues'] -and $contract.ssmExpecte
     }
 }
 
+# pass only when there are zero missing keys and zero value mismatches; log the breakdown
 $pass = (($missingRequired.Count + $valueMismatch.Count) -eq 0)
 if ($pass) {
     Write-VesLog OK 'Config verify PASS.' -LogFile $LogFile
@@ -112,6 +120,7 @@ if ($pass) {
     foreach ($v in $valueMismatch)   { Write-VesLog DRIFT "  VALUE $($v.key): expected '$($v.expected)' actual '$($v.actual)'" -LogFile $LogFile }
 }
 
+# structured result the caller (Invoke-Verification) folds into its own report
 [PSCustomObject]@{
     pass               = $pass
     # .ToArray(), not @(): @() on a List[object] throws under Set-StrictMode 2.0

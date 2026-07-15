@@ -1,7 +1,5 @@
 #Requires -Version 5.1
 <#
-.SYNOPSIS
-    Pre-deploy gate for manual-copy releases. Run before the file copy.
 .DESCRIPTION
     Two checks against SSM-pinned values:
       1. staged commit equals the UAT-approved commit
@@ -29,6 +27,7 @@ param(
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
 
+# central block path: log the reason, honor an audited break-glass override, else block the deploy
 function Fail-Gate([string]$msg) {
     Write-VesLog ERROR "GATE FAIL: $msg" -Data @{processor=$Processor;staged=$StagedCommit} -LogFile $LogFile
     if ($AllowOverride) {
@@ -46,6 +45,7 @@ function Fail-Gate([string]$msg) {
 }
 
 try {
+    # Gate 1 (commit): the staged commit must equal the UAT-approved commit pinned in SSM
     $approved = Get-VesTrustedHash -ParameterName $ApprovedCommitParam -Region $Region
     Write-VesLog INFO "Approved commit (SSM): $approved" -LogFile $LogFile
 
@@ -54,6 +54,7 @@ try {
     }
     Write-VesLog OK 'Commit gate PASS.' -LogFile $LogFile
 
+    # Gate 2 (content, optional): the staged bytes must hash to the trusted manifest
     if ($TrustParam) {
         # content gate: right commit label isn't enough, the staged bytes have to match too
         $trustedHash = Get-VesTrustedHash -ParameterName $TrustParam -Region $Region
@@ -65,6 +66,7 @@ try {
         Write-VesLog OK 'Content gate PASS.' -LogFile $LogFile
     }
 
+    # both gates passed: signal the deploy may proceed
     Write-VesLog OK "GATE PASS: deploy may proceed (staged=$StagedCommit approved)." -LogFile $LogFile
     exit $VES_EXIT_OK
 }

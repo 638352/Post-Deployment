@@ -2,6 +2,7 @@
 # Shared functions for post-deployment verification.
 # Windows PowerShell 5.1 only, no 7.x syntax.
 
+# Fail on unset variables / bad property access so latent bugs surface loudly
 Set-StrictMode -Version 2.0
 
 # Exit codes used by all entry scripts:
@@ -24,10 +25,12 @@ function Write-VesLog {
         [hashtable]$Data,
         [string]$LogFile
     )
+    # build the record: UTC timestamp + level + message, then fold in any extra -Data fields
     $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
     $record = [ordered]@{ ts = $ts; level = $Level; msg = $Message }
     if ($Data) { foreach ($k in $Data.Keys) { $record[$k] = $Data[$k] } }
 
+    # human-facing console line, colour-coded by level
     $color = @{ INFO='Gray'; OK='Green'; WARN='Yellow'; ERROR='Red'; DRIFT='Magenta' }[$Level]
     Write-Host ("[{0}] {1,-5} {2}" -f $ts, $Level, $Message) -ForegroundColor $color
 
@@ -54,9 +57,11 @@ function Get-VesManifest {
     if (-not (Test-Path -LiteralPath $ReleaseRoot)) {
         throw "ReleaseRoot not found: $ReleaseRoot"
     }
+    # normalize the root and enumerate every file beneath it (including hidden)
     $root = (Resolve-Path -LiteralPath $ReleaseRoot).Path.TrimEnd('\')
     $items = Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction Stop
 
+    # hash each in-scope file into a {RelPath, Sha256, Bytes} row, skipping excludes
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($f in $items) {
         $rel = $f.FullName.Substring($root.Length + 1)
@@ -74,10 +79,12 @@ function Get-VesManifestHash {
     # so whitespace/key-order/BOM differences can't break the trust comparison.
     [CmdletBinding()]
     param([Parameter(Mandatory)][object[]]$Manifest)
+    # serialize the manifest to one canonical "relpath|sha256|bytes" line per file, sorted
     $sb = New-Object System.Text.StringBuilder
     foreach ($e in ($Manifest | Sort-Object RelPath)) {
         [void]$sb.AppendLine(('{0}|{1}|{2}' -f $e.RelPath, $e.Sha256, $e.Bytes))
     }
+    # hash the canonical text; dispose the provider deterministically in finally
     $bytes = [Text.Encoding]::UTF8.GetBytes($sb.ToString())
     $sha = [Security.Cryptography.SHA256]::Create()
     try   { return -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) }
@@ -92,6 +99,7 @@ function Export-VesManifest {
         [string]$CommitSha = 'unknown',
         [string]$Processor = 'unknown'
     )
+    # wrap the file list in a versioned document with provenance (who/when/commit) + its trust hash
     $manifestHash = Get-VesManifestHash -Manifest $Manifest
     $doc = [ordered]@{
         schema       = 'ves.manifest.v1'
@@ -103,9 +111,11 @@ function Export-VesManifest {
         fileCount    = $Manifest.Count
         files        = $Manifest
     }
+    # ensure the target directory exists, then write the manifest as JSON
     $dir = Split-Path -Parent $Path
     if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     ($doc | ConvertTo-Json -Depth 6) | Out-File -FilePath $Path -Encoding utf8
+    # hand the hash back so the caller can pin it to SSM
     return $manifestHash
 }
 
@@ -113,9 +123,10 @@ function Import-VesManifest {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { throw "Manifest not found: $Path" }
+    # load the stored document, then recompute its hash so callers can detect a manifest edited after capture
     $doc = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json
-    # recompute so callers can detect a manifest edited after capture
     $recomputed = Get-VesManifestHash -Manifest $doc.files
+    # Consistent = the stored hash still matches the file list it claims to describe
     return [PSCustomObject]@{
         Doc            = $doc
         StoredHash     = $doc.manifestHash
@@ -138,6 +149,7 @@ function Compare-VesFiles {
         # -ExcludePattern if a system's config is genuinely byte-identical.
         [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp|config)$'
     )
+    # hash the live tree the same way, then index both sides by relative path for lookup
     $live = Get-VesManifest -ReleaseRoot $ReleaseRoot -ExcludePattern $ExcludePattern
     $baseMap = @{}; foreach ($b in $Baseline) { $baseMap[$b.RelPath] = $b }
     $liveMap = @{}; foreach ($l in $live)     { $liveMap[$l.RelPath] = $l }
@@ -146,12 +158,14 @@ function Compare-VesFiles {
     $changed = New-Object System.Collections.Generic.List[object]
     $extra   = New-Object System.Collections.Generic.List[string]
 
+    # walk the baseline: anything absent live is missing, anything with a different hash is changed
     foreach ($rel in $baseMap.Keys) {
         if (-not $liveMap.ContainsKey($rel)) { $missing.Add($rel); continue }
         if ($liveMap[$rel].Sha256 -ne $baseMap[$rel].Sha256) {
             $changed.Add([PSCustomObject]@{ RelPath=$rel; Expected=$baseMap[$rel].Sha256; Actual=$liveMap[$rel].Sha256 })
         }
     }
+    # anything live that the baseline never recorded is an unexpected extra
     foreach ($rel in $liveMap.Keys) { if (-not $baseMap.ContainsKey($rel)) { $extra.Add($rel) } }
 
     # Return plain arrays, not List[object]. Under Set-StrictMode 2.0 the @() and
@@ -178,9 +192,11 @@ function Get-VesTrustedHash {
         [Parameter(Mandatory)][string]$ParameterName,
         [string]$Region = 'us-gov-west-1'
     )
-    # AWS CLI rather than the AWSPowerShell module; legacy hosts won't have the module
+    # read the SecureString parameter (KMS-decrypted) via the AWS CLI rather than
+    # the AWSPowerShell module; legacy hosts won't have the module
     $raw = & aws ssm get-parameter --name $ParameterName --with-decryption `
         --region $Region --query 'Parameter.Value' --output text 2>$null
+    # a non-zero exit or empty value means auth/KMS/path failure: throw, never return blank
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
         throw "SSM read failed for $ParameterName (region $Region). aws exit=$LASTEXITCODE"
     }
@@ -194,11 +210,13 @@ function Set-VesTrustedHash {
         [Parameter(Mandatory)][string]$Value,
         [string]$Region = 'us-gov-west-1'
     )
+    # pin the value as a SecureString, overwriting any prior pin; throw if the write is rejected
     & aws ssm put-parameter --name $ParameterName --value $Value --type SecureString `
         --overwrite --region $Region | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "SSM write failed for $ParameterName. aws exit=$LASTEXITCODE" }
 }
 
+# public surface: only these functions are callable by the entry scripts
 Export-ModuleMember -Function `
     Write-VesLog, Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
     Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash

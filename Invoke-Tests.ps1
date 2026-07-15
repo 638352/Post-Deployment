@@ -1,16 +1,10 @@
 #Requires -Version 5.1
 <#
-.SYNOPSIS
-    Runs the ves-verify Pester suite. Dev/CI machine only, not the prod boxes.
 .DESCRIPTION
     Needs Pester 5.x; the in-box Pester 3.4 won't parse the tests. Install once:
-
         Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
-
     Run under Windows PowerShell 5.1 so the tests use the same engine as prod:
-
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1
-
     Exit code is the failed-test count (0 = green).
 .PARAMETER Path
     Test path. Defaults to the tests\ folder next to this script.
