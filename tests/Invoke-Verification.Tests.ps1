@@ -1,9 +1,7 @@
 #Requires -Version 5.1
-# End-to-end tests for Invoke-Verification.ps1 — filesystem-only paths (no AWS).
-# We omit -TrustParam throughout so nothing calls SSM; the trust-anchored paths
-# are covered by the separate "comprehensive + mocked SSM" scope. Each case runs
-# the script as a real child process and asserts the documented exit code
-# (0 match / 1 drift / 2 no-baseline / 10 usage) plus -Json status.
+# Invoke-Verification.ps1, filesystem paths only. No -TrustParam anywhere, so
+# nothing hits SSM. Checks the exit-code contract: 0 match, 1 drift, 2 no
+# baseline, 10 usage.
 
 BeforeAll {
     . (Join-Path $PSScriptRoot '_helpers.ps1')
@@ -17,21 +15,21 @@ BeforeAll {
         '-ManifestPath',$script:ManifestPath,'-Processor','test','-Json')
 }
 
-Describe 'Invoke-Verification Capture' {
-    It 'captures a baseline and exits 0' {
+Describe 'Capture' {
+    It 'exits 0 and reports captured' {
         $script:Cap.ExitCode   | Should -Be 0
         $script:Cap.Json.status | Should -Be 'captured'
     }
-    It 'writes the manifest file' {
+    It 'writes the manifest' {
         Test-Path -LiteralPath $script:ManifestPath | Should -BeTrue
     }
-    It 'warns that the baseline is not trust-anchored (no -TrustParam)' {
+    It 'warns when there is no trust anchor' {
         $script:Cap.Output | Should -Match 'NOT trust-anchored'
     }
 }
 
-Describe 'Invoke-Verification VerifyFiles' {
-    It 'passes when prod matches the baseline (exit 0, status match)' {
+Describe 'VerifyFiles' {
+    It 'passes a matching tree' {
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
             '-Mode','VerifyFiles','-ReleaseRoot',$script:Release,
             '-ManifestPath',$script:ManifestPath,'-Json')
@@ -39,7 +37,7 @@ Describe 'Invoke-Verification VerifyFiles' {
         $r.Json.status | Should -Be 'match'
     }
 
-    It 'reports drift when a file changes (exit 1, status drift)' {
+    It 'reports drift on a changed file' {
         $drift = New-VesTree (Join-Path $script:Root 'drift')
         Set-Content -Path (Join-Path $drift 'app.txt') -Value 'CHANGED' -NoNewline
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
@@ -50,10 +48,10 @@ Describe 'Invoke-Verification VerifyFiles' {
         $r.Output      | Should -Match 'File verify FAIL'
     }
 
-    It 'exits 2 (no-baseline) on a tampered manifest' {
+    It 'exits 2 on a tampered manifest' {
         $tampered = Join-Path $script:Root 'tampered.json'
         $doc = Get-Content -LiteralPath $script:ManifestPath -Raw | ConvertFrom-Json
-        $doc.files[0].Sha256 = ('F' * 64)   # edit content but leave manifestHash claim intact
+        $doc.files[0].Sha256 = ('F' * 64)
         ($doc | ConvertTo-Json -Depth 6) | Out-File -FilePath $tampered -Encoding utf8
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
             '-Mode','VerifyFiles','-ReleaseRoot',$script:Release,
@@ -62,7 +60,7 @@ Describe 'Invoke-Verification VerifyFiles' {
         $r.Output   | Should -Match 'self-hash mismatch'
     }
 
-    It 'exits 10 (usage) when -ManifestPath is omitted' {
+    It 'exits 10 without -ManifestPath' {
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
             '-Mode','VerifyFiles','-ReleaseRoot',$script:Release,'-Json')
         $r.ExitCode | Should -Be 10

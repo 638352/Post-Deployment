@@ -1,9 +1,7 @@
 #Requires -Version 5.1
-# Tests for Verify-Config.ps1 across all three contract formats (appconfig / json
-# / keyvalue). Unlike the other entry scripts, Verify-Config returns a result
-# object instead of calling exit, so we invoke it IN-PROCESS and assert on .pass /
-# .missingRequired / .valueMismatch. Fixtures carry no ssmExpectedValues, so no
-# AWS is touched. Failing contracts are synthesized per-test under TestDrive.
+# Verify-Config.ps1 across the three contract formats. It returns an object
+# instead of calling exit, so we run it in-process and check .pass. Fixtures have
+# no ssmExpectedValues, so no SSM. Failing contracts are built per-test.
 
 BeforeAll {
     . (Join-Path $PSScriptRoot '_helpers.ps1')
@@ -21,14 +19,14 @@ Describe 'Verify-Config (<Fmt>)' -ForEach @(
         $script:ConfigPath   = Join-Path $script:Fx (Join-Path $Fmt $Config)
     }
 
-    It 'passes when the config satisfies the contract' {
+    It 'passes when the config meets the contract' {
         $r = & $script:VerifyConfig -ContractPath $script:ContractPath -ConfigPath $script:ConfigPath
         $r.pass | Should -BeTrue
         @($r.missingRequired).Count | Should -Be 0
         @($r.valueMismatch).Count   | Should -Be 0
     }
 
-    It 'fails with a value mismatch when an expected value is wrong' {
+    It 'fails on a wrong expected value' {
         $bad = Join-Path $TestDrive "bad-value-$Fmt.json"
         $c = Get-Content -LiteralPath $script:ContractPath -Raw | ConvertFrom-Json
         $firstKey = ($c.expectedValues.PSObject.Properties | Select-Object -First 1).Name
@@ -40,7 +38,7 @@ Describe 'Verify-Config (<Fmt>)' -ForEach @(
         @($r.valueMismatch).Count | Should -BeGreaterThan 0
     }
 
-    It 'fails with a missing key when a required key is absent from the config' {
+    It 'fails when a required key is absent' {
         $bad = Join-Path $TestDrive "missing-key-$Fmt.json"
         $c = Get-Content -LiteralPath $script:ContractPath -Raw | ConvertFrom-Json
         $c.requiredKeys = @('this.key.is.absent')
@@ -52,12 +50,12 @@ Describe 'Verify-Config (<Fmt>)' -ForEach @(
     }
 }
 
-Describe 'Verify-Config error handling' {
-    It 'throws when the contract file does not exist' {
+Describe 'Verify-Config errors' {
+    It 'throws on a missing contract file' {
         { & $script:VerifyConfig -ContractPath (Join-Path $TestDrive 'no-contract.json') `
               -ConfigPath (Join-Path $script:Fx 'json\config.json') } | Should -Throw
     }
-    It 'throws when the config file does not exist' {
+    It 'throws on a missing config file' {
         { & $script:VerifyConfig -ContractPath (Join-Path $script:Fx 'json\contract.json') `
               -ConfigPath (Join-Path $TestDrive 'no-config.json') } | Should -Throw
     }

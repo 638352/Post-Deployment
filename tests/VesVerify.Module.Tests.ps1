@@ -1,28 +1,27 @@
 #Requires -Version 5.1
-# Unit tests for module\VesVerify.psm1 — the pure, side-effect-light functions.
-# No AWS / host / network dependency; everything runs against a TestDrive tree.
-# Pester 5.x.
+# Unit tests for the VesVerify module functions. Everything runs against a
+# TestDrive tree; no AWS, host state, or network.
 
 BeforeAll {
     $script:ModulePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'module\VesVerify.psm1'
     Import-Module $script:ModulePath -Force
 
-    # Build a small tree under TestDrive with a mix of kept and excluded files.
-    # Exclusions per the module default: any path segment logs\ temp\ cache\ .git\,
-    # or a file ending .log .tmp .config.
+    # two real files plus some the default exclude drops: the *.config/*.log/*.tmp
+    # extensions, and nested logs\ / .git\ dirs. The dir rules need \logs\ / \.git\
+    # with a leading separator, so they only bite below the root - hence sub\.
     $script:Tree = Join-Path $TestDrive 'release'
     New-Item -ItemType Directory -Path $script:Tree -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $script:Tree 'bin')  -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $script:Tree 'logs') -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $script:Tree '.git') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $script:Tree 'bin')       -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $script:Tree 'sub\logs')  -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $script:Tree 'sub\.git')  -Force | Out-Null
 
-    Set-Content -Path (Join-Path $script:Tree 'keep1.txt')      -Value 'alpha' -NoNewline
-    Set-Content -Path (Join-Path $script:Tree 'bin\keep2.dll')  -Value 'beta'  -NoNewline
-    Set-Content -Path (Join-Path $script:Tree 'app.config')     -Value 'drop-config' -NoNewline  # excluded (.config)
-    Set-Content -Path (Join-Path $script:Tree 'trace.log')      -Value 'drop-log'    -NoNewline  # excluded (.log)
-    Set-Content -Path (Join-Path $script:Tree 'scratch.tmp')    -Value 'drop-tmp'    -NoNewline  # excluded (.tmp)
-    Set-Content -Path (Join-Path $script:Tree 'logs\run.txt')   -Value 'drop-logsdir' -NoNewline # excluded (\logs\)
-    Set-Content -Path (Join-Path $script:Tree '.git\HEAD')      -Value 'drop-git'    -NoNewline  # excluded (\.git\)
+    Set-Content -Path (Join-Path $script:Tree 'keep1.txt')        -Value 'alpha' -NoNewline
+    Set-Content -Path (Join-Path $script:Tree 'bin\keep2.dll')    -Value 'beta'  -NoNewline
+    Set-Content -Path (Join-Path $script:Tree 'app.config')       -Value 'drop-config'  -NoNewline
+    Set-Content -Path (Join-Path $script:Tree 'trace.log')        -Value 'drop-log'     -NoNewline
+    Set-Content -Path (Join-Path $script:Tree 'scratch.tmp')      -Value 'drop-tmp'     -NoNewline
+    Set-Content -Path (Join-Path $script:Tree 'sub\logs\run.txt') -Value 'drop-logsdir' -NoNewline
+    Set-Content -Path (Join-Path $script:Tree 'sub\.git\HEAD')    -Value 'drop-git'     -NoNewline
 }
 
 Describe 'Get-VesManifest' {
@@ -35,35 +34,34 @@ Describe 'Get-VesManifest' {
         $rels.Count | Should -Be 2
     }
 
-    It 'excludes .config / .log / .tmp / logs\ / .git\ paths' {
+    It 'drops .config / .log / .tmp files and nested logs\ / .git\ dirs' {
         $rels = $script:Manifest.RelPath
         $rels | Should -Not -Contain 'app.config'
         $rels | Should -Not -Contain 'trace.log'
         $rels | Should -Not -Contain 'scratch.tmp'
-        $rels | Should -Not -Contain 'logs/run.txt'
-        $rels | Should -Not -Contain '.git/HEAD'
+        $rels | Should -Not -Contain 'sub/logs/run.txt'
+        $rels | Should -Not -Contain 'sub/.git/HEAD'
     }
 
-    It 'emits forward-slash relative paths (no absolute, no backslash)' {
+    It 'uses forward-slash relative paths' {
         foreach ($e in $script:Manifest) {
             $e.RelPath | Should -Not -Match '\\'
             $e.RelPath | Should -Not -Match '^[A-Za-z]:'
         }
     }
 
-    It 'returns entries sorted by RelPath' {
+    It 'sorts by RelPath' {
         $rels = @($script:Manifest.RelPath)
-        $sorted = @($rels | Sort-Object)
-        ($rels -join '|') | Should -Be ($sorted -join '|')
+        ($rels -join '|') | Should -Be ((@($rels | Sort-Object)) -join '|')
     }
 
-    It 'records a SHA-256 hash and byte length per file' {
+    It 'records hash and byte length' {
         $keep1 = $script:Manifest | Where-Object RelPath -eq 'keep1.txt'
         $keep1.Sha256 | Should -Match '^[0-9A-F]{64}$'
         $keep1.Bytes  | Should -Be 5   # 'alpha'
     }
 
-    It 'throws when the release root does not exist' {
+    It 'throws on a missing release root' {
         { Get-VesManifest -ReleaseRoot (Join-Path $TestDrive 'nope') } | Should -Throw
     }
 }
@@ -71,11 +69,11 @@ Describe 'Get-VesManifest' {
 Describe 'Get-VesManifestHash' {
     BeforeAll { $script:M = Get-VesManifest -ReleaseRoot $script:Tree }
 
-    It 'is deterministic for the same input' {
+    It 'is stable for the same input' {
         (Get-VesManifestHash -Manifest $script:M) | Should -Be (Get-VesManifestHash -Manifest $script:M)
     }
 
-    It 'is independent of input ordering (function sorts internally)' {
+    It 'ignores input ordering' {
         $reversed = @($script:M | Sort-Object RelPath -Descending)
         (Get-VesManifestHash -Manifest $reversed) | Should -Be (Get-VesManifestHash -Manifest $script:M)
     }
@@ -95,9 +93,8 @@ Describe 'Export-VesManifest / Import-VesManifest' {
         $script:Pinned = Export-VesManifest -Manifest $script:M -Path $script:Out -CommitSha 'abc123' -Processor 'unit'
     }
 
-    It 'writes a manifest whose stored hash equals the returned pin' {
-        $imp = Import-VesManifest -Path $script:Out
-        $imp.StoredHash | Should -Be $script:Pinned
+    It 'stores the hash it returned' {
+        (Import-VesManifest -Path $script:Out).StoredHash | Should -Be $script:Pinned
     }
 
     It 'round-trips as self-consistent' {
@@ -108,8 +105,8 @@ Describe 'Export-VesManifest / Import-VesManifest' {
         $imp.Doc.commitSha | Should -Be 'abc123'
     }
 
-    It 'detects a manifest edited after capture (tamper)' {
-        # flip one file hash in the persisted JSON, leave the stored manifestHash as-is
+    It 'flags a manifest edited after capture' {
+        # change a file hash but leave the stored manifestHash alone
         $doc = Get-Content -LiteralPath $script:Out -Raw | ConvertFrom-Json
         $doc.files[0].Sha256 = ('F' * 64)
         ($doc | ConvertTo-Json -Depth 6) | Out-File -FilePath $script:Out -Encoding utf8
@@ -119,21 +116,19 @@ Describe 'Export-VesManifest / Import-VesManifest' {
         $imp.StoredHash | Should -Not -Be $imp.RecomputedHash
     }
 
-    It 'throws on a missing manifest path' {
+    It 'throws on a missing path' {
         { Import-VesManifest -Path (Join-Path $TestDrive 'absent.json') } | Should -Throw
     }
 }
 
 Describe 'Compare-VesFiles' {
     BeforeEach {
-        # fresh baseline captured from the canonical tree
         $script:Baseline = Get-VesManifest -ReleaseRoot $script:Tree
-        # a live copy we can mutate per test
         $script:Live = Join-Path $TestDrive ('live-{0}' -f ([guid]::NewGuid().ToString('N')))
         Copy-Item -Path $script:Tree -Destination $script:Live -Recurse
     }
 
-    It 'reports Match when the tree is byte-identical to the baseline' {
+    It 'matches an identical tree' {
         $cmp = Compare-VesFiles -Baseline $script:Baseline -ReleaseRoot $script:Live
         $cmp.Match | Should -BeTrue
         $cmp.Missing.Count | Should -Be 0
@@ -141,37 +136,37 @@ Describe 'Compare-VesFiles' {
         $cmp.Extra.Count   | Should -Be 0
     }
 
-    It 'detects a missing file' {
+    It 'catches a missing file' {
         Remove-Item (Join-Path $script:Live 'keep1.txt')
         $cmp = Compare-VesFiles -Baseline $script:Baseline -ReleaseRoot $script:Live
         $cmp.Match   | Should -BeFalse
         $cmp.Missing | Should -Contain 'keep1.txt'
     }
 
-    It 'detects a changed file' {
+    It 'catches a changed file' {
         Set-Content -Path (Join-Path $script:Live 'keep1.txt') -Value 'ALPHA-CHANGED' -NoNewline
         $cmp = Compare-VesFiles -Baseline $script:Baseline -ReleaseRoot $script:Live
         $cmp.Match | Should -BeFalse
         @($cmp.Changed.RelPath) | Should -Contain 'keep1.txt'
     }
 
-    It 'detects an extra file' {
+    It 'catches an extra file' {
         Set-Content -Path (Join-Path $script:Live 'surprise.txt') -Value 'new' -NoNewline
         $cmp = Compare-VesFiles -Baseline $script:Baseline -ReleaseRoot $script:Live
         $cmp.Match | Should -BeFalse
         $cmp.Extra | Should -Contain 'surprise.txt'
     }
 
-    It 'returns plain arrays for the result lists (StrictMode 2.0 safe)' {
+    It 'hands back plain arrays' {
+        # the module returns .ToArray() so @() on the results is safe under StrictMode 2.0
         $cmp = Compare-VesFiles -Baseline $script:Baseline -ReleaseRoot $script:Live
-        # @() on a List[object] throws under StrictMode 2.0; the module returns .ToArray()
         { @($cmp.Missing); @($cmp.Changed); @($cmp.Extra) } | Should -Not -Throw
         ,$cmp.Changed | Should -BeOfType [System.Array]
     }
 }
 
 Describe 'Write-VesLog' {
-    It 'writes a single-line JSON record with ts/level/msg to the log file' {
+    It 'writes one JSON record with ts/level/msg' {
         $log = Join-Path $TestDrive ('log-{0}.jsonl' -f ([guid]::NewGuid().ToString('N')))
         Write-VesLog -Level OK -Message 'hello world' -LogFile $log
         $rec = Get-Content -LiteralPath $log -Raw | ConvertFrom-Json
@@ -180,7 +175,7 @@ Describe 'Write-VesLog' {
         $rec.ts    | Should -Match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
     }
 
-    It 'merges -Data keys into the record' {
+    It 'folds -Data keys into the record' {
         $log = Join-Path $TestDrive ('log-{0}.jsonl' -f ([guid]::NewGuid().ToString('N')))
         Write-VesLog -Level INFO -Message 'with data' -Data @{ processor = 'demo'; count = 3 } -LogFile $log
         $rec = Get-Content -LiteralPath $log -Raw | ConvertFrom-Json
@@ -188,7 +183,7 @@ Describe 'Write-VesLog' {
         $rec.count     | Should -Be 3
     }
 
-    It 'rejects a level outside the ValidateSet' {
+    It 'rejects an unknown level' {
         { Write-VesLog -Level BOGUS -Message 'x' } | Should -Throw
     }
 }
