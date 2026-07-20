@@ -158,6 +158,10 @@ per target per run under its -LogDir. Point whatever monitoring you run at those
 logs (a `"level":"DRIFT"` or `"ERROR"` line = drift/trust failure) and at the
 scheduled task's Last Run Result; a missing/stale run log means the task died.
 
+Datadog hooks in the gate/deploy/health paths are best-effort and never block
+deploy/verify outcomes. Set `DD_API_KEY` for event posting and `DD_ENV`
+(defaults to `prod`) to control the `env:` tag on emitted Datadog metrics/events.
+
 ## Limits
 
 File verify proves prod has the same bytes UAT approved. It does not prove

@@ -191,3 +191,18 @@ Describe 'Write-VesLog' {
         { Write-VesLog -Level BOGUS -Message 'x' } | Should -Throw
     }
 }
+
+Describe 'Get-VesDatadogEnvTag' {
+    BeforeEach { $script:OldDdEnv = $env:DD_ENV }
+    AfterEach { $env:DD_ENV = $script:OldDdEnv }
+
+    It 'defaults to env:prod when DD_ENV is not set' {
+        $env:DD_ENV = $null
+        (Get-VesDatadogEnvTag) | Should -Be 'env:prod'
+    }
+
+    It 'uses normalized DD_ENV when provided' {
+        $env:DD_ENV = '  UAT  '
+        (Get-VesDatadogEnvTag) | Should -Be 'env:uat'
+    }
+}

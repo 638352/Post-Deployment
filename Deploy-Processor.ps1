@@ -53,7 +53,7 @@ $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 
 # Low-cardinality tags shared by every deploy event emitted to Datadog.
-$ddTags = @("processor:$Processor", "env:prod")
+$ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag))
 
 # run a named stage; if it exits non-zero, abort the whole deploy with that stage's code
 function Step($name, $code) {
