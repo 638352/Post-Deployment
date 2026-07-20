@@ -83,8 +83,10 @@ $live = Get-FlatConfig -path $ConfigPath -format $contract.format
 $missingRequired = New-Object System.Collections.Generic.List[string]
 $valueMismatch   = New-Object System.Collections.Generic.List[object]
 
-# requiredKeys: presence only, value irrelevant
-foreach ($k in @($contract.requiredKeys)) {
+# requiredKeys: presence only, value irrelevant. Filter out $null/blank so a
+# contract that omits requiredKeys doesn't pass $null to Hashtable.ContainsKey
+# (which throws "Key cannot be null" -> caller maps it to a false exit 2).
+foreach ($k in @($contract.requiredKeys | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
     if (-not $live.ContainsKey($k)) { $missingRequired.Add($k) }
 }
 # expectedValues: must be present AND equal to the value pinned in the contract file
