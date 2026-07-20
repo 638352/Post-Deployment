@@ -28,7 +28,7 @@ Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
 
 # Low-cardinality tags shared by every gate event emitted to Datadog.
-$ddTags = @("processor:$Processor", "env:prod")
+$ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag))
 
 # central block path: log the reason, honor an audited break-glass override, else block the deploy
 function Fail-Gate([string]$msg) {

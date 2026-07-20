@@ -41,6 +41,14 @@ function Out-Result([int]$code) {
     exit $code
 }
 
+# Emit the verify outcome to Datadog as gauges (non-fatal), mirroring Invoke-HealthCheck.
+# $ok = prod matches baseline; $mismatch = count of drifted items. Never blocks a verify.
+function Send-VerifyMetric([bool]$ok, [int]$mismatch) {
+    $ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag), 'check:verify', "mode:$Mode")
+    Send-VesDatadogMetric -Metric 'deployment.verify.status'   -Value ([int]$ok) -Tags $ddTags
+    Send-VesDatadogMetric -Metric 'deployment.verify.mismatch' -Value $mismatch  -Tags $ddTags
+}
+
 try {
     switch ($Mode) {
 
@@ -104,11 +112,14 @@ try {
             }
             # files-only mode returns here; All mode stashes the result and falls through to config
             $filesOk = $cmp.Match
+            $fileMismatch = $cmp.Missing.Count + $cmp.Changed.Count + $cmp.Extra.Count
             if ($Mode -eq 'VerifyFiles') {
                 $result.status = if ($filesOk) {'match'} else {'drift'}
+                Send-VerifyMetric $filesOk $fileMismatch
                 Out-Result ($(if ($filesOk) { $VES_EXIT_OK } else { $VES_EXIT_DRIFT }))
             }
-            $script:filesOk = $filesOk   # All mode picks this up below
+            $script:filesOk = $filesOk               # All mode picks these up below
+            $script:fileMismatch = $fileMismatch
         }
     }
 
@@ -122,13 +133,16 @@ try {
         $cfg = & (Join-Path $PSScriptRoot 'Verify-Config.ps1') -ContractPath $ConfigContract -ConfigPath $ConfigPath -Region $Region -LogFile $LogFile
         $result['detail']['config'] = $cfg
         $configOk = [bool]$cfg.pass
+        $cfgMismatch = $cfg.missingRequired.Count + $cfg.valueMismatch.Count
         # config-only mode returns on config alone; All mode requires BOTH files and config to pass
         if ($Mode -eq 'VerifyConfig') {
             $result.status = if ($configOk) {'match'} else {'drift'}
+            Send-VerifyMetric $configOk $cfgMismatch
             Out-Result ($(if ($configOk) { $VES_EXIT_OK } else { $VES_EXIT_DRIFT }))
         }
         $allOk = ($script:filesOk -and $configOk)
         $result.status = if ($allOk) {'match'} else {'drift'}
+        Send-VerifyMetric $allOk ($script:fileMismatch + $cfgMismatch)
         Out-Result ($(if ($allOk) { $VES_EXIT_OK } else { $VES_EXIT_DRIFT }))
     }
 }

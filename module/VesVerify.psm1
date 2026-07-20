@@ -307,23 +307,41 @@ function Send-VesDatadogMetric {
         [int]$Port = 8125
     )
     # Monitoring must never break verification -- all failures here are warnings only.
+    $udp = $null
     try {
+        # Drop blank tags so the wire payload never contains empty tag values.
+        $cleanTags = @($Tags | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
         # Build the tag suffix only when tags exist ('|#tag1,tag2' per DogStatsD wire format).
-        $tagStr = if ($Tags.Count) { '|#' + ($Tags -join ',') } else { '' }
+        $tagStr = if ($cleanTags.Count) { '|#' + ($cleanTags -join ',') } else { '' }
+        # Format numeric values with invariant culture so decimal separators stay DogStatsD-safe.
+        $valueText = [System.Convert]::ToString($Value, [System.Globalization.CultureInfo]::InvariantCulture)
         # DogStatsD gauge wire format: name:value|g|#tags.
-        $payload = "{0}:{1}|g{2}" -f $Metric, $Value, $tagStr
+        $payload = "{0}:{1}|g{2}" -f $Metric, $valueText, $tagStr
         # Open a UDP client aimed at the local agent.
-        $udp = New-Object System.Net.Sockets.UdpClient($AgentHost, $Port)
+        $udp = New-Object System.Net.Sockets.UdpClient
+        $udp.Connect($AgentHost, $Port)
         # DogStatsD is ASCII on the wire.
         $bytes = [Text.Encoding]::ASCII.GetBytes($payload)
         # Fire-and-forget send; [void] discards the byte count return value.
         [void]$udp.Send($bytes, $bytes.Length)
-        # Release the socket immediately.
-        $udp.Close()
     } catch {
         # Log and continue -- a down agent must not fail the verify run.
         Write-Warning "Datadog metric emit failed (non-fatal): $($_.Exception.Message)"
+    } finally {
+        # Always release the UDP socket, including exception paths.
+        if ($udp) { $udp.Close() }
     }
+}
+
+function Get-VesDatadogEnvTag {
+    <#
+    .SYNOPSIS Returns the Datadog env tag, defaulting to env:prod.
+    #>
+    [CmdletBinding()]
+    param()
+    # Prefer DD_ENV (Datadog standard). Fall back to prod for stable dashboards.
+    $envTagValue = if ([string]::IsNullOrWhiteSpace($env:DD_ENV)) { 'prod' } else { $env:DD_ENV.Trim().ToLowerInvariant() }
+    return "env:$envTagValue"
 }
 
 function Send-VesDatadogEvent {
@@ -352,12 +370,14 @@ function Send-VesDatadogEvent {
     }
     # Same non-fatal posture as metrics.
     try {
+        # Drop blank tags so event metadata is deterministic and easy to filter.
+        $cleanTags = @($Tags | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
         # Assemble the Events API payload.
-        $body = @{ title=$Title; text=$Text; tags=$Tags; alert_type=$AlertType } | ConvertTo-Json -Depth 4
+        $body = @{ title=$Title; text=$Text; tags=$cleanTags; alert_type=$AlertType } | ConvertTo-Json -Depth 4
         # Events API v1 endpoint on the GovCloud site; key passed as query param per API contract.
-        $uri  = "https://api.$Site/api/v1/events?api_key=$ApiKey"
+        $uri  = "https://api.$Site/api/v1/events?api_key=$([Uri]::EscapeDataString($ApiKey))"
         # POST and discard the response body -- only success/failure matters here.
-        Invoke-RestMethod -Uri $uri -Method Post -Body $body -ContentType 'application/json' | Out-Null
+        Invoke-RestMethod -Uri $uri -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 10 | Out-Null
     } catch {
         # Log and continue -- Datadog outage must not block a deploy or verify.
         Write-Warning "Datadog event emit failed (non-fatal): $($_.Exception.Message)"
@@ -368,4 +388,4 @@ function Send-VesDatadogEvent {
 Export-ModuleMember -Function `
     Write-VesLog, Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
     Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash, `
-    Send-VesDatadogMetric, Send-VesDatadogEvent
+    Send-VesDatadogMetric, Send-VesDatadogEvent, Get-VesDatadogEnvTag
