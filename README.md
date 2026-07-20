@@ -159,8 +159,16 @@ logs (a `"level":"DRIFT"` or `"ERROR"` line = drift/trust failure) and at the
 scheduled task's Last Run Result; a missing/stale run log means the task died.
 
 Datadog hooks in the gate/deploy/health paths are best-effort and never block
-deploy/verify outcomes. Set `DD_API_KEY` for event posting and `DD_ENV`
-(defaults to `prod`) to control the `env:` tag on emitted Datadog metrics/events.
+deploy/verify outcomes. Two independent transports with different prerequisites:
+- **Events** (deploy/gate markers) POST to the ddog-gov Events API and need
+  `DD_API_KEY` set; without it they are skipped with a warning.
+- **Metrics** (verify/health gauges) are DogStatsD packets to a *local* Datadog
+  Agent on `127.0.0.1:8125`. On any box without a running agent they are silently
+  dropped — the primary check still runs, but nothing reaches the dashboard.
+  `Invoke-Preflight -CheckDatadog` reports whether the `datadogagent` service and
+  `DD_API_KEY` are in place.
+
+`DD_ENV` (defaults to `prod`) controls the `env:` tag on both metrics and events.
 
 ## Limits
 

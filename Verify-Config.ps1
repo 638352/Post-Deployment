@@ -125,7 +125,8 @@ if ($pass) {
 # structured result the caller (Invoke-Verification) folds into its own report
 [PSCustomObject]@{
     pass               = $pass
-    # .ToArray(), not @(): @() on a List[object] throws under Set-StrictMode 2.0
+    # .ToArray(), not @(): on PS 5.1, @() on a List[object] holding PSCustomObjects
+    # throws "Argument types do not match" (valueMismatch is such a list).
     missingRequired    = $missingRequired.ToArray()
     valueMismatch      = $valueMismatch.ToArray()
     machineKeysIgnored = @($contract.machineKeys)

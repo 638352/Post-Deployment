@@ -36,17 +36,20 @@ foreach ($t in $targets) {
     $log  = Join-Path $LogDir ("{0}_{1}.jsonl" -f $t.processor, $runStamp)
     Write-VesLog INFO "Drift check: $($t.processor)" -LogFile $log
 
-    # run a full files+config verify for this target
-    $args = @{
+    # run a full files+config verify for this target ($params, not $args:
+    # $args is a reserved automatic variable and reusing it invites refactor bugs)
+    $params = @{
         Mode = 'All'; ReleaseRoot = $t.releaseRoot; ManifestPath = $t.manifestPath
         TrustParam = $t.trustParam; ConfigContract = $t.configContract
         ConfigPath = $t.configPath; Processor = $t.processor; Region = $Region
         LogFile = $log; Json = $true
     }
-    $raw  = & $verify @args
+    $raw  = & $verify @params
     $code = $LASTEXITCODE   # grab before anything else runs
 
-    # classify the outcome and raise $worst accordingly (trust failure > drift > clean)
+    # classify the outcome and raise $worst accordingly (trust failure > drift > clean).
+    # Only exit 0 is clean: a usage/param error (10) or any other non-zero code means
+    # the target is misconfigured or the check didn't really run -- never report it clean.
     if ($code -eq $VES_EXIT_NOBASE) {
         Write-VesLog ERROR "DRIFT-CHECK TRUST FAIL $($t.processor): baseline missing/tampered during scheduled check." -LogFile $log
         if ($worst -lt $VES_EXIT_NOBASE) { $worst = $VES_EXIT_NOBASE }
@@ -55,8 +58,14 @@ foreach ($t in $targets) {
         Write-VesLog DRIFT "DRIFT DETECTED $($t.processor): prod diverged from baseline (no deploy expected)." -LogFile $log
         if ($worst -lt $VES_EXIT_DRIFT) { $worst = $VES_EXIT_DRIFT }
     }
-    else {
+    elseif ($code -eq $VES_EXIT_OK) {
         Write-VesLog OK "Clean: $($t.processor)" -LogFile $log
+    }
+    else {
+        # exit 10 (usage) or anything unexpected: the check couldn't be trusted to run.
+        # Surface it as at least a trust failure so monitoring doesn't read it as clean.
+        Write-VesLog ERROR "DRIFT-CHECK ERROR $($t.processor): verify exited $code (misconfigured target?); treating as not-clean." -LogFile $log
+        if ($worst -lt $VES_EXIT_NOBASE) { $worst = $VES_EXIT_NOBASE }
     }
 }
 

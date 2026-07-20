@@ -161,7 +161,10 @@ Send-VesDatadogMetric -Metric 'deployment.health.status'   -Value ([int]$healthy
 Send-VesDatadogMetric -Metric 'deployment.health.failures' -Value $fail.Count     -Tags $ddTags
 
 if ($Json) {
-    [PSCustomObject]@{ processor=$Processor; healthy=$healthy; failures=@($fail) } | ConvertTo-Json -Compress
+    # commit included for traceability (which build this liveness result belongs to);
+    # kept out of the Datadog tags above on purpose to avoid per-commit cardinality.
+    [PSCustomObject]@{ processor=$Processor; commit=$CommitSha; healthy=$healthy; failures=@($fail) } | ConvertTo-Json -Compress
 }
-Write-VesLog ($(if ($healthy){'OK'}else{'ERROR'})) ("Health check {0}" -f $(if ($healthy){'PASS'}else{'FAIL'})) -LogFile $LogFile
+Write-VesLog ($(if ($healthy){'OK'}else{'ERROR'})) ("Health check {0}" -f $(if ($healthy){'PASS'}else{'FAIL'})) `
+    -Data @{ processor=$Processor; commit=$CommitSha } -LogFile $LogFile
 exit ($(if ($healthy) { $VES_EXIT_OK } else { $VES_EXIT_HEALTH }))
