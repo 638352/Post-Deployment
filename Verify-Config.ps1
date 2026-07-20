@@ -83,8 +83,10 @@ $live = Get-FlatConfig -path $ConfigPath -format $contract.format
 $missingRequired = New-Object System.Collections.Generic.List[string]
 $valueMismatch   = New-Object System.Collections.Generic.List[object]
 
-# requiredKeys: presence only, value irrelevant
-foreach ($k in @($contract.requiredKeys)) {
+# requiredKeys: presence only, value irrelevant. Filter out $null/blank so a
+# contract that omits requiredKeys doesn't pass $null to Hashtable.ContainsKey
+# (which throws "Key cannot be null" -> caller maps it to a false exit 2).
+foreach ($k in @($contract.requiredKeys | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
     if (-not $live.ContainsKey($k)) { $missingRequired.Add($k) }
 }
 # expectedValues: must be present AND equal to the value pinned in the contract file
@@ -123,7 +125,8 @@ if ($pass) {
 # structured result the caller (Invoke-Verification) folds into its own report
 [PSCustomObject]@{
     pass               = $pass
-    # .ToArray(), not @(): @() on a List[object] throws under Set-StrictMode 2.0
+    # .ToArray(), not @(): on PS 5.1, @() on a List[object] holding PSCustomObjects
+    # throws "Argument types do not match" (valueMismatch is such a list).
     missingRequired    = $missingRequired.ToArray()
     valueMismatch      = $valueMismatch.ToArray()
     machineKeysIgnored = @($contract.machineKeys)
