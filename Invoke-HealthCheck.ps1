@@ -26,6 +26,12 @@ param(
     [string[]]$RequiredAssemblies = @(),
     [string]$ServiceName,
     [string]$ProcessName,
+    # When set alongside -ProcessName, uses WMI Win32_Process.CommandLine to
+    # match the specific instance whose command line contains this string. Required
+    # for the outbound .exe processors because the same VES.OutboundDBQProcessor.exe
+    # runs 2-3 times per server (once per processor folder) and can only be
+    # distinguished by its command-line arg (RTP for Ack/XML, RTPDP for DBQ).
+    [string]$ProcessCmdArg,
     # Task Scheduler jobs for the outbound processors, e.g.
     # VLER_EM_Real_Time_Outbound_Processor. Healthy = enabled + last run == 0.
     [string[]]$ScheduledTasks = @(),
@@ -73,10 +79,28 @@ if ($ServiceName) {
     } else { Write-VesLog OK "Service running: $ServiceName" -LogFile $LogFile }
 }
 elseif ($ProcessName) {
-    if (-not (Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)) {
-        $fail.Add("process:$ProcessName not found")
-        Write-VesLog ERROR "Process DOWN: $ProcessName" -LogFile $LogFile
-    } else { Write-VesLog OK "Process running: $ProcessName" -LogFile $LogFile }
+    if ($ProcessCmdArg) {
+        # same exe name runs multiple times per server (once per processor folder);
+        # use WMI to match the specific instance whose CommandLine contains the arg
+        try {
+            $wmiHits = @(Get-WmiObject Win32_Process -Filter "Name='$ProcessName'" -ErrorAction Stop |
+                         Where-Object { $_.CommandLine -like "*$ProcessCmdArg*" })
+            if ($wmiHits.Count -eq 0) {
+                $fail.Add("process:$ProcessName($ProcessCmdArg) not running")
+                Write-VesLog ERROR "Process DOWN: $ProcessName with arg '$ProcessCmdArg'" -LogFile $LogFile
+            } else {
+                Write-VesLog OK ("Process running: $ProcessName arg='$ProcessCmdArg' ({0} instance(s))" -f $wmiHits.Count) -LogFile $LogFile
+            }
+        } catch {
+            $fail.Add("process:$ProcessName($ProcessCmdArg) WMI error: $($_.Exception.Message)")
+            Write-VesLog ERROR "Process check WMI error: $($_.Exception.Message)" -LogFile $LogFile
+        }
+    } else {
+        if (-not (Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)) {
+            $fail.Add("process:$ProcessName not found")
+            Write-VesLog ERROR "Process DOWN: $ProcessName" -LogFile $LogFile
+        } else { Write-VesLog OK "Process running: $ProcessName" -LogFile $LogFile }
+    }
 }
 
 # Task Scheduler jobs: the outbound processors run as scheduled tasks, so their

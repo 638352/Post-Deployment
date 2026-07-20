@@ -57,3 +57,40 @@ Describe 'assembly load' {
         $r.Json.healthy | Should -BeTrue
     }
 }
+
+Describe 'process-by-cmdarg liveness' {
+    # Tests the WMI-backed per-instance check triggered when both -ProcessName and
+    # -ProcessCmdArg are supplied. Success cases need a live process and are skipped
+    # here; only failure paths (no match / wrong arg) are exercised.
+
+    It 'fails when no process with the given name is running' {
+        $r = Invoke-VesScript 'Invoke-HealthCheck.ps1' @(
+            '-ProcessName','VES.OutboundDBQProcessor.exe',
+            '-ProcessCmdArg','RTPDP',
+            '-Processor','hc','-Json')
+        $r.ExitCode     | Should -Be 3
+        $r.Json.healthy | Should -BeFalse
+        $r.Output       | Should -Match 'Process DOWN'
+    }
+
+    It 'fails when no running instance carries the expected cmdarg' {
+        # powershell.exe is always running but never with this arg string
+        $r = Invoke-VesScript 'Invoke-HealthCheck.ps1' @(
+            '-ProcessName','powershell.exe',
+            '-ProcessCmdArg','DEFINITELY_NOT_A_REAL_CMDARG_XYZ',
+            '-Processor','hc','-Json')
+        $r.ExitCode     | Should -Be 3
+        $r.Json.healthy | Should -BeFalse
+        $r.Output       | Should -Match 'Process DOWN'
+    }
+
+    It 'falls back to Get-Process when -ProcessCmdArg is not set' {
+        # powershell.exe is running; without -ProcessCmdArg the existing
+        # Get-Process name-only check should pass
+        $r = Invoke-VesScript 'Invoke-HealthCheck.ps1' @(
+            '-ProcessName','powershell',
+            '-Processor','hc','-Json')
+        $r.ExitCode     | Should -Be 0
+        $r.Json.healthy | Should -BeTrue
+    }
+}

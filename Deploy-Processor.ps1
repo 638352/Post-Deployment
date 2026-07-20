@@ -35,6 +35,14 @@ param(
     [string]$ConfigPath,
     [string[]]$RequiredAssemblies = @(),
     [string]$ServiceName,
+    # console EXE processors: exe filename (e.g. VES.OutboundDBQProcessor.exe).
+    # Combined with -ProcessCmdArg to kill the specific instance before copy.
+    [string]$ProcessName,
+    # command-line argument that identifies which instance to kill; required because
+    # the same exe runs 2-3 times per egress server (RTP for Ack/XML, RTPDP for DBQ).
+    # If both -ProcessName and -ProcessCmdArg are supplied, the matching process is
+    # killed before the robocopy and the folder's files are no longer held open.
+    [string]$ProcessCmdArg,
     # Task Scheduler jobs on THIS server to disable before copy / re-enable after,
     # e.g. VLER_EM_Real_Time_Outbound_Processor. Empty for service-only systems.
     [string[]]$ScheduledTasks = @(),
@@ -45,6 +53,9 @@ param(
     [string]$HealthUrl,
     # liveness for endpoint-less .exe processors; passed through to the health check
     [string]$FreshLogDir,
+    # batch file that starts the console EXE processor; launched after copy to
+    # restore liveness. The bat is responsible for the actual exe launch.
+    [string]$LaunchBat,
     [string]$Region = 'us-gov-west-1',
     [string]$LogFile
 )
@@ -108,6 +119,29 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 catch { Write-VesLog ERROR "Could not stop service $ServiceName -> $($_.Exception.Message)" -LogFile $LogFile; $stopFailed = $true }
             }
         }
+        # kill the specific console EXE instance before copy. Disabling the task does
+        # NOT terminate a running instance; the process holds the folder's files open
+        # until it exits, which would cause the robocopy to fail. Match by exe name +
+        # command-line arg so only the target instance is killed (same exe name runs
+        # 2-3 times per egress server with different args: RTP for Ack/XML, RTPDP for DBQ).
+        if (-not $stopFailed -and $ProcessName -and $ProcessCmdArg) {
+            try {
+                $wmiHits = @(Get-WmiObject Win32_Process -Filter "Name='$ProcessName'" -ErrorAction Stop |
+                             Where-Object { $_.CommandLine -like "*$ProcessCmdArg*" })
+                if ($wmiHits.Count -gt 0) {
+                    foreach ($p in $wmiHits) {
+                        Stop-Process -Id ([int]$p.ProcessId) -Force -ErrorAction Stop
+                        Write-VesLog INFO "Killed: $ProcessName pid=$($p.ProcessId) (arg=$ProcessCmdArg)" -LogFile $LogFile
+                    }
+                } else {
+                    # not running is a warning, not a hard stop; robocopy can proceed
+                    Write-VesLog WARN "No running '$ProcessName' with arg '$ProcessCmdArg'; nothing to kill." -LogFile $LogFile
+                }
+            } catch {
+                Write-VesLog ERROR "Could not kill $ProcessName($ProcessCmdArg) -> $($_.Exception.Message)" -LogFile $LogFile
+                $stopFailed = $true
+            }
+        }
         # only mirror the staged tree in once everything is safely stopped
         if (-not $stopFailed) {
             Write-VesLog INFO "Copy $StagedRoot -> $TargetRoot" -LogFile $LogFile
@@ -132,6 +166,20 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             try { Enable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
                   Write-VesLog INFO "Re-enabled task: $tn" -LogFile $LogFile }
             catch { Write-VesLog ERROR "FAILED to re-enable task $tn -> $($_.Exception.Message)" -LogFile $LogFile }
+        }
+        # relaunch the console EXE via its .bat so the processor is live again.
+        # Runs even if the copy failed so we never leave the processor down.
+        if ($LaunchBat) {
+            if (Test-Path -LiteralPath $LaunchBat) {
+                try {
+                    Start-Process -FilePath 'cmd.exe' -ArgumentList ('/c "' + $LaunchBat + '"')
+                    Write-VesLog INFO "Relaunched: $LaunchBat" -LogFile $LogFile
+                } catch {
+                    Write-VesLog ERROR "FAILED to relaunch $LaunchBat -> $($_.Exception.Message)" -LogFile $LogFile
+                }
+            } else {
+                Write-VesLog ERROR "LaunchBat not found (processor may be down): $LaunchBat" -LogFile $LogFile
+            }
         }
     }
     # a failed stop or copy aborts here (processor already restored by finally)
@@ -162,7 +210,8 @@ Step 'post-deploy verify' {
 Step 'health check' {
     & (Join-Path $here 'Invoke-HealthCheck.ps1') -RequiredAssemblies $RequiredAssemblies `
         -ServiceName $ServiceName -ScheduledTasks $ScheduledTasks -FreshLogDir $FreshLogDir `
-        -HealthUrl $HealthUrl -Processor $Processor -CommitSha $StagedCommit -LogFile $LogFile
+        -HealthUrl $HealthUrl -ProcessName $ProcessName -ProcessCmdArg $ProcessCmdArg `
+        -Processor $Processor -CommitSha $StagedCommit -LogFile $LogFile
 }
 
 # all five stages passed

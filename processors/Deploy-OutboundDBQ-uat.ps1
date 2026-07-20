@@ -42,6 +42,12 @@ $fixed = @{
     ConfigPath          = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe.config'
     BackupRoot          = 'C:\VLER_TEST_OUTBOUND\Processors\BackUp'
     ScheduledTasks      = @('VLER_EM_Realtime_DBQ_Processor')            # CONFIRM task name
+    # DBQ is identified by arg RTPDP; unique on this box, so ProcessCmdArg alone
+    # is sufficient. On a box where Ack (RTP) and XML (RTP) also run, each would
+    # need its own LaunchBat pointing to the right per-processor .bat.
+    ProcessName         = 'VES.OutboundDBQProcessor.exe'
+    ProcessCmdArg       = 'RTPDP'
+    LaunchBat           = 'C:\VLER_TEST_OUTBOUND\Batch\VLER_EM_Realtime_DBQ_Processor.bat'
     FreshLogDir         = 'C:\VLER_TEST_OUTBOUND\Logs\VES.OutboundProcessor'  # CONFIRM log dir
     RequiredAssemblies  = @('C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe')
     # DBQ has no actuator endpoint; leave these empty

@@ -65,6 +65,17 @@ $fixed = @{
     # stop/restart: the outbound processors run as Task Scheduler jobs on THIS
     # server. List only the jobs that live here (see VEMS-5346 note in header).
     ScheduledTasks      = @('VLER_EM_Real_Time_Outbound_Processor')
+    # console EXE stop/restart: kill the specific running instance before copy,
+    # then relaunch via the .bat after. Required because Disable-ScheduledTask
+    # does not terminate an already-running instance, which holds the folder's
+    # files open and causes the robocopy to fail.
+    # ProcessCmdArg identifies the instance: RTP for Ack/XML, RTPDP for DBQ.
+    # If two processors on this server share the same arg (Ack and XML both use
+    # RTP but live in different folders), add a second wrapper per processor so
+    # each targets only its own TargetRoot and LaunchBat.
+    ProcessName         = 'VES.OutboundDBQProcessor.exe'
+    ProcessCmdArg       = 'RTP'                                            # e.g. RTP (Ack/XML) or RTPDP (DBQ)
+    LaunchBat           = 'C:\VLER_Test\Batch\VLER_EM_Realtime_SYSTEM_NAME_Processor.bat'
     # health for an endpoint-less .exe: a fresh line in today's log proves life
     FreshLogDir         = 'C:\VLER_Test\Logs\VES.OutboundProcessor'
     # .NET assembly load check (defect UAT may have signed off on)
