@@ -75,8 +75,10 @@ function Get-VesManifest {
     param(
         # Root of the artifact tree to hash (UAT release dir or prod install dir).
         [Parameter(Mandatory)][string]$ReleaseRoot,
-        # Regex of paths to skip: logs/temp/cache/.git and log/tmp extensions cause false drift.
-        [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp)$'
+        # Regex of paths to skip: logs/temp/cache/.git and log/tmp/config extensions.
+        # .config is excluded by design (server-specific log4net paths); config is
+        # verified structurally by Verify-Config, not by byte-hash.
+        [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp|config)$'
     )
     # Fail early with a clear message if the root doesn't exist (bad path = usage error, not "0 files").
     if (-not (Test-Path -LiteralPath $ReleaseRoot)) {
@@ -210,7 +212,7 @@ function Compare-VesFiles {
         # Live production tree to compare.
         [Parameter(Mandatory)][string]$ReleaseRoot,
         # Must match the pattern used at capture, or excluded files appear as extras.
-        [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp)$'
+        [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp|config)$'
     )
     # Hash the live tree with the same rules used at capture time.
     $live = Get-VesManifest -ReleaseRoot $ReleaseRoot -ExcludePattern $ExcludePattern
@@ -237,10 +239,13 @@ function Compare-VesFiles {
     foreach ($rel in $liveMap.Keys) { if (-not $baseMap.ContainsKey($rel)) { $extra.Add($rel) } }
 
     # Aggregate verdict: match only when all three difference sets are empty.
+    # Return plain arrays (.ToArray), not Generic.List[T]. Under PS 5.1,
+    # @($list) on List[T] throws "Argument types do not match", which broke
+    # Invoke-Verification when building the JSON detail payload (exit 2).
     return [PSCustomObject]@{
-        Missing = $missing                                                       # Files that should exist but don't.
-        Changed = $changed                                                       # Files whose bytes differ from baseline.
-        Extra   = $extra                                                         # Files present that baseline doesn't know.
+        Missing = $missing.ToArray()                                             # Files that should exist but don't.
+        Changed = $changed.ToArray()                                             # Files whose bytes differ from baseline.
+        Extra   = $extra.ToArray()                                               # Files present that baseline doesn't know.
         Match   = (($missing.Count + $changed.Count + $extra.Count) -eq 0)       # True = prod byte-matches baseline.
     }
 }
