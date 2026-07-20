@@ -31,6 +31,10 @@ $runStamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
 
 # verify every target, tracking the worst exit code seen across all of them
 $worst = $VES_EXIT_OK
+# run-level counters + affected-processor lists feed the Datadog summary below
+$targetCount    = @($targets).Count
+$driftedNames   = New-Object System.Collections.Generic.List[string]
+$trustFailNames = New-Object System.Collections.Generic.List[string]
 foreach ($t in $targets) {
     # one JSONL log per target per run; a missing/stale file later means the task died
     $log  = Join-Path $LogDir ("{0}_{1}.jsonl" -f $t.processor, $runStamp)
@@ -49,15 +53,37 @@ foreach ($t in $targets) {
     # classify the outcome and raise $worst accordingly (trust failure > drift > clean)
     if ($code -eq $VES_EXIT_NOBASE) {
         Write-VesLog ERROR "DRIFT-CHECK TRUST FAIL $($t.processor): baseline missing/tampered during scheduled check." -LogFile $log
+        $trustFailNames.Add($t.processor)
         if ($worst -lt $VES_EXIT_NOBASE) { $worst = $VES_EXIT_NOBASE }
     }
     elseif ($code -eq $VES_EXIT_DRIFT) {
         Write-VesLog DRIFT "DRIFT DETECTED $($t.processor): prod diverged from baseline (no deploy expected)." -LogFile $log
+        $driftedNames.Add($t.processor)
         if ($worst -lt $VES_EXIT_DRIFT) { $worst = $VES_EXIT_DRIFT }
     }
     else {
         Write-VesLog OK "Clean: $($t.processor)" -LogFile $log
     }
+}
+
+# --- Datadog: scheduled drift-run summary (non-fatal) -----------------------
+# Per-target verify gauges already come from Invoke-Verification; here we emit
+# the run-level rollup so a scheduled drift sweep is visible/alertable on its own.
+# Tags stay low-cardinality: no per-target tags on the run rollup.
+$ddTags = @((Get-VesDatadogEnvTag), 'check:drift')
+Send-VesDatadogMetric -Metric 'deployment.drift.run.targets'   -Value $targetCount            -Tags $ddTags
+Send-VesDatadogMetric -Metric 'deployment.drift.run.drift'     -Value $driftedNames.Count     -Tags $ddTags
+Send-VesDatadogMetric -Metric 'deployment.drift.run.trustfail' -Value $trustFailNames.Count   -Tags $ddTags
+
+# Only raise an event when something needs attention -- a clean scheduled sweep
+# runs often and shouldn't spam the event stream. Trust failure outranks drift.
+if ($trustFailNames.Count -or $driftedNames.Count) {
+    $alertType = if ($trustFailNames.Count) { 'error' } else { 'warning' }
+    $lines = @()
+    if ($trustFailNames.Count) { $lines += "Trust failures: $($trustFailNames -join ', ')" }
+    if ($driftedNames.Count)   { $lines += "Drift: $($driftedNames -join ', ')" }
+    Send-VesDatadogEvent -Title "Drift sweep flagged $($trustFailNames.Count + $driftedNames.Count)/$targetCount target(s)" `
+        -Text ($lines -join "`n") -AlertType $alertType -Tags $ddTags
 }
 
 # exit with the worst code so the scheduled task's Last Run Result reflects any drift/trust failure
