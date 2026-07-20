@@ -216,7 +216,37 @@ function Set-VesTrustedHash {
     if ($LASTEXITCODE -ne 0) { throw "SSM write failed for $ParameterName. aws exit=$LASTEXITCODE" }
 }
 
+function Get-VesProcess {
+    # Returns CIM instances of Win32_Process matching -ProcessName and optionally
+    # -ProcessCmdArg (literal substring of CommandLine, case-insensitive).
+    # Uses Get-CimInstance so process properties are properly typed; single-quotes
+    # in the name are escaped before WQL interpolation.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProcessName,
+        [string]$ProcessCmdArg  # when set, CommandLine must contain this literal string
+    )
+    $wqlName = $ProcessName -replace "'","''"
+    $procs = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='$wqlName'" -ErrorAction Stop)
+    if ($ProcessCmdArg) {
+        $procs = @($procs | Where-Object { $null -ne $_.CommandLine -and
+            $_.CommandLine.IndexOf($ProcessCmdArg, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 })
+    }
+    return $procs
+}
+
+function Test-VesArgToken {
+    # Returns $true when the value is a safe command-line argument token: word
+    # characters, hyphens, and dots only (e.g. RTP, RTPDP, --config, v1.2).
+    # Used to guard ProcessCmdArg before WMI CommandLine matching and process kills
+    # so a misconfigured value cannot inadvertently match unrelated processes.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Value)
+    return [bool]($Value -match '^[\w.\-]+$')
+}
+
 # public surface: only these functions are callable by the entry scripts
 Export-ModuleMember -Function `
     Write-VesLog, Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
-    Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash
+    Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash, `
+    Get-VesProcess, Test-VesArgToken

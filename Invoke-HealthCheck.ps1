@@ -81,10 +81,15 @@ if ($ServiceName) {
 elseif ($ProcessName) {
     if ($ProcessCmdArg) {
         # same exe name runs multiple times per server (once per processor folder);
-        # use WMI to match the specific instance whose CommandLine contains the arg
+        # use WMI to match the specific instance whose CommandLine contains the arg.
+        # Validate the arg up front: it must be a simple token so an unexpected value
+        # cannot inadvertently match (and report healthy for) an unrelated process.
+        if (-not (Test-VesArgToken $ProcessCmdArg)) {
+            $fail.Add("process:invalid ProcessCmdArg '$ProcessCmdArg'")
+            Write-VesLog ERROR "ProcessCmdArg must contain only word characters, hyphens, or dots: '$ProcessCmdArg'" -LogFile $LogFile
+        } else {
         try {
-            $wmiHits = @(Get-WmiObject Win32_Process -Filter "Name='$ProcessName'" -ErrorAction Stop |
-                         Where-Object { $_.CommandLine -like "*$ProcessCmdArg*" })
+            $wmiHits = @(Get-VesProcess -ProcessName $ProcessName -ProcessCmdArg $ProcessCmdArg -ErrorAction Stop)
             if ($wmiHits.Count -eq 0) {
                 $fail.Add("process:$ProcessName($ProcessCmdArg) not running")
                 Write-VesLog ERROR "Process DOWN: $ProcessName with arg '$ProcessCmdArg'" -LogFile $LogFile
@@ -94,6 +99,7 @@ elseif ($ProcessName) {
         } catch {
             $fail.Add("process:$ProcessName($ProcessCmdArg) WMI error: $($_.Exception.Message)")
             Write-VesLog ERROR "Process check WMI error: $($_.Exception.Message)" -LogFile $LogFile
+        }
         }
     } else {
         if (-not (Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)) {

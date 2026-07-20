@@ -74,7 +74,11 @@ $fixed = @{
     # RTP but live in different folders), add a second wrapper per processor so
     # each targets only its own TargetRoot and LaunchBat.
     ProcessName         = 'VES.OutboundDBQProcessor.exe'
-    ProcessCmdArg       = 'RTP'                                            # e.g. RTP (Ack/XML) or RTPDP (DBQ)
+    # Set the arg that identifies THIS processor's instance. RTP = Ack or XML;
+    # RTPDP = DBQ. Each processor on a server gets its own wrapper script so
+    # the right arg (and LaunchBat) is wired in here, not chosen at run time.
+    # An empty string disables the process-kill step until this is filled in.
+    ProcessCmdArg       = ''                                               # CONFIRM: set RTP (Ack/XML) or RTPDP (DBQ)
     LaunchBat           = 'C:\VLER_Test\Batch\VLER_EM_Realtime_SYSTEM_NAME_Processor.bat'
     # health for an endpoint-less .exe: a fresh line in today's log proves life
     FreshLogDir         = 'C:\VLER_Test\Logs\VES.OutboundProcessor'

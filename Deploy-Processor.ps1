@@ -63,6 +63,24 @@ Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 
+# Guard against process-kill or bat-launch with unsafe values supplied to these
+# optional parameters. ProcessCmdArg must be a simple argument token (word chars,
+# hyphens, dots) so a misconfigured value cannot inadvertently kill unrelated
+# processes. LaunchBat must be an absolute, traversal-free path ending in .bat.
+if ($ProcessCmdArg -and -not (Test-VesArgToken $ProcessCmdArg)) {
+    Write-VesLog ERROR "ProcessCmdArg must contain only word characters, hyphens, or dots: '$ProcessCmdArg'" -LogFile $LogFile
+    exit $VES_EXIT_USAGE
+}
+if ($LaunchBat) {
+    # normalize first so GetFullPath resolves any relative segments;
+    # IsPathRooted + .bat extension check is sufficient after normalization
+    try { $LaunchBat = [System.IO.Path]::GetFullPath($LaunchBat) } catch {}
+    if (-not [System.IO.Path]::IsPathRooted($LaunchBat) -or $LaunchBat -notmatch '(?i)\.bat$') {
+        Write-VesLog ERROR "LaunchBat must be an absolute .bat path: '$LaunchBat'" -LogFile $LogFile
+        exit $VES_EXIT_USAGE
+    }
+}
+
 # run a named stage; if it exits non-zero, abort the whole deploy with that stage's code
 function Step($name, $code) {
     Write-VesLog INFO ">>> $name" -LogFile $LogFile
@@ -126,12 +144,17 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
         # 2-3 times per egress server with different args: RTP for Ack/XML, RTPDP for DBQ).
         if (-not $stopFailed -and $ProcessName -and $ProcessCmdArg) {
             try {
-                $wmiHits = @(Get-WmiObject Win32_Process -Filter "Name='$ProcessName'" -ErrorAction Stop |
-                             Where-Object { $_.CommandLine -like "*$ProcessCmdArg*" })
+                $wmiHits = @(Get-VesProcess -ProcessName $ProcessName -ProcessCmdArg $ProcessCmdArg -ErrorAction Stop)
                 if ($wmiHits.Count -gt 0) {
                     foreach ($p in $wmiHits) {
-                        Stop-Process -Id ([int]$p.ProcessId) -Force -ErrorAction Stop
-                        Write-VesLog INFO "Killed: $ProcessName pid=$($p.ProcessId) (arg=$ProcessCmdArg)" -LogFile $LogFile
+                        try {
+                            Stop-Process -Id ([int]$p.ProcessId) -Force -ErrorAction Stop
+                            Write-VesLog INFO "Killed: $ProcessName pid=$($p.ProcessId) (arg=$ProcessCmdArg)" -LogFile $LogFile
+                        } catch {
+                            # process may have exited naturally between the WMI query and
+                            # Stop-Process; a gone process no longer holds the files open
+                            Write-VesLog WARN "Could not kill $ProcessName pid=$($p.ProcessId) (already exited?): $($_.Exception.Message)" -LogFile $LogFile
+                        }
                     }
                 } else {
                     # not running is a warning, not a hard stop; robocopy can proceed
@@ -172,8 +195,22 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
         if ($LaunchBat) {
             if (Test-Path -LiteralPath $LaunchBat) {
                 try {
-                    Start-Process -FilePath 'cmd.exe' -ArgumentList ('/c "' + $LaunchBat + '"')
-                    Write-VesLog INFO "Relaunched: $LaunchBat" -LogFile $LogFile
+                    # array form of ArgumentList handles paths with spaces correctly.
+                    # -Wait lets us read the bat's exit code; -PassThru hands back the
+                    # process object. The bat typically uses 'start' to launch the exe
+                    # non-blocking, so cmd.exe itself returns quickly.
+                    # TOCTOU note: Test-Path and Start-Process are not atomic. The parent
+                    # directory's write ACL must be restricted to the deployment account
+                    # to prevent file substitution between the two calls. Hash validation
+                    # of the bat would require pre-registration and is out of scope here.
+                    Write-VesLog WARN "Launching batch file (ensure $LaunchBat dir ACL restricts write to deployment account)" -LogFile $LogFile
+                    $batProc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', "`"$LaunchBat`"") `
+                        -NoNewWindow -Wait -PassThru
+                    if ($batProc.ExitCode -ne 0) {
+                        Write-VesLog ERROR "LaunchBat returned exit $($batProc.ExitCode): $LaunchBat" -LogFile $LogFile
+                    } else {
+                        Write-VesLog INFO "Relaunched: $LaunchBat" -LogFile $LogFile
+                    }
                 } catch {
                     Write-VesLog ERROR "FAILED to relaunch $LaunchBat -> $($_.Exception.Message)" -LogFile $LogFile
                 }
