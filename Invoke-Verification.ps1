@@ -14,7 +14,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidateSet('Capture','VerifyFiles','VerifyConfig','All')][string]$Mode,
-    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [string]$ReleaseRoot,
     [string]$ManifestPath,
     [string]$ConfigContract,
     [string]$ConfigPath,
@@ -46,6 +46,7 @@ try {
 
         # Capture: snapshot the UAT-approved tree into a manifest and (optionally) pin its hash to SSM
         'Capture' {
+            if (-not $ReleaseRoot) { Write-VesLog ERROR '-ReleaseRoot required for Capture' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
             if (-not $ManifestPath) { Write-VesLog ERROR '-ManifestPath required for Capture' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
             # hash the release tree and write the manifest to disk
             Write-VesLog INFO "Capturing baseline: $ReleaseRoot" -Data @{processor=$Processor} -LogFile $LogFile
@@ -66,6 +67,7 @@ try {
 
         # VerifyFiles (and the file leg of All): hash-compare the deployed tree to the baseline
         { $_ -in 'VerifyFiles','All' } {
+            if (-not $ReleaseRoot) { Write-VesLog ERROR '-ReleaseRoot required for file verification' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
             if (-not $ManifestPath) { Write-VesLog ERROR '-ManifestPath required' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
 
             # load the baseline and reject it up front if its own self-hash doesn't match

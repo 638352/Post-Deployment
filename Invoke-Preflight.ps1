@@ -153,8 +153,8 @@ try {
     }
     # Mode B: per-processor invocation validates whichever of the params were supplied
     else {
-        if (-not $ApprovedCommitParam -and -not $TrustParam -and -not $ManifestPath) {
-            Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ApprovedCommitParam / -TrustParam / -ManifestPath.' -LogFile $LogFile
+        if (-not $ApprovedCommitParam -and -not $TrustParam -and -not $ManifestPath -and -not $ConfigContract) {
+            Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ApprovedCommitParam / -TrustParam / -ManifestPath / -ConfigContract.' -LogFile $LogFile
             if ($Json) { @{ status='usage' } | ConvertTo-Json -Compress }
             exit $VES_EXIT_USAGE
         }

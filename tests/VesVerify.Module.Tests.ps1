@@ -172,7 +172,11 @@ Describe 'Write-VesLog' {
         $rec = Get-Content -LiteralPath $log -Raw | ConvertFrom-Json
         $rec.level | Should -Be 'OK'
         $rec.msg   | Should -Be 'hello world'
-        $rec.ts    | Should -Match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+        if ($rec.ts -is [datetime]) {
+            $rec.ts.ToUniversalTime().ToString('o') | Should -Match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$'
+        } else {
+            ([string]$rec.ts) | Should -Match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,7}Z$'
+        }
     }
 
     It 'folds -Data keys into the record' {

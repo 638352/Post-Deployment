@@ -66,3 +66,29 @@ Describe 'VerifyFiles' {
         $r.ExitCode | Should -Be 10
     }
 }
+
+Describe 'VerifyConfig' {
+    BeforeAll {
+        $script:ConfigContract = Join-Path $PSScriptRoot 'fixtures\json\contract.json'
+        $script:ConfigPath = Join-Path $PSScriptRoot 'fixtures\json\config.json'
+    }
+
+    It 'passes without requiring -ReleaseRoot' {
+        $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
+            '-Mode','VerifyConfig',
+            '-ConfigContract',$script:ConfigContract,
+            '-ConfigPath',$script:ConfigPath,
+            '-Json')
+        $r.ExitCode    | Should -Be 0
+        $r.Json.status | Should -Be 'match'
+    }
+
+    It 'exits 10 when file verification has no release root' {
+        $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
+            '-Mode','VerifyFiles',
+            '-ManifestPath',$script:ManifestPath,
+            '-Json')
+        $r.ExitCode | Should -Be 10
+        $r.Output   | Should -Match 'ReleaseRoot required'
+    }
+}

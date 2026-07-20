@@ -53,6 +53,13 @@ Describe 'manifest self-check' {
 }
 
 Describe 'config contract check' {
+    It 'is ready for a well-formed contract even without manifest or SSM params' {
+        $r = Invoke-VesScript 'Invoke-Preflight.ps1' @(
+            '-ConfigContract',$script:GoodContract,'-Json')
+        $r.ExitCode   | Should -Be 0
+        $r.Json.ready | Should -BeTrue
+    }
+
     It 'is ready for a well-formed contract' {
         $r = Invoke-VesScript 'Invoke-Preflight.ps1' @(
             '-ManifestPath',$script:GoodManifest,'-ConfigContract',$script:GoodContract,'-Json')
