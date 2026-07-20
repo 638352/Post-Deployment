@@ -151,6 +151,15 @@ if (-not $healthy) {
     Write-VesLog ERROR "HEALTH FAIL $Processor -> $($fail -join ' | ')" -LogFile $LogFile
 }
 
+# --- Datadog: health results as gauges (non-fatal) --------------------------
+# The outbound .exe processors have no endpoint of their own, so this gauge is
+# the only way their liveness reaches a dashboard. Low-cardinality tags only.
+$ddTags = @("processor:$Processor", "env:prod", "check:health")
+# 1 = all requested checks passed; 0 = at least one failed.
+Send-VesDatadogMetric -Metric 'deployment.health.status'   -Value ([int]$healthy) -Tags $ddTags
+# Failure count gives severity at a glance without per-check tag cardinality.
+Send-VesDatadogMetric -Metric 'deployment.health.failures' -Value $fail.Count     -Tags $ddTags
+
 if ($Json) {
     [PSCustomObject]@{ processor=$Processor; healthy=$healthy; failures=@($fail) } | ConvertTo-Json -Compress
 }

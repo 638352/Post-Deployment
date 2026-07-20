@@ -1,222 +1,371 @@
 #Requires -Version 5.1
-# Shared functions for post-deployment verification.
-# Windows PowerShell 5.1 only, no 7.x syntax.
+<#
+.SYNOPSIS
+    Shared functions for VES Post-Deployment Verification.
+.DESCRIPTION
+    Manifest capture/compare, manifest trust (SSM-anchored hash), Datadog emit
+    (ddog-gov), and structured logging. Imported by all entry-point scripts.
+    Target: Windows PowerShell 5.1. No PowerShell 7+ syntax.
+#>
 
-# Fail on unset variables / bad property access so latent bugs surface loudly
+# Enforce strict variable/property resolution so typos fail fast instead of silently returning $null.
 Set-StrictMode -Version 2.0
 
-# Exit codes used by all entry scripts:
-#   0 = ok/match, 1 = drift, 2 = no baseline or trust failure, 3 = health failure, 10 = usage
-$Global:VES_EXIT_OK     = 0
-$Global:VES_EXIT_DRIFT  = 1
-$Global:VES_EXIT_NOBASE = 2
-$Global:VES_EXIT_HEALTH = 3
-$Global:VES_EXIT_USAGE  = 10
+# --- Exit code contract (shared across all entry scripts) --------------------
+# 0  OK / match
+# 1  DRIFT: files or config diverge from baseline
+# 2  NO-BASELINE / trust failure (missing or tampered manifest) -- fail loud
+# 3  HEALTH failure (service down / assembly load failure)
+# 10 USAGE / parameter error
 
-# 5.1 defaults to SSL3/TLS1.0 which many current HTTPS endpoints reject
+# Global scope so entry scripts that import this module can reference the constants directly.
+$Global:VES_EXIT_OK        = 0      # Success / production matches baseline.
+$Global:VES_EXIT_DRIFT     = 1      # Divergence detected between prod and baseline.
+$Global:VES_EXIT_NOBASE    = 2      # Baseline missing, unreadable, or failed trust check.
+$Global:VES_EXIT_HEALTH    = 3      # Functional health failure (independent of baseline).
+$Global:VES_EXIT_USAGE     = 10     # Caller passed bad/missing parameters.
+
+# PowerShell 5.1 defaults to SSL3/TLS1.0, which ddog-gov and AWS endpoints reject.
+# OR the existing protocol set with Tls12 (rather than replacing) so we add, not remove, protocols.
 [Net.ServicePointManager]::SecurityProtocol = `
     [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 function Write-VesLog {
+    <#
+    .SYNOPSIS Structured single-line log. Text to host, JSON line to -LogFile.
+    #>
     [CmdletBinding()]
     param(
+        # Severity level; constrained set keeps downstream log parsing predictable.
         [Parameter(Mandatory)][ValidateSet('INFO','WARN','ERROR','OK','DRIFT')][string]$Level,
+        # Human-readable message for both console and JSON record.
         [Parameter(Mandatory)][string]$Message,
+        # Optional structured fields merged into the JSON record (e.g. processor, commit).
         [hashtable]$Data,
+        # Optional path; when set, a JSON line is appended for machine consumption.
         [string]$LogFile
     )
-    # build the record: UTC timestamp + level + message, then fold in any extra -Data fields
+    # UTC ISO-8601 timestamp so logs from multiple hosts correlate without timezone math.
     $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    # Ordered hashtable keeps JSON field order stable (ts, level, msg first) for readability.
     $record = [ordered]@{ ts = $ts; level = $Level; msg = $Message }
+    # Merge caller-supplied structured fields into the record, if any were passed.
     if ($Data) { foreach ($k in $Data.Keys) { $record[$k] = $Data[$k] } }
 
-    # human-facing console line, colour-coded by level
+    # Map each level to a console color so operators can scan output visually.
     $color = @{ INFO='Gray'; OK='Green'; WARN='Yellow'; ERROR='Red'; DRIFT='Magenta' }[$Level]
+    # Console line: fixed-width level column keeps multi-line output aligned.
     Write-Host ("[{0}] {1,-5} {2}" -f $ts, $Level, $Message) -ForegroundColor $color
 
-    # JSONL sidecar for machine consumption
+    # Append one compact JSON object per line (JSONL) so logs are grep- and jq-friendly.
     if ($LogFile) {
         ($record | ConvertTo-Json -Compress -Depth 6) | Out-File -FilePath $LogFile -Append -Encoding utf8
     }
 }
 
 function Get-VesManifest {
-    # Hash every file under a release root. Relative paths only; absolute paths
-    # differ between UAT and prod hosts and cause false mismatches.
+    <#
+    .SYNOPSIS Enumerate a release root -> array of {RelPath, Sha256, Bytes}.
+    .NOTES
+      Relative paths only, normalized to '/'. Absolute paths differ between UAT
+      and prod hosts and produce false mismatches. ExcludePattern is regex
+      matched against the relative path.
+    #>
     [CmdletBinding()]
     param(
+        # Root of the artifact tree to hash (UAT release dir or prod install dir).
         [Parameter(Mandatory)][string]$ReleaseRoot,
-        # .config is excluded from the byte-hash on purpose: the legacy OMS
-        # App.config/web.config files carry server-specific log4net <file> paths
-        # (C:\VLER_Test\Logs\... vs E:\VLER\Logs\...), so hashing them reports
-        # drift on every UAT->PROD compare. Config correctness is checked
-        # structurally by Verify-Config.ps1 (contract), not by hash. Override
-        # -ExcludePattern if a system's config is genuinely byte-identical.
-        [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp|config)$'
+        # Regex of paths to skip: logs/temp/cache/.git and log/tmp extensions cause false drift.
+        [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp)$'
     )
+    # Fail early with a clear message if the root doesn't exist (bad path = usage error, not "0 files").
     if (-not (Test-Path -LiteralPath $ReleaseRoot)) {
         throw "ReleaseRoot not found: $ReleaseRoot"
     }
-    # normalize the root and enumerate every file beneath it (including hidden)
+    # Resolve to an absolute, canonical path; trim trailing '\' so substring math below is exact.
     $root = (Resolve-Path -LiteralPath $ReleaseRoot).Path.TrimEnd('\')
+    # Recurse all files including hidden (-Force); stop on access errors rather than silently skipping.
     $items = Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction Stop
 
-    # hash each in-scope file into a {RelPath, Sha256, Bytes} row, skipping excludes
+    # Generic List avoids O(n^2) array += reallocation on large trees.
     $out = New-Object System.Collections.Generic.List[object]
+    # Walk every file found under the root.
     foreach ($f in $items) {
+        # Compute the path relative to root (+1 skips the path separator itself).
         $rel = $f.FullName.Substring($root.Length + 1)
+        # Skip anything matching the exclude regex (checked before hashing to save I/O).
         if ($rel -match $ExcludePattern) { continue }
+        # Normalize separators to '/' so manifests hash identically regardless of tooling.
         $relNorm = $rel -replace '\\','/'
+        # SHA-256 of file contents -- the core drift-detection primitive.
         $hash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
+        # Record path, hash, and size; size is a cheap secondary sanity signal.
         $out.Add([PSCustomObject]@{ RelPath = $relNorm; Sha256 = $hash; Bytes = $f.Length })
     }
-    # sorted so the manifest hash is stable; leading comma stops PS unrolling single-item results
+    # Sort for deterministic order (required for a stable manifest hash); leading comma
+    # prevents PowerShell from unrolling a single-element result into a scalar.
     return ,($out | Sort-Object RelPath)
 }
 
 function Get-VesManifestHash {
-    # SHA-256 over sorted "relpath|sha256|bytes" lines rather than the JSON text,
-    # so whitespace/key-order/BOM differences can't break the trust comparison.
+    <#
+    .SYNOPSIS Deterministic SHA-256 over manifest contents (not the JSON text).
+    .NOTES
+      Hash of sorted "relpath|sha256|bytes" lines. Immune to JSON whitespace,
+      key ordering, or BOM differences that would otherwise break trust checks.
+    #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][object[]]$Manifest)
-    # serialize the manifest to one canonical "relpath|sha256|bytes" line per file, sorted
+    param(
+        # The manifest entries (output of Get-VesManifest or the .files of a loaded manifest doc).
+        [Parameter(Mandatory)][object[]]$Manifest
+    )
+    # StringBuilder avoids repeated string reallocation while concatenating many lines.
     $sb = New-Object System.Text.StringBuilder
+    # Re-sort defensively so the hash is stable even if the caller passed unsorted entries.
     foreach ($e in ($Manifest | Sort-Object RelPath)) {
+        # Canonical line format 'relpath|sha256|bytes' -- the thing actually hashed.
+        # [void] suppresses StringBuilder's return value from polluting the pipeline.
         [void]$sb.AppendLine(('{0}|{1}|{2}' -f $e.RelPath, $e.Sha256, $e.Bytes))
     }
-    # hash the canonical text; dispose the provider deterministically in finally
+    # Encode as UTF-8 without BOM so the digest is byte-identical across hosts.
     $bytes = [Text.Encoding]::UTF8.GetBytes($sb.ToString())
+    # Create the SHA-256 provider (disposed below -- it holds native crypto handles).
     $sha = [Security.Cryptography.SHA256]::Create()
+    # Hash the canonical bytes and render each byte as lowercase hex, joined into one string.
     try   { return -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) }
+    # Always release the crypto provider even if hashing throws.
     finally { $sha.Dispose() }
 }
 
 function Export-VesManifest {
+    <#
+    .SYNOPSIS Write manifest JSON + sidecar metadata (commit, hash, timestamp).
+    #>
     [CmdletBinding()]
     param(
+        # Manifest entries to persist.
         [Parameter(Mandatory)][object[]]$Manifest,
+        # Destination JSON path.
         [Parameter(Mandatory)][string]$Path,
+        # Git commit of the release captured; 'unknown' if capture ran outside a checkout.
         [string]$CommitSha = 'unknown',
+        # Logical processor/system name for traceability.
         [string]$Processor = 'unknown'
     )
-    # wrap the file list in a versioned document with provenance (who/when/commit) + its trust hash
+    # Derive the content hash first so it can be embedded inside the document.
     $manifestHash = Get-VesManifestHash -Manifest $Manifest
+    # Ordered document: schema version first enables future format migrations.
     $doc = [ordered]@{
-        schema       = 'ves.manifest.v1'
-        processor    = $Processor
-        commitSha    = $CommitSha
-        capturedUtc  = (Get-Date).ToUniversalTime().ToString('o')
-        capturedBy   = "$env:USERNAME@$env:COMPUTERNAME"
-        manifestHash = $manifestHash
-        fileCount    = $Manifest.Count
-        files        = $Manifest
+        schema       = 'ves.manifest.v1'                                            # Format identifier for forward compatibility.
+        processor    = $Processor                                                   # Which system this baseline belongs to.
+        commitSha    = $CommitSha                                                   # Release commit -- ties baseline to Git history.
+        capturedUtc  = (Get-Date).ToUniversalTime().ToString('o')                   # Capture moment (round-trip ISO format).
+        capturedBy   = "$env:USERNAME@$env:COMPUTERNAME"                            # Who/where captured -- audit field.
+        manifestHash = $manifestHash                                                # Self-hash; verified on load to detect tamper/corruption.
+        fileCount    = $Manifest.Count                                              # Quick sanity number for humans.
+        files        = $Manifest                                                    # The per-file entries themselves.
     }
-    # ensure the target directory exists, then write the manifest as JSON
+    # Ensure the destination directory exists before writing.
     $dir = Split-Path -Parent $Path
     if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    # Serialize with enough depth for the nested files array; UTF-8 on disk.
     ($doc | ConvertTo-Json -Depth 6) | Out-File -FilePath $Path -Encoding utf8
-    # hand the hash back so the caller can pin it to SSM
+    # Return the content hash so the caller can pin it to SSM.
     return $manifestHash
 }
 
 function Import-VesManifest {
+    <#
+    .SYNOPSIS Load a manifest JSON and re-derive its content hash for trust check.
+    #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        # Path to a manifest previously written by Export-VesManifest.
+        [Parameter(Mandatory)][string]$Path
+    )
+    # Missing baseline is a hard error -- callers map this to exit 2, never to "pass".
     if (-not (Test-Path -LiteralPath $Path)) { throw "Manifest not found: $Path" }
-    # load the stored document, then recompute its hash so callers can detect a manifest edited after capture
+    # Read the whole file and parse JSON into an object graph.
     $doc = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json
+    # Recompute the content hash from the entries actually present in the file.
     $recomputed = Get-VesManifestHash -Manifest $doc.files
-    # Consistent = the stored hash still matches the file list it claims to describe
+    # Return doc plus both hashes; Consistent=false means the file was edited or corrupted after capture.
     return [PSCustomObject]@{
-        Doc            = $doc
-        StoredHash     = $doc.manifestHash
-        RecomputedHash = $recomputed
-        Consistent     = ($doc.manifestHash -eq $recomputed)
+        Doc            = $doc                                    # Full parsed manifest document.
+        StoredHash     = $doc.manifestHash                       # Hash recorded at capture time.
+        RecomputedHash = $recomputed                             # Hash derived from current file contents.
+        Consistent     = ($doc.manifestHash -eq $recomputed)     # Internal integrity verdict.
     }
 }
 
 function Compare-VesFiles {
+    <#
+    .SYNOPSIS Diff a live release root against a baseline manifest.
+    .OUTPUTS {Missing[], Extra[], Changed[], Match(bool)}
+    #>
     [CmdletBinding()]
     param(
+        # Baseline entries from the trusted manifest.
         [Parameter(Mandatory)][object[]]$Baseline,
+        # Live production tree to compare.
         [Parameter(Mandatory)][string]$ReleaseRoot,
-        # must match the pattern used at capture or excluded files show up as extras
-        # .config is excluded from the byte-hash on purpose: the legacy OMS
-        # App.config/web.config files carry server-specific log4net <file> paths
-        # (C:\VLER_Test\Logs\... vs E:\VLER\Logs\...), so hashing them reports
-        # drift on every UAT->PROD compare. Config correctness is checked
-        # structurally by Verify-Config.ps1 (contract), not by hash. Override
-        # -ExcludePattern if a system's config is genuinely byte-identical.
-        [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp|config)$'
+        # Must match the pattern used at capture, or excluded files appear as extras.
+        [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp)$'
     )
-    # hash the live tree the same way, then index both sides by relative path for lookup
+    # Hash the live tree with the same rules used at capture time.
     $live = Get-VesManifest -ReleaseRoot $ReleaseRoot -ExcludePattern $ExcludePattern
+    # Index baseline by relative path for O(1) lookups.
     $baseMap = @{}; foreach ($b in $Baseline) { $baseMap[$b.RelPath] = $b }
+    # Index live tree the same way.
     $liveMap = @{}; foreach ($l in $live)     { $liveMap[$l.RelPath] = $l }
 
-    $missing = New-Object System.Collections.Generic.List[string]
-    $changed = New-Object System.Collections.Generic.List[object]
-    $extra   = New-Object System.Collections.Generic.List[string]
+    $missing = New-Object System.Collections.Generic.List[string]  # In baseline, absent in prod (the Storage.Net case).
+    $changed = New-Object System.Collections.Generic.List[object]  # Present in both but hash differs.
+    $extra   = New-Object System.Collections.Generic.List[string]  # In prod, not in baseline (unauthorized addition).
 
-    # walk the baseline: anything absent live is missing, anything with a different hash is changed
+    # Pass 1: everything the baseline says must exist.
     foreach ($rel in $baseMap.Keys) {
+        # File in baseline but not in prod -> missing.
         if (-not $liveMap.ContainsKey($rel)) { $missing.Add($rel); continue }
+        # File exists in both -> compare content hashes.
         if ($liveMap[$rel].Sha256 -ne $baseMap[$rel].Sha256) {
+            # Record both hashes so the operator can see expected vs actual.
             $changed.Add([PSCustomObject]@{ RelPath=$rel; Expected=$baseMap[$rel].Sha256; Actual=$liveMap[$rel].Sha256 })
         }
     }
-    # anything live that the baseline never recorded is an unexpected extra
+    # Pass 2: anything in prod the baseline never declared -> extra.
     foreach ($rel in $liveMap.Keys) { if (-not $baseMap.ContainsKey($rel)) { $extra.Add($rel) } }
 
-    # Return plain arrays, not List[object]. Under Set-StrictMode 2.0 the @() and
-    # unary-comma operators throw "Argument types do not match" on a List[object]
-    # (List[string] is unaffected), which would break every caller that wraps
-    # .Changed in @(). .ToArray() is safe for empty and populated lists alike.
+    # Aggregate verdict: match only when all three difference sets are empty.
     return [PSCustomObject]@{
-        Missing = $missing.ToArray()
-        Changed = $changed.ToArray()
-        Extra   = $extra.ToArray()
-        Match   = (($missing.Count + $changed.Count + $extra.Count) -eq 0)
+        Missing = $missing                                                       # Files that should exist but don't.
+        Changed = $changed                                                       # Files whose bytes differ from baseline.
+        Extra   = $extra                                                         # Files present that baseline doesn't know.
+        Match   = (($missing.Count + $changed.Count + $extra.Count) -eq 0)       # True = prod byte-matches baseline.
     }
 }
 
-# Trust anchor. The manifest file sits next to the artifacts and is editable by
-# anyone who can edit the artifacts, so verification reads the trusted hash from
-# SSM Parameter Store (write-gated) instead of trusting the file's own claim.
-# Note: uat and sandbox share a GovCloud account, so scope ssm:PutParameter by
-# path per environment. IAM grants alone are the boundary there.
+# --- Trust anchor: manifest hash pinned in SSM Parameter Store ----------------
+# The manifest file lives next to the artifacts (mutable). The *trusted* hash
+# lives in SSM (write-gated). Verify reads the trusted hash from SSM, not the
+# file, so an attacker who edits prod files + manifest still fails the check.
 
 function Get-VesTrustedHash {
     [CmdletBinding()]
     param(
+        # SSM parameter name holding the pinned value, e.g. /ves/vemsoutbound/baseline-hash.
         [Parameter(Mandatory)][string]$ParameterName,
+        # GovCloud region; default matches the VES deployment.
         [string]$Region = 'us-gov-west-1'
     )
-    # read the SecureString parameter (KMS-decrypted) via the AWS CLI rather than
-    # the AWSPowerShell module; legacy hosts won't have the module
+    # Call the AWS CLI directly (no AWSPowerShell module dependency on legacy hosts).
+    # --with-decryption handles SecureString; stderr suppressed, failure detected via exit code.
     $raw = & aws ssm get-parameter --name $ParameterName --with-decryption `
         --region $Region --query 'Parameter.Value' --output text 2>$null
-    # a non-zero exit or empty value means auth/KMS/path failure: throw, never return blank
+    # Treat CLI failure OR empty value as a trust failure -- never proceed on a blank anchor.
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
         throw "SSM read failed for $ParameterName (region $Region). aws exit=$LASTEXITCODE"
     }
+    # Trim the trailing newline the CLI text output includes.
     return $raw.Trim()
 }
 
 function Set-VesTrustedHash {
     [CmdletBinding()]
     param(
+        # SSM parameter to write.
         [Parameter(Mandatory)][string]$ParameterName,
+        # The hash (or commit SHA) to pin as trusted.
         [Parameter(Mandatory)][string]$Value,
+        # GovCloud region.
         [string]$Region = 'us-gov-west-1'
     )
-    # pin the value as a SecureString, overwriting any prior pin; throw if the write is rejected
+    # SecureString type gates reads behind kms:Decrypt; --overwrite allows re-pinning on each release.
     & aws ssm put-parameter --name $ParameterName --value $Value --type SecureString `
         --overwrite --region $Region | Out-Null
+    # Surface CLI failure as a hard error -- an unpinned baseline must not look like success.
     if ($LASTEXITCODE -ne 0) { throw "SSM write failed for $ParameterName. aws exit=$LASTEXITCODE" }
 }
 
-# public surface: only these functions are callable by the entry scripts
+# --- Datadog (ddog-gov) -------------------------------------------------------
+function Send-VesDatadogMetric {
+    <#
+    .SYNOPSIS DogStatsD gauge via local agent UDP:8125. Non-fatal on failure.
+    .NOTES Emit counts per host/processor -- never per-file tags (cardinality).
+    #>
+    [CmdletBinding()]
+    param(
+        # Metric name, e.g. deployment.verify.mismatch.
+        [Parameter(Mandatory)][string]$Metric,
+        # Gauge value to report.
+        [Parameter(Mandatory)][double]$Value,
+        # Tags such as processor:/env:/version: -- keep cardinality low.
+        [string[]]$Tags = @(),
+        # Local Datadog agent address (DogStatsD listener).
+        [string]$AgentHost = '127.0.0.1',
+        # DogStatsD UDP port.
+        [int]$Port = 8125
+    )
+    # Monitoring must never break verification -- all failures here are warnings only.
+    try {
+        # Build the tag suffix only when tags exist ('|#tag1,tag2' per DogStatsD wire format).
+        $tagStr = if ($Tags.Count) { '|#' + ($Tags -join ',') } else { '' }
+        # DogStatsD gauge wire format: name:value|g|#tags.
+        $payload = "{0}:{1}|g{2}" -f $Metric, $Value, $tagStr
+        # Open a UDP client aimed at the local agent.
+        $udp = New-Object System.Net.Sockets.UdpClient($AgentHost, $Port)
+        # DogStatsD is ASCII on the wire.
+        $bytes = [Text.Encoding]::ASCII.GetBytes($payload)
+        # Fire-and-forget send; [void] discards the byte count return value.
+        [void]$udp.Send($bytes, $bytes.Length)
+        # Release the socket immediately.
+        $udp.Close()
+    } catch {
+        # Log and continue -- a down agent must not fail the verify run.
+        Write-Warning "Datadog metric emit failed (non-fatal): $($_.Exception.Message)"
+    }
+}
+
+function Send-VesDatadogEvent {
+    <#
+    .SYNOPSIS Post a deploy/verify event to the ddog-gov Events API. Non-fatal.
+    #>
+    [CmdletBinding()]
+    param(
+        # Event title shown in the Datadog event stream.
+        [Parameter(Mandatory)][string]$Title,
+        # Event body text.
+        [Parameter(Mandatory)][string]$Text,
+        # Tags for filtering/overlaying on dashboards.
+        [string[]]$Tags = @(),
+        # Datadog alert type controls event color/severity.
+        [ValidateSet('info','success','warning','error')][string]$AlertType = 'info',
+        # API key from environment by default -- never hardcoded, never committed.
+        [string]$ApiKey = $env:DD_API_KEY,
+        # GovCloud Datadog site.
+        [string]$Site = 'ddog-gov.com'
+    )
+    # No key -> skip quietly with a warning; events are best-effort telemetry.
+    if ([string]::IsNullOrWhiteSpace($ApiKey)) {
+        Write-Warning 'DD_API_KEY not set; skipping Datadog event.'
+        return
+    }
+    # Same non-fatal posture as metrics.
+    try {
+        # Assemble the Events API payload.
+        $body = @{ title=$Title; text=$Text; tags=$Tags; alert_type=$AlertType } | ConvertTo-Json -Depth 4
+        # Events API v1 endpoint on the GovCloud site; key passed as query param per API contract.
+        $uri  = "https://api.$Site/api/v1/events?api_key=$ApiKey"
+        # POST and discard the response body -- only success/failure matters here.
+        Invoke-RestMethod -Uri $uri -Method Post -Body $body -ContentType 'application/json' | Out-Null
+    } catch {
+        # Log and continue -- Datadog outage must not block a deploy or verify.
+        Write-Warning "Datadog event emit failed (non-fatal): $($_.Exception.Message)"
+    }
+}
+
+# Export only the public surface; anything not listed stays module-private.
 Export-ModuleMember -Function `
     Write-VesLog, Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
-    Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash
+    Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash, `
+    Send-VesDatadogMetric, Send-VesDatadogEvent

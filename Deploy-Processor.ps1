@@ -52,12 +52,22 @@ Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 
+# Low-cardinality tags shared by every deploy event emitted to Datadog.
+$ddTags = @("processor:$Processor", "env:prod")
+
 # run a named stage; if it exits non-zero, abort the whole deploy with that stage's code
 function Step($name, $code) {
     Write-VesLog INFO ">>> $name" -LogFile $LogFile
     & $code
     if ($LASTEXITCODE -ne 0) {
         Write-VesLog ERROR "STAGE FAILED: $name (exit $LASTEXITCODE)" -LogFile $LogFile
+        # Timeline event on stage failure. The gate self-reports its own block/override
+        # events, so skip it here to avoid double-marking the same failure.
+        if ($name -ne 'pre-deploy gate') {
+            Send-VesDatadogEvent -Title "Deploy FAILED at '$name': $Processor" `
+                -Text "Stage '$name' failed for $Processor $StagedCommit (exit $LASTEXITCODE)." `
+                -AlertType 'error' -Tags ($ddTags + 'event:deploy-failed')
+        }
         exit $LASTEXITCODE
     }
 }
@@ -167,4 +177,9 @@ Step 'health check' {
 
 # all five stages passed
 Write-VesLog OK "DEPLOY COMPLETE: $Processor @ $StagedCommit verified+healthy" -LogFile $LogFile
+# Timeline event: the "authorized deploy" marker. Drift after this point is expected;
+# drift with no marker is the unauthorized-change picture the drift runner surfaces.
+Send-VesDatadogEvent -Title "Deploy COMPLETE: $Processor" `
+    -Text "Deploy of $Processor $StagedCommit completed: gate + copy + verify + health all green." `
+    -AlertType 'success' -Tags ($ddTags + 'event:deploy-complete')
 exit $VES_EXIT_OK

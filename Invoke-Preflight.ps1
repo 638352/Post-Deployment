@@ -37,6 +37,10 @@ param(
     [string]$TargetsFile,
     [string]$Region = 'us-gov-west-1',
     [string]$LogFile,
+    # Optional: probe whether the Datadog agent/API key are in place. WARN-only --
+    # monitoring is best-effort, so it never flips readiness. Off by default so
+    # boxes not yet wired for Datadog don't emit confusing warnings.
+    [switch]$CheckDatadog,
     [switch]$Json
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
@@ -116,6 +120,26 @@ function Test-Manifest([string]$Path, [string]$Trust) {
     }
 }
 
+# --- Datadog reachability (optional; WARN only, never blocks readiness) ---------
+function Test-DatadogAgent {
+    # A missing or stopped agent is a WARN, not a FAIL: verification works without
+    # it, monitoring just won't page anyone until it's up.
+    $svc = Get-Service -Name 'datadogagent' -ErrorAction SilentlyContinue
+    if (-not $svc) {
+        Add-Check 'datadog-agent' 'WARN' "service 'datadogagent' not found; drift/health metrics will be dropped"
+    } elseif ($svc.Status -ne 'Running') {
+        Add-Check 'datadog-agent' 'WARN' "service present but $($svc.Status); metrics dropped until it runs"
+    } else {
+        Add-Check 'datadog-agent' 'PASS' 'agent running (DogStatsD 127.0.0.1:8125)'
+    }
+    # Deploy/gate events use the API key (not the local agent), so flag its absence too.
+    if ([string]::IsNullOrWhiteSpace($env:DD_API_KEY)) {
+        Add-Check 'datadog-apikey' 'WARN' 'DD_API_KEY not set; deploy/gate events will be skipped'
+    } else {
+        Add-Check 'datadog-apikey' 'PASS' 'DD_API_KEY present in environment'
+    }
+}
+
 function Test-ConfigContract([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return }
     # the contract must exist, be valid JSON, and declare a format the verifier understands
@@ -131,6 +155,9 @@ function Test-ConfigContract([string]$Path) {
 }
 
 try {
+    # Optional agent reachability check runs in either mode when requested.
+    if ($CheckDatadog) { Test-DatadogAgent }
+
     # Mode A: -TargetsFile validates SSM + manifest + contract for every drift target at once
     if ($TargetsFile) {
         if (-not (Test-Path -LiteralPath $TargetsFile)) {
@@ -153,8 +180,8 @@ try {
     }
     # Mode B: per-processor invocation validates whichever of the params were supplied
     else {
-        if (-not $ApprovedCommitParam -and -not $TrustParam -and -not $ManifestPath -and -not $ConfigContract) {
-            Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ApprovedCommitParam / -TrustParam / -ManifestPath / -ConfigContract.' -LogFile $LogFile
+        if (-not $ApprovedCommitParam -and -not $TrustParam -and -not $ManifestPath -and -not $ConfigContract -and -not $CheckDatadog) {
+            Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ApprovedCommitParam / -TrustParam / -ManifestPath / -ConfigContract / -CheckDatadog.' -LogFile $LogFile
             if ($Json) { @{ status='usage' } | ConvertTo-Json -Compress }
             exit $VES_EXIT_USAGE
         }
