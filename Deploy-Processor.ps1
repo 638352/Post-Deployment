@@ -41,6 +41,9 @@ param(
     # dated backup of the current target before overwrite (runbook convention:
     # <BackupRoot>\<yyyyMMdd>_<Initials>_<Processor>). Skipped if not set.
     [string]$BackupRoot,
+    # newest N backups to keep for this processor; older ones get pruned after a
+    # successful deploy only. 0 keeps everything.
+    [int]$KeepBackups = 5,
     [string]$Initials = $env:USERNAME,
     [string]$HealthUrl,
     # liveness for endpoint-less .exe processors; passed through to the health check
@@ -176,6 +179,21 @@ Step 'health check' {
 }
 
 # all five stages passed
+# backup cleanup, last and only after a fully green deploy: a failed deploy must
+# never eat its own restore point. Keep the newest N dated folders for THIS
+# processor (name sorts by date because it starts yyyyMMdd), drop the rest.
+if ($BackupRoot -and $KeepBackups -gt 0 -and (Test-Path -LiteralPath $BackupRoot)) {
+    $pattern = '^\d{8}_.+_' + [regex]::Escape($Processor) + '$'
+    $old = @(Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $pattern } |
+        Sort-Object Name -Descending | Select-Object -Skip $KeepBackups)
+    foreach ($b in $old) {
+        try { Remove-Item -LiteralPath $b.FullName -Recurse -Force
+              Write-VesLog INFO "Pruned old backup: $($b.Name)" -LogFile $LogFile }
+        catch { Write-VesLog WARN "Could not prune backup $($b.Name): $($_.Exception.Message)" -LogFile $LogFile }
+    }
+}
+
 Write-VesLog OK "DEPLOY COMPLETE: $Processor @ $StagedCommit verified+healthy" -LogFile $LogFile
 # Timeline event: the "authorized deploy" marker. Drift after this point is expected;
 # drift with no marker is the unauthorized-change picture the drift runner surfaces.

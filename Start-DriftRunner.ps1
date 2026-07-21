@@ -17,7 +17,10 @@ param(
     [Parameter(Mandatory)][string]$TargetsFile,
     [string]$Region = 'us-gov-west-1',
     # keep this out of Git, the logs contain prod hostnames and paths
-    [string]$LogDir = 'D:\ves-verify\logs'
+    [string]$LogDir = 'D:\ves-verify\logs',
+    # prune this runner's own logs after each pass; at 48 passes a day the folder
+    # grows forever otherwise. 0 turns pruning off.
+    [int]$LogRetentionDays = 30
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
@@ -93,6 +96,21 @@ if ($trustFailNames.Count -or $driftedNames.Count) {
     if ($driftedNames.Count)   { $lines += "Drift: $($driftedNames -join ', ')" }
     Send-VesDatadogEvent -Title "Drift sweep flagged $($trustFailNames.Count + $driftedNames.Count)/$targetCount target(s)" `
         -Text ($lines -join "`n") -AlertType $alertType -Tags $ddTags
+}
+
+# log cleanup: this pass just wrote fresh logs, now drop the stale ones. Only
+# files matching this runner's own name_stamp.jsonl pattern get touched, so a
+# stray file someone parked in the folder survives. Pruning failures are warned,
+# never fatal -- housekeeping must not change the run's exit code.
+if ($LogRetentionDays -gt 0) {
+    $cutoff = (Get-Date).AddDays(-$LogRetentionDays)
+    $stale = @(Get-ChildItem -LiteralPath $LogDir -File -Filter '*.jsonl' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '_\d{8}T\d{6}Z\.jsonl$' -and $_.LastWriteTime -lt $cutoff })
+    foreach ($f in $stale) {
+        try { Remove-Item -LiteralPath $f.FullName -Force }
+        catch { Write-VesLog WARN "Could not prune $($f.Name): $($_.Exception.Message)" }
+    }
+    if ($stale.Count) { Write-VesLog INFO "Pruned $($stale.Count) drift log(s) older than $LogRetentionDays day(s)." }
 }
 
 # exit with the worst code so the scheduled task's Last Run Result reflects any drift/trust failure
