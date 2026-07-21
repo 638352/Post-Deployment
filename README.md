@@ -205,9 +205,12 @@ PowerBuilder or native, that check needs a LoadLibrary variant.
 - SSM region. Examples default to us-gov-west-1, but the OMS SSM convention
   (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1. Set -Region per
   the confirmed parameter path before running config-verify/preflight for real.
-- Monitoring sink. Output is exit codes + JSONL logs only; there is no metrics
-  push. If you want alerting beyond log scraping / Task Scheduler Last Run
-  Result, decide on a sink (log shipper, Windows Event Log, etc.) and wire it in.
+- Monitoring sink. Primary signal is still exit codes + JSONL logs. A best-effort
+  Datadog push (metrics via the local agent, events via the ddog-gov API) is now
+  wired into the gate/deploy/health/drift paths — see the Monitoring section — but
+  it never blocks an outcome and is silently dropped on boxes without an agent /
+  `DD_API_KEY`. If you need alerting that must not miss, still wire a durable sink
+  (log shipper, Windows Event Log, etc.) off the JSONL logs.
 - Break-glass: the gate supports -AllowOverride with a mandatory reason and an
   audit line, but Deploy-Processor doesn't pass it. Decide hard-block vs
   audited override before prod.
