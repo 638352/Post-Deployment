@@ -11,6 +11,17 @@
     Stop/restart uses a try/finally so a failed copy still re-enables the tasks
     and restarts the service rather than leaving the processor down.
 
+    Console-EXE instances: disabling a scheduled task does NOT kill an already
+    running instance holding the target files open. Before the copy, any process
+    whose ExecutablePath lives under TargetRoot is detected (that is what
+    identifies THIS instance -- the same exe name runs 2-3 times per box from
+    different folders). Found instances abort the deploy unless -KillProcesses
+    is set, in which case each is force-stopped with an audit line (PID +
+    command line, so the RTP/RTPDP mode is on record). -StartTasksAfter starts
+    the re-enabled tasks immediately after a clean copy, relaunching the
+    processor via its own scheduled task rather than waiting for the next
+    trigger; a failed deploy is never auto-started.
+
     Break-glass is intentionally not wired through here (open policy decision).
     -WhatIf runs the gate only and skips stop/backup/copy.
 
@@ -38,6 +49,12 @@ param(
     # Task Scheduler jobs on THIS server to disable before copy / re-enable after,
     # e.g. VLER_EM_Real_Time_Outbound_Processor. Empty for service-only systems.
     [string[]]$ScheduledTasks = @(),
+    # kill running instances whose exe lives under TargetRoot (console-EXE
+    # processors hold their files open; without this the deploy aborts instead)
+    [switch]$KillProcesses,
+    # start the re-enabled scheduled tasks right after a clean copy, so the
+    # processor relaunches now instead of at its next trigger
+    [switch]$StartTasksAfter,
     # dated backup of the current target before overwrite (runbook convention:
     # <BackupRoot>\<yyyyMMdd>_<Initials>_<Processor>). Skipped if not set.
     [string]$BackupRoot,
@@ -79,10 +96,14 @@ function Step($name, $code) {
 # Invoked via powershell.exe child process so that `exit N` inside the script terminates only
 # the child -- not this process -- allowing Step's error logging and Datadog event to fire.
 Step 'pre-deploy gate' {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-PreDeployGate.ps1') `
-        -StagedRoot $StagedRoot -StagedCommit $StagedCommit `
-        -ApprovedCommitParam $ApprovedCommitParam -TrustParam $TrustParam -ManifestPath $ManifestPath `
-        -Processor $Processor -Region $Region -LogFile $LogFile
+    # -LogFile appended only when set: PS 5.1 drops empty-string args to native
+    # commands, which would leave a bare -LogFile expecting a value in the child.
+    $gateArgs = @(
+        '-StagedRoot', $StagedRoot, '-StagedCommit', $StagedCommit,
+        '-ApprovedCommitParam', $ApprovedCommitParam, '-TrustParam', $TrustParam,
+        '-ManifestPath', $ManifestPath, '-Processor', $Processor, '-Region', $Region)
+    if ($LogFile) { $gateArgs += '-LogFile', $LogFile }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-PreDeployGate.ps1') @gateArgs
 }
 
 # Past the gate. -WhatIf short-circuits to the else branch; the real work runs here.
@@ -129,6 +150,48 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 catch { Write-VesLog ERROR "Could not stop service $ServiceName -> $($_.Exception.Message)" -LogFile $LogFile; $stopFailed = $true }
             }
         }
+        # Console-EXE instances: a running exe under TargetRoot keeps its files
+        # locked even after its task is disabled and would corrupt the /MIR copy.
+        # ExecutablePath-under-TargetRoot is the instance identity (same exe name
+        # runs from several folders per box); working dir isn't exposed by WMI.
+        if (-not $stopFailed) {
+            $targetItem = Get-Item -LiteralPath $TargetRoot -ErrorAction SilentlyContinue
+            if ($targetItem) {
+                $targetPrefix = $targetItem.FullName.TrimEnd('\') + '\'
+                $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ExecutablePath -and
+                                   $_.ExecutablePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) })
+                foreach ($p in $running) {
+                    if ($KillProcesses) {
+                        # audit line BEFORE the kill: which instance (mode arg visible in CommandLine)
+                        Write-VesLog WARN ("Killing running instance PID {0}: {1}" -f $p.ProcessId, $p.CommandLine) `
+                            -Data @{processor=$Processor; pid=$p.ProcessId; commandLine=$p.CommandLine} -LogFile $LogFile
+                        try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop }
+                        catch {
+                            Write-VesLog ERROR "Could not kill PID $($p.ProcessId) -> $($_.Exception.Message)" -LogFile $LogFile
+                            $stopFailed = $true
+                        }
+                    } else {
+                        Write-VesLog ERROR ("Running instance holds {0}: PID {1} {2}. Re-run with -KillProcesses to stop it." -f `
+                            $TargetRoot, $p.ProcessId, $p.CommandLine) -LogFile $LogFile
+                        $stopFailed = $true
+                    }
+                }
+                # wait for killed instances to actually exit and release handles
+                if ($KillProcesses -and -not $stopFailed -and $running.Count) {
+                    $ids = @($running | ForEach-Object { $_.ProcessId })
+                    $deadline = (Get-Date).AddSeconds(30)
+                    while ((Get-Date) -lt $deadline -and (Get-Process -Id $ids -ErrorAction SilentlyContinue)) {
+                        Start-Sleep -Milliseconds 250
+                    }
+                    $alive = @(Get-Process -Id $ids -ErrorAction SilentlyContinue)
+                    if ($alive.Count) {
+                        Write-VesLog ERROR "Instance(s) still alive after kill: $(($alive | ForEach-Object Id) -join ', ')" -LogFile $LogFile
+                        $stopFailed = $true
+                    }
+                }
+            }
+        }
         # only mirror the staged tree in once everything is safely stopped
         if (-not $stopFailed) {
             Write-VesLog INFO "Copy $StagedRoot -> $TargetRoot" -LogFile $LogFile
@@ -154,9 +217,20 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
         foreach ($tn in $disabled) {
             try {
                 Enable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
-                Write-VesLog INFO "Re-enabled task: $tn" -LogFile $LogFile 
+                Write-VesLog INFO "Re-enabled task: $tn" -LogFile $LogFile
             }
             catch { Write-VesLog ERROR "FAILED to re-enable task $tn -> $($_.Exception.Message)" -LogFile $LogFile }
+        }
+        # prompt relaunch, only after a clean stop+copy: never auto-start a tree a
+        # failed copy may have left broken (next trigger / the operator owns that).
+        if ($StartTasksAfter -and -not $stopFailed -and -not $copyFailed) {
+            foreach ($tn in $disabled) {
+                try {
+                    Start-ScheduledTask -TaskName $tn -ErrorAction Stop
+                    Write-VesLog INFO "Started task: $tn" -LogFile $LogFile
+                }
+                catch { Write-VesLog WARN "Could not start task $tn -> $($_.Exception.Message)" -LogFile $LogFile }
+            }
         }
     }
     # a failed stop or copy aborts here (processor already restored by finally)
@@ -176,15 +250,17 @@ Step 'post-deploy verify' {
     # supplied. 'All' hard-requires the config params, so a config-less system
     # must verify files only, not fail with a usage error.
     # Array-style args (not hashtable splat) required for child-process invocation.
+    # $(if ...), not (if ...): PS 5.1 has no if-expression, a bare (if ...) is
+    # parsed as a command named 'if' and dies at runtime.
     $verArgs = @(
-        '-Mode', (if ($ConfigContract) { 'All' } else { 'VerifyFiles' }),
+        '-Mode', $(if ($ConfigContract) { 'All' } else { 'VerifyFiles' }),
         '-ReleaseRoot', $TargetRoot,
         '-ManifestPath', $ManifestPath,
         '-TrustParam', $TrustParam,
         '-Processor', $Processor,
-        '-Region', $Region,
-        '-LogFile', $LogFile
+        '-Region', $Region
     )
+    if ($LogFile) { $verArgs += '-LogFile', $LogFile }
     if ($ConfigContract) { $verArgs += '-ConfigContract', $ConfigContract, '-ConfigPath', $ConfigPath }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-Verification.ps1') @verArgs
 }
@@ -194,7 +270,8 @@ Step 'health check' {
     # Build arg array so each array-valued param is passed as repeated named args
     # (e.g. -RequiredAssemblies a.dll -RequiredAssemblies b.dll), which PowerShell
     # -File mode binds correctly to [string[]] parameters.
-    $hcArgs = @('-Processor', $Processor, '-CommitSha', $StagedCommit, '-LogFile', $LogFile)
+    $hcArgs = @('-Processor', $Processor, '-CommitSha', $StagedCommit)
+    if ($LogFile) { $hcArgs += '-LogFile', $LogFile }
     foreach ($dll in $RequiredAssemblies) { $hcArgs += '-RequiredAssemblies', $dll }
     if ($ServiceName) { $hcArgs += '-ServiceName', $ServiceName }
     foreach ($tn in $ScheduledTasks) { $hcArgs += '-ScheduledTasks', $tn }

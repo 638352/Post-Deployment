@@ -11,10 +11,10 @@
 
     CONFIRM before a real run: the values tagged # CONFIRM are not in SERVERS.md
     (scheduled-task name, log dir). Pull them from the Outbound Deployment Steps
-    runbook. Until then, capture / preflight / verify / health and -WhatIf all work;
-    a real copy does not, because the stop mechanism for these console exes is still
-    an open item (disabling the task won't kill a running instance holding the
-    files open).
+    runbook. The running console-exe instance is handled: KillProcesses stops the
+    instance whose exe lives under TargetRoot (audited by PID + command line) and
+    StartTasksAfter relaunches it via its scheduled task after a clean copy.
+    Pilot with -WhatIf first, then a real run on this UAT box, before PROD.
 .EXAMPLE
     .\Deploy-OutboundDBQ-uat.ps1 -StagedRoot D:\stage\OutboundDBQ -StagedCommit abc1234 -WhatIf
 #>
@@ -43,6 +43,9 @@ $fixed = @{
     BackupRoot          = 'C:\VLER_TEST_OUTBOUND\Processors\BackUp'
     ScheduledTasks      = @('VLER_EM_Realtime_DBQ_Processor')            # CONFIRM task name
     FreshLogDir         = 'C:\VLER_TEST_OUTBOUND\Logs\VES.OutboundProcessor'  # CONFIRM log dir
+    # kill the running console-exe instance before copy; relaunch via task after
+    KillProcesses       = $true
+    StartTasksAfter     = $true
     RequiredAssemblies  = @('C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe')
     # DBQ has no actuator endpoint; leave these empty
     ServiceName         = ''

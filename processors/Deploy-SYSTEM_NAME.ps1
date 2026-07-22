@@ -65,6 +65,11 @@ $fixed = @{
     # stop/restart: the outbound processors run as Task Scheduler jobs on THIS
     # server. List only the jobs that live here (see VEMS-5346 note in header).
     ScheduledTasks      = @('VLER_EM_Real_Time_Outbound_Processor')
+    # console EXEs hold their files open even with the task disabled: kill the
+    # running instance (matched by exe path under TargetRoot, audited by PID +
+    # command line) and relaunch via the task right after a clean copy
+    KillProcesses       = $true
+    StartTasksAfter     = $true
     # health for an endpoint-less .exe: a fresh line in today's log proves life
     FreshLogDir         = 'C:\VLER_Test\Logs\VES.OutboundProcessor'
     # .NET assembly load check (defect UAT may have signed off on)
