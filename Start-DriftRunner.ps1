@@ -18,9 +18,11 @@ param(
     [string]$Region = 'us-gov-west-1',
     # keep this out of Git, the logs contain prod hostnames and paths
     [string]$LogDir = 'D:\ves-verify\logs',
-    # prune this runner's own logs after each pass; at 48 passes a day the folder
-    # grows forever otherwise. 0 turns pruning off.
-    [int]$LogRetentionDays = 30
+    # prune this runner's own logs after each pass. Default is a full year: the
+    # drift logs are part of the ATO/GovCloud audit trail, and they are small
+    # (JSONL lines; a year of 30-min runs is megabytes). Tighten only once the
+    # logs are being shipped to a durable central store. 0 turns pruning off.
+    [int]$LogRetentionDays = 365
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'

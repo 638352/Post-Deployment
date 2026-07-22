@@ -81,11 +81,17 @@ Capture at UAT sign-off:
 .\Invoke-Verification.ps1 -Mode Capture -ReleaseRoot D:\uat\<system> `
   -ManifestPath D:\baselines\<system>.json `
   -TrustParam /ves/<system>/baseline-hash `
+  -ArchiveRepo D:\ves-verify -ReleaseTag <system>/v1.4.0 `
   -Processor <system> -CommitSha (git rev-parse HEAD)
 
 aws ssm put-parameter --name /ves/<system>/approved-commit --value <sha> `
   --type SecureString --overwrite --region us-gov-west-1
 ```
+
+-ArchiveRepo/-ReleaseTag are the audit layer: the manifest (and contract, when
+passed) are committed under `baselines/<processor>/` in that checkout and the
+commit is tagged, so every approved release leaves a Git-tagged rollback/audit
+point. An archive failure fails the capture — re-run it.
 
 Preflight before a deploy (read-only; touches no prod or staged files). Confirms
 the AWS CLI is present, the SSM parameters actually read back (auth + KMS decrypt
@@ -213,22 +219,24 @@ statement of what is already running:
   missing/changed/extra file when `-ManifestPath` is supplied (the deploy
   wrappers pass it automatically), e.g. "Deployment blocked:
   bin/Storage.Net.dll is missing from the artifact".
-- **Scripted deploy of the outbound processors is not yet safe for a real
-  copy**: the stop mechanism for the console EXEs is an open item (below).
-  Gate / verify / health / `-WhatIf` work today.
+- **Console-EXE stop mechanism** (closed, pilot pending): `Deploy-Processor
+  -KillProcesses` stops the running instance whose exe lives under TargetRoot
+  (audited by PID + command line), and `-StartTasksAfter` relaunches it via
+  its scheduled task after a clean copy. Pilot on the UAT egress box before
+  any PROD use.
+- **Release record under a Git tag** (closed): `Invoke-Verification -Mode
+  Capture -ArchiveRepo <checkout> -ReleaseTag <system>/vX.Y.Z` commits the
+  manifest + sanitized contract under `baselines/<processor>/` and tags the
+  commit. What still needs a decision is the *upstream* system of record —
+  see "Baseline system of record" below.
 - **Paging is not built in**: the brief's "prod mismatch pages on call" and
   "missed runs raise their own alert" require monitors on the Datadog metrics
   (or another sink) that are NOT defined in this repo. Until those exist, the
   signal is exit codes + JSONL logs + Task Scheduler Last Run Result only.
-- **Baselines are SSM-anchored, not Git-tagged**: manifests/contracts live
-  under D:\baselines with the trust hash pinned in SSM. The brief's
-  release-tag layout (manifest + sanitized config + release note under a
-  semver tag, PR-only main) is a process decision still open — see "Baseline
-  system of record" below.
-- **Log retention vs audit trail**: drift-runner logs are host-local and
-  pruned after `-LogRetentionDays` (30 default). If drift evidence must be
-  retained for ATO, ship the logs off-box before relying on that claim
-  (deploy audit logs are never pruned).
+- **Log retention**: drift-runner logs are host-local, pruned after
+  `-LogRetentionDays` (365 default, sized for the ATO audit-trail claim;
+  deploy audit logs are never pruned). Central shipping is still a
+  nice-to-have once share/S3 access exists.
 
 ## Limits
 
@@ -242,10 +250,13 @@ PowerBuilder or native, that check needs a LoadLibrary variant.
 ## Open items
 
 - Baseline system of record. The gate assumes a Git commit SHA, but the legacy
-  processors live in TFS/PVCS (no SHA) and are deployed as compiled .exes. Decide
-  whether "UAT-approved baseline" is a Git tag, a TFS label, or (most likely for
-  these) the compiled binary hash, and where the "UAT-approved" designation is
-  recorded. Scripts 1-3 and the deploy scripts all hinge on this answer.
+  processors live in TFS/PVCS (no SHA) and are deployed as compiled .exes. The
+  working position: the UAT-approved compiled artifact IS the baseline — its
+  manifest hash pinned to SSM at sign-off is the approval record, and the
+  capture-time Git archive (-ArchiveRepo/-ReleaseTag) is the audit trail. What
+  still needs sign-off is that position itself, plus what value to pin as
+  /ves/<system>/approved-commit for TFS-sourced systems (a TFS label string
+  works: the gate compares strings, it does not require a real Git SHA).
 - In-scope system list is unconfirmed. Documented outbound processors:
   VES.OutboundDBQProcessor.exe / VES.OutboundProcessor.exe, Task Scheduler jobs
   VLER_EM_Outbound_Request_Handler / _Processor (and _2 / _12 variants) and
@@ -254,14 +265,14 @@ PowerBuilder or native, that check needs a LoadLibrary variant.
 - Server split (VEMS-5346): PROD spreads the outbound processors across
   VESEMSEGRESS01/02/03 while UAT runs all three on one box, so deploy is
   server-aware (set the processor list per server). See SERVERS.md.
-- Stop mechanism for the outbound processors is unimplemented. They are console
-  EXEs (VES.OutboundDBQProcessor.exe launched by .bat, mode by arg), not Windows
-  services, and the same exe name runs 2-3 times per box. Deploy-Processor today
-  can stop a Windows service or disable a scheduled task, but disabling the task
-  does not kill an already-running instance holding the folder's files open.
-  Deploying these needs killing the specific instance matched by working dir /
-  command-line arg (RTP/RTPDP) before the copy, then relaunching its .bat. Decide
-  and wire this before using the deploy scripts on the outbound processors.
+- Stop mechanism for the outbound processors: implemented, pilot pending. The
+  running instance is matched by ExecutablePath under TargetRoot (the same exe
+  name runs 2-3 times per box from different folders, so the folder IS the
+  instance identity), killed only with an explicit -KillProcesses (audited by
+  PID + command line, mode arg visible), and relaunched via its scheduled task
+  with -StartTasksAfter after a clean copy. Without -KillProcesses a detected
+  instance aborts the deploy before robocopy can fight a file lock. Pilot on
+  the UAT egress box (vesemsegressuat) before any PROD use.
 - SSM region. Examples default to us-gov-west-1, but the OMS SSM convention
   (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1. Set -Region per
   the confirmed parameter path before running config-verify/preflight for real.
@@ -303,12 +314,15 @@ CI later. What's covered:
 - **End-to-end**: each entry script is driven as a real `powershell.exe` child
   process and asserted against the documented exit-code contract
   (`0/1/2/3/10`) plus its `-Json` output — `Invoke-Verification` (capture / verify
-  / drift / usage), `Verify-Config` (all three contract formats + sensitiveKeys
+  / drift / usage, and capture's `-ArchiveRepo` commit+tag against a throwaway
+  git repo), `Verify-Config` (all three contract formats + sensitiveKeys
   masking), `Invoke-HealthCheck` (fresh-log liveness + assembly load),
-  `Invoke-Preflight` (usage + manifest/contract self-check), and
+  `Invoke-Preflight` (usage + manifest/contract self-check),
   `Invoke-PreDeployGate` (pass / block-naming-the-file / commit block / SSM
   error — SSM is stubbed by a fake `aws.cmd` prepended to PATH, so no real AWS
-  is touched).
+  is touched), and `Deploy-Processor` (clean deploy, `-WhatIf`, and the
+  running-instance abort/kill paths using a real locked process under the
+  target dir).
 
 Deliberately out of scope this round (would need more mocking): the real
 SSM read/write paths (`Get-/Set-VesTrustedHash` against actual AWS, and
