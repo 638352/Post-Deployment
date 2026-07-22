@@ -146,7 +146,10 @@ Config contracts support ssmExpectedValues (config key -> SSM parameter name)
 for values whose expected value should live in Parameter Store rather than the
 contract file; see Verify-Config.ps1 header and sample.config.json. Contract
 `format` is appconfig (App.config/web.config), json, or keyvalue (a Java
-application.properties file is keyvalue).
+application.properties file is keyvalue). Keys listed under `sensitiveKeys`
+(and every ssmExpectedValues key) are compared on their real values but
+reported as `(masked)` on mismatch, so a secret never lands in a log or
+report — list any secret-bearing key there rather than relying on convention.
 
 Config files (*.config) are excluded from the file-hash compare on purpose: the
 legacy App.config carries server-specific log4net paths that differ every
@@ -199,6 +202,33 @@ deploy/verify outcomes. Two independent transports with different prerequisites:
   `DD_API_KEY` are in place.
 
 `DD_ENV` (defaults to `prod`) controls the `env:` tag on both metrics and events.
+
+## Brief conformance
+
+Deltas between this suite and the leadership brief (Post-Deployment
+Verification Brief, Master FINAL 7-6-2026), so nobody reads the brief as a
+statement of what is already running:
+
+- **Gate names the files** (closed): a content-gate failure now names each
+  missing/changed/extra file when `-ManifestPath` is supplied (the deploy
+  wrappers pass it automatically), e.g. "Deployment blocked:
+  bin/Storage.Net.dll is missing from the artifact".
+- **Scripted deploy of the outbound processors is not yet safe for a real
+  copy**: the stop mechanism for the console EXEs is an open item (below).
+  Gate / verify / health / `-WhatIf` work today.
+- **Paging is not built in**: the brief's "prod mismatch pages on call" and
+  "missed runs raise their own alert" require monitors on the Datadog metrics
+  (or another sink) that are NOT defined in this repo. Until those exist, the
+  signal is exit codes + JSONL logs + Task Scheduler Last Run Result only.
+- **Baselines are SSM-anchored, not Git-tagged**: manifests/contracts live
+  under D:\baselines with the trust hash pinned in SSM. The brief's
+  release-tag layout (manifest + sanitized config + release note under a
+  semver tag, PR-only main) is a process decision still open — see "Baseline
+  system of record" below.
+- **Log retention vs audit trail**: drift-runner logs are host-local and
+  pruned after `-LogRetentionDays` (30 default). If drift evidence must be
+  retained for ATO, ship the logs off-box before relying on that claim
+  (deploy audit logs are never pruned).
 
 ## Limits
 
@@ -273,12 +303,15 @@ CI later. What's covered:
 - **End-to-end**: each entry script is driven as a real `powershell.exe` child
   process and asserted against the documented exit-code contract
   (`0/1/2/3/10`) plus its `-Json` output — `Invoke-Verification` (capture / verify
-  / drift / usage), `Verify-Config` (all three contract formats),
-  `Invoke-HealthCheck` (fresh-log liveness + assembly load), and `Invoke-Preflight`
-  (usage + manifest/contract self-check).
+  / drift / usage), `Verify-Config` (all three contract formats + sensitiveKeys
+  masking), `Invoke-HealthCheck` (fresh-log liveness + assembly load),
+  `Invoke-Preflight` (usage + manifest/contract self-check), and
+  `Invoke-PreDeployGate` (pass / block-naming-the-file / commit block / SSM
+  error — SSM is stubbed by a fake `aws.cmd` prepended to PATH, so no real AWS
+  is touched).
 
-Deliberately out of scope this round (would need mocking): the trust-anchored
-paths that read/write SSM (`Get-/Set-VesTrustedHash`, the gate, and
+Deliberately out of scope this round (would need more mocking): the real
+SSM read/write paths (`Get-/Set-VesTrustedHash` against actual AWS, and
 verify-with-`-TrustParam`), and the health check's service / scheduled-task / HTTP
 branches. No test requires AWS, a running service, a scheduled task, or the
 network.

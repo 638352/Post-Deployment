@@ -16,5 +16,8 @@
   },
   "ssmExpectedValues": {
     "Outbound:QueueName": "/ves/SYSTEM_NAME/config/queue-name"
-  }
+  },
+  "sensitiveKeys": [
+    "ConnectionStrings:MainDb"
+  ]
 }

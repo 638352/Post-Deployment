@@ -50,6 +50,25 @@ Describe 'Verify-Config (<Fmt>)' -ForEach @(
     }
 }
 
+Describe 'Verify-Config sensitiveKeys masking' {
+    It 'reports (masked) for a sensitive key mismatch, never the values' {
+        $fx = Join-Path $script:Fx 'json'
+        $c = Get-Content -LiteralPath (Join-Path $fx 'contract.json') -Raw | ConvertFrom-Json
+        $firstKey = ($c.expectedValues.PSObject.Properties | Select-Object -First 1).Name
+        $c.expectedValues.$firstKey = 'SECRET-EXPECTED-VALUE'
+        $c | Add-Member -NotePropertyName sensitiveKeys -NotePropertyValue @($firstKey) -Force
+        $bad = Join-Path $TestDrive 'sensitive-contract.json'
+        ($c | ConvertTo-Json -Depth 6) | Out-File -FilePath $bad -Encoding utf8
+
+        $r = & $script:VerifyConfig -ContractPath $bad -ConfigPath (Join-Path $fx 'config.json')
+        $r.pass | Should -BeFalse
+        $mm = @($r.valueMismatch) | Where-Object { $_.key -eq $firstKey }
+        $mm | Should -Not -BeNullOrEmpty
+        $mm.expected | Should -Be '(masked)'
+        $mm.actual   | Should -Be '(masked)'
+    }
+}
+
 Describe 'Verify-Config errors' {
     It 'throws on a missing contract file' {
         { & $script:VerifyConfig -ContractPath (Join-Path $TestDrive 'no-contract.json') `

@@ -81,8 +81,8 @@ function Step($name, $code) {
 Step 'pre-deploy gate' {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-PreDeployGate.ps1') `
         -StagedRoot $StagedRoot -StagedCommit $StagedCommit `
-        -ApprovedCommitParam $ApprovedCommitParam -TrustParam $TrustParam -Processor $Processor `
-        -Region $Region -LogFile $LogFile
+        -ApprovedCommitParam $ApprovedCommitParam -TrustParam $TrustParam -ManifestPath $ManifestPath `
+        -Processor $Processor -Region $Region -LogFile $LogFile
 }
 
 # Past the gate. -WhatIf short-circuits to the else branch; the real work runs here.

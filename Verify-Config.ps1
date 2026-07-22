@@ -14,6 +14,12 @@
                          check time (config key -> parameter name). Use for
                          values that must be tamper-resistant: editing the
                          contract file alongside the config won't fool this one.
+      sensitiveKeys      keys whose values must never appear in logs/reports.
+                         Comparison still happens on the real values, but any
+                         mismatch is reported as '(masked)'. Keys checked via
+                         ssmExpectedValues are ALWAYS reported masked (they are
+                         SecureString-gated in Parameter Store), whether or not
+                         they are listed here.
 
     Contract example:
     {
@@ -21,7 +27,8 @@
       "requiredKeys":  ["Storage:Provider","Outbound:QueueName"],
       "machineKeys":   ["Storage:ConnectionString","Endpoint:Url"],
       "expectedValues":{ "Outbound:Enabled": "true", "Tls:MinVersion": "1.2" },
-      "ssmExpectedValues": { "Outbound:QueueName": "/ves/SYSTEM/config/queue-name" }
+      "ssmExpectedValues": { "Outbound:QueueName": "/ves/SYSTEM/config/queue-name" },
+      "sensitiveKeys": ["Outbound:ApiToken"]
     }
 
     format is one of: appconfig, json, keyvalue.
@@ -83,6 +90,19 @@ $live = Get-FlatConfig -path $ConfigPath -format $contract.format
 $missingRequired = New-Object System.Collections.Generic.List[string]
 $valueMismatch = New-Object System.Collections.Generic.List[object]
 
+# sensitiveKeys: their values never reach a log or report ("secrets are never
+# written to any report" — only presence/equality is recorded). Comparison below
+# still uses the real values; only the REPORTED value is masked.
+$sensitiveKeys = @{}
+if ($contract.PSObject.Properties['sensitiveKeys'] -and $contract.sensitiveKeys) {
+    foreach ($k in @($contract.sensitiveKeys | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $sensitiveKeys[$k] = $true
+    }
+}
+function Get-ReportValue([string]$key, [string]$value) {
+    if ($sensitiveKeys.ContainsKey($key)) { '(masked)' } else { $value }
+}
+
 # requiredKeys: presence only, value irrelevant. Filter out $null/blank so a
 # contract that omits requiredKeys doesn't pass $null to Hashtable.ContainsKey
 # (which throws "Key cannot be null" -> caller maps it to a false exit 2).
@@ -93,7 +113,11 @@ foreach ($k in @($contract.requiredKeys | Where-Object { -not [string]::IsNullOr
 foreach ($p in $contract.expectedValues.PSObject.Properties) {
     if (-not $live.ContainsKey($p.Name)) { $missingRequired.Add($p.Name); continue }
     if ($live[$p.Name] -ne $p.Value) {
-        $valueMismatch.Add([PSCustomObject]@{ key = $p.Name; expected = $p.Value; actual = $live[$p.Name] })
+        $valueMismatch.Add([PSCustomObject]@{
+            key = $p.Name
+            expected = (Get-ReportValue $p.Name $p.Value)
+            actual   = (Get-ReportValue $p.Name $live[$p.Name])
+        })
     }
 }
 # machineKeys deliberately not compared
@@ -106,7 +130,9 @@ if ($contract.PSObject.Properties['ssmExpectedValues'] -and $contract.ssmExpecte
         $expected = Get-VesTrustedHash -ParameterName $p.Value -Region $Region
         if (-not $live.ContainsKey($p.Name)) { $missingRequired.Add($p.Name); continue }
         if ($live[$p.Name] -ne $expected) {
-            $valueMismatch.Add([PSCustomObject]@{ key = $p.Name; expected = "(ssm:$($p.Value))"; actual = $live[$p.Name] })
+            # actual is ALWAYS masked here: the pinned value is SecureString-gated
+            # in SSM, so the live value it diverged from is treated as sensitive too.
+            $valueMismatch.Add([PSCustomObject]@{ key = $p.Name; expected = "(ssm:$($p.Value))"; actual = '(masked)' })
         }
     }
 }

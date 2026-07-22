@@ -5,6 +5,12 @@
       1. staged commit equals the UAT-approved commit
       2. (optional, when -TrustParam set) staged tree hashes to the trusted manifest
 
+    When the content gate fails and -ManifestPath points at the baseline manifest,
+    the block message names the exact files at fault ("Deployment blocked:
+    bin/Storage.Net.dll is missing from the artifact") instead of only the
+    aggregate hash mismatch. The manifest is only used for naming if its own hash
+    matches the SSM-trusted hash, so a tampered manifest can't mislabel the diff.
+
     Exit 0 pass, 1 blocked, 2 SSM/trust error, 10 usage.
 
     -AllowOverride is the break-glass path. It requires -OverrideReason and writes
@@ -18,6 +24,9 @@ param(
     [Parameter(Mandatory)][string]$StagedCommit,
     [Parameter(Mandatory)][string]$ApprovedCommitParam,
     [string]$TrustParam,
+    # baseline manifest path; optional, used only to NAME the files behind a
+    # content-gate failure (missing/changed/extra) in the block message
+    [string]$ManifestPath,
     [string]$Processor = 'unknown',
     [string]$Region = 'us-gov-west-1',
     [switch]$AllowOverride,
@@ -72,7 +81,35 @@ try {
         $manifest = Get-VesManifest -ReleaseRoot $StagedRoot
         $stagedHash = Get-VesManifestHash -Manifest $manifest
         if ($stagedHash -ne $trustedHash) {
-            Fail-Gate "Staged tree hash $stagedHash != trusted $trustedHash"
+            # Default message when we can't do better than the aggregate hash.
+            $msg = "Staged tree hash $stagedHash != trusted $trustedHash"
+            # Name the files at fault when the baseline manifest is available AND
+            # itself matches the SSM-trusted hash (an untrusted manifest could
+            # mislabel the diff, so it is not used for naming).
+            if ($ManifestPath) {
+                try {
+                    $m = Import-VesManifest -Path $ManifestPath
+                    if ($m.Consistent -and $m.RecomputedHash -eq $trustedHash) {
+                        $cmp = Compare-VesFiles -Baseline $m.Doc.files -ReleaseRoot $StagedRoot
+                        foreach ($x in $cmp.Missing) { Write-VesLog ERROR "  MISSING from artifact: $x" -LogFile $LogFile }
+                        foreach ($x in $cmp.Changed) { Write-VesLog ERROR "  CHANGED vs approved:   $($x.RelPath)" -LogFile $LogFile }
+                        foreach ($x in $cmp.Extra)   { Write-VesLog ERROR "  EXTRA in artifact:     $x" -LogFile $LogFile }
+                        $counts = '{0} missing, {1} changed, {2} extra' -f $cmp.Missing.Count, $cmp.Changed.Count, $cmp.Extra.Count
+                        if ($cmp.Missing.Count) {
+                            $msg = "Deployment blocked: $($cmp.Missing[0]) is missing from the artifact ($counts)"
+                        } else {
+                            $msg = "Deployment blocked: staged artifact does not match the approved release ($counts)"
+                        }
+                    } else {
+                        # The local manifest disagrees with SSM: that IS the likely story
+                        # behind the hash mismatch, so say so instead of naming files off it.
+                        Write-VesLog WARN "Baseline manifest at $ManifestPath is stale or tampered (does not match SSM-trusted hash); cannot name files." -LogFile $LogFile
+                    }
+                } catch {
+                    Write-VesLog WARN "Could not read baseline manifest for file-level detail: $($_.Exception.Message)" -LogFile $LogFile
+                }
+            }
+            Fail-Gate $msg
         }
         Write-VesLog OK 'Content gate PASS.' -LogFile $LogFile
     }
