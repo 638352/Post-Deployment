@@ -7,6 +7,14 @@
       VerifyConfig  structural check of live config against a sanitized contract
       All           VerifyFiles then VerifyConfig
 
+    Capture can also archive the release record to Git: -ArchiveRepo <path to a
+    git checkout> commits the manifest (and the config contract, if -ConfigContract
+    is passed) under baselines/<processor>/, and -ReleaseTag tags the commit
+    (e.g. OutboundDBQ/v1.4.0). This is the audit layer the brief asks for: the
+    manifest and sanitized contract live under a release tag as the rollback/
+    audit point. An archive failure fails the capture (exit 2) -- an unrecorded
+    baseline must not look captured.
+
     Exit codes: 0 match, 1 drift, 2 no baseline / trust failure, 10 usage.
     Replaces the earlier Verify-Deployment.ps1 Capture/Verify script.
 .EXAMPLE
@@ -28,6 +36,10 @@ param(
     [string]$ConfigContract,
     [string]$ConfigPath,
     [string]$TrustParam,
+    # Capture only: git checkout to commit the manifest/contract into, and an
+    # optional release tag to pin the record under (audit layer; see header)
+    [string]$ArchiveRepo,
+    [string]$ReleaseTag,
     [string]$Processor = 'unknown',
     [string]$CommitSha = 'unknown',
     [string]$Region = 'us-gov-west-1',
@@ -53,6 +65,23 @@ $result = [ordered]@{ mode=$Mode; processor=$Processor; status=$null; detail=@{}
 function Out-Result([int]$code) {
     if ($Json) { ($result | ConvertTo-Json -Depth 6 -Compress) }
     exit $code
+}
+
+# Run git and throw a readable error on any non-zero exit. Same PS 5.1 trap as
+# the AWS CLI: under ErrorActionPreference=Stop, stderr from a native command
+# becomes terminating, so scope the preference down around the call.
+function Invoke-VesGit([string[]]$GitArgs) {
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw 'git not found on PATH; required for -ArchiveRepo'
+    }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $out = & git @GitArgs 2>&1; $code = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    if ($code -ne 0) {
+        throw ("git {0} failed (exit {1}): {2}" -f ($GitArgs -join ' '), $code, ((@($out) | ForEach-Object { "$_" }) -join ' '))
+    }
+    return (@($out) | ForEach-Object { "$_" }) -join "`n"
 }
 
 # Emit the verify outcome to Datadog as gauges (non-fatal), mirroring Invoke-HealthCheck.
@@ -83,7 +112,39 @@ try {
                 # without the SSM pin this baseline detects drift but not tampering
                 Write-VesLog WARN 'No -TrustParam given; baseline is NOT trust-anchored.' -LogFile $LogFile
             }
-            $result.status = 'captured'; $result.detail = @{ fileCount=$manifest.Count; manifestHash=$hash }
+            # Audit layer: commit the release record (manifest + contract) to Git and
+            # optionally tag it. Any failure throws into the outer catch -> exit 2,
+            # because a baseline whose record didn't land must not look captured.
+            if ($ArchiveRepo) {
+                if (-not (Test-Path -LiteralPath (Join-Path $ArchiveRepo '.git'))) {
+                    throw "-ArchiveRepo is not a git checkout: $ArchiveRepo"
+                }
+                $destRel = Join-Path 'baselines' $Processor
+                $dest = Join-Path $ArchiveRepo $destRel
+                if (-not (Test-Path -LiteralPath $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+                Copy-Item -LiteralPath $ManifestPath -Destination $dest -Force
+                if ($ConfigContract) {
+                    if (-not (Test-Path -LiteralPath $ConfigContract)) { throw "Config contract to archive not found: $ConfigContract" }
+                    Copy-Item -LiteralPath $ConfigContract -Destination $dest -Force
+                }
+                [void](Invoke-VesGit @('-C', $ArchiveRepo, 'add', '--', $destRel))
+                # skip the commit when a re-capture staged nothing new; the tag (if
+                # any) then lands on the existing record
+                $staged = $true
+                try { [void](Invoke-VesGit @('-C', $ArchiveRepo, 'diff', '--cached', '--quiet')); $staged = $false } catch { $staged = $true }
+                if ($staged) {
+                    [void](Invoke-VesGit @('-C', $ArchiveRepo, 'commit', '-m',
+                        ("Baseline capture: {0} commit={1} hash={2}" -f $Processor, $CommitSha, $hash)))
+                }
+                if ($ReleaseTag) {
+                    [void](Invoke-VesGit @('-C', $ArchiveRepo, 'tag', '-a', $ReleaseTag, '-m',
+                        ("Baseline {0} manifestHash={1}" -f $Processor, $hash)))
+                }
+                Write-VesLog OK ("Baseline archived to Git: {0} ({1})" -f $ArchiveRepo, $(if ($ReleaseTag) { "tag $ReleaseTag" } else { 'no tag' })) -LogFile $LogFile
+                $result['detail']['archivedTo'] = $ArchiveRepo
+                if ($ReleaseTag) { $result['detail']['releaseTag'] = $ReleaseTag }
+            }
+            $result.status = 'captured'; $result.detail['fileCount'] = $manifest.Count; $result.detail['manifestHash'] = $hash
             Out-Result $VES_EXIT_OK
         }
 

@@ -67,6 +67,41 @@ Describe 'VerifyFiles' {
     }
 }
 
+Describe 'Capture -ArchiveRepo' {
+    BeforeAll {
+        $script:Repo = Join-Path $TestDrive 'audit-repo'
+        New-Item -ItemType Directory -Path $script:Repo -Force | Out-Null
+        git -C $script:Repo init --quiet
+        git -C $script:Repo config user.email 'test@example.com'
+        git -C $script:Repo config user.name 'ves-verify tests'
+    }
+
+    It 'commits the manifest under the processor baselines folder and tags the release' {
+        $mp = Join-Path $script:Root 'archived-baseline.json'
+        $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
+            '-Mode','Capture','-ReleaseRoot',$script:Release,
+            '-ManifestPath',$mp,'-Processor','archtest',
+            '-ArchiveRepo',$script:Repo,'-ReleaseTag','archtest/v1.0.0','-Json')
+        $r.ExitCode | Should -Be 0
+        $r.Output   | Should -Match 'Baseline archived to Git'
+        Test-Path (Join-Path $script:Repo 'baselines\archtest\archived-baseline.json') | Should -BeTrue
+        @(git -C $script:Repo tag)              | Should -Contain 'archtest/v1.0.0'
+        (git -C $script:Repo log --oneline -1)  | Should -Match 'Baseline capture: archtest'
+    }
+
+    It 'fails the capture (exit 2) when the archive repo is not a git checkout' {
+        $notRepo = Join-Path $TestDrive 'not-a-repo'
+        New-Item -ItemType Directory -Path $notRepo -Force | Out-Null
+        $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
+            '-Mode','Capture','-ReleaseRoot',$script:Release,
+            '-ManifestPath',(Join-Path $script:Root 'archived-baseline-2.json'),
+            '-Processor','archtest','-ArchiveRepo',$notRepo,'-Json')
+        $r.ExitCode    | Should -Be 2
+        $r.Json.status | Should -Be 'error'
+        $r.Output      | Should -Match 'not a git checkout'
+    }
+}
+
 Describe 'VerifyConfig' {
     BeforeAll {
         $script:ConfigContract = Join-Path $PSScriptRoot 'fixtures\json\contract.json'
