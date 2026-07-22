@@ -1,6 +1,0 @@
-{
-  "format": "appconfig",
-  "requiredKeys": ["Outbound:QueueName", "ConnectionStrings:Oms"],
-  "machineKeys": ["ConnectionStrings:Oms"],
-  "expectedValues": { "Outbound:Enabled": "true", "Tls:MinVersion": "1.2" }
-}
