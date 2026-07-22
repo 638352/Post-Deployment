@@ -8,6 +8,9 @@
                      region all exercised by a --with-decryption get-parameter)
       manifest       baseline manifest exists, is self-consistent, and its hash
                      matches the SSM-pinned trusted hash (tamper anchor intact)
+      manifest-pattern  baseline holds no entries the current exclude pattern
+                     would drop (WARN = captured under older rules, re-capture
+                     and re-pin; readiness is not affected)
       config         config contract file parses and declares a known format
 
     Two ways to invoke:
@@ -69,26 +72,50 @@ function Test-AwsCli {
 function Test-SsmParam([string]$ParamName) {
     if ([string]::IsNullOrWhiteSpace($ParamName)) { return }
     Test-AwsCli
-    # attempt the decrypted read, capturing stderr so we can classify the failure below
-    $out = & aws ssm get-parameter --name $ParamName --with-decryption `
-        --region $Region --query 'Parameter.Value' --output text 2>&1
-    $code = $LASTEXITCODE
+    # Invoke-VesAwsCli, not a bare '& aws ... 2>&1': under $ErrorActionPreference
+    # ='Stop' the CLI's stderr becomes a TERMINATING error, which used to abort the
+    # whole run into the outer catch. That made the classification below dead code
+    # on exactly the failures it exists to explain, and (in -TargetsFile mode)
+    # aborted on the first bad target instead of reporting every one.
+    $r = Invoke-VesAwsCli -Arguments @(
+        'ssm','get-parameter','--name',$ParamName,'--with-decryption',
+        '--region',$Region,'--query','Parameter.Value','--output','text')
     # success: report readability by length only (the value may be a secret)
-    if ($code -eq 0 -and -not [string]::IsNullOrWhiteSpace(($out | Out-String))) {
+    if ($r.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($r.StdOut)) {
         # don't echo the value; it may be a secret. show length only.
-        $val = ($out | Out-String).Trim()
+        $val = $r.StdOut.Trim()
         Add-Check "ssm:$ParamName" 'PASS' ("readable ({0} chars)" -f $val.Length)
         return $val
     }
     # failure: translate the CLI's error text into an actionable reason
-    $msg = ($out | Out-String).Trim()
+    $msg = $r.StdErr.Trim()
     if ($msg -match 'ParameterNotFound') { $why = 'parameter does not exist (check path/region)' }
     elseif ($msg -match 'AccessDenied')   { $why = 'access denied (IAM ssm:GetParameter / kms:Decrypt)' }
     elseif ($msg -match 'ExpiredToken|Unable to locate credentials') { $why = 'no/expired credentials on host' }
     elseif ($msg) { $why = ($msg -replace '\s+',' ') }
-    else { $why = "unreadable (aws exit $code, no output)" }
+    else { $why = "unreadable (aws exit $($r.ExitCode), no output)" }
     Add-Check "ssm:$ParamName" 'FAIL' $why
     return $null
+}
+
+# --- baseline captured under a superseded exclude pattern? ---------------------
+# The exclude pattern once missed top-level logs\ / temp\ / cache\ / .git\ dirs, so
+# baselines captured before that fix can carry entries the current pattern drops.
+# Such a baseline is intact and trusted, but re-capturing it changes its hash and
+# breaks the SSM pin -- so flag it here rather than let a scheduled drift check
+# discover it as an exit 2 at 2am. Needs no prod files: it reads the manifest's own
+# file list. WARN, never FAIL -- the box is ready, the baseline just needs re-pinning.
+function Test-ManifestPatternStale($Manifest) {
+    $rels = @($Manifest.Doc.files | ForEach-Object { $_.RelPath })
+    # manifest RelPaths are '/'-normalized; test them the way capture would see them
+    $stale = @($rels | Where-Object { ($_ -replace '/','\') -match $Global:VES_DEFAULT_EXCLUDE })
+    if ($stale.Count) {
+        $sample = ($stale | Select-Object -First 3) -join ', '
+        Add-Check 'manifest-pattern' 'WARN' ("{0} entr{1} the current exclude pattern would drop (e.g. {2}); re-capture to re-pin" -f `
+            $stale.Count, $(if ($stale.Count -eq 1) {'y'} else {'ies'}), $sample)
+    } else {
+        Add-Check 'manifest-pattern' 'PASS' 'captured under the current exclude pattern'
+    }
 }
 
 # --- baseline manifest integrity + trust anchor, no prod files needed ---
@@ -105,6 +132,8 @@ function Test-Manifest([string]$Path, [string]$Trust) {
         Add-Check 'manifest' 'FAIL' "self-hash mismatch (edited/corrupt): stored=$($m.StoredHash) recomputed=$($m.RecomputedHash)"
         return
     }
+    # intact, so it is worth asking whether it was captured under the current rules
+    Test-ManifestPatternStale $m
     # if a trust param is given, the manifest hash must match the SSM-pinned value
     if (-not [string]::IsNullOrWhiteSpace($Trust)) {
         $pinned = Test-SsmParam $Trust

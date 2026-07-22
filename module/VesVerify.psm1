@@ -25,6 +25,23 @@ $Global:VES_EXIT_NOBASE    = 2      # Baseline missing, unreadable, or failed tr
 $Global:VES_EXIT_HEALTH    = 3      # Functional health failure (independent of baseline).
 $Global:VES_EXIT_USAGE     = 10     # Caller passed bad/missing parameters.
 
+# --- Default manifest exclude pattern (single source of truth) ---------------
+# Capture and compare MUST use the same rules: if they disagree, files excluded at
+# capture time resurface as "Extra" at verify time and every check reports drift.
+# Defined once here; Get-VesManifest and Compare-VesFiles both default to it.
+#
+# Two rules, OR'd:
+#   (^|\\)(logs|temp|cache|\.git)\\   runtime dirs, at the root OR nested. The
+#                                     (^|\\) alternation is load-bearing: a bare
+#                                     \\ prefix only matches nested dirs, so a
+#                                     top-level logs\ leaked into the baseline and
+#                                     produced permanent false drift.
+#   \.(log|tmp|config)$               churny extensions. .config is excluded by
+#                                     design (server-specific log4net paths);
+#                                     config is verified structurally by
+#                                     Verify-Config.ps1, not by byte-hash.
+$Global:VES_DEFAULT_EXCLUDE = '(?i)(^|\\)(logs|temp|cache|\.git)\\|\.(log|tmp|config)$'
+
 # PowerShell 5.1 defaults to SSL3/TLS1.0, which ddog-gov and AWS endpoints reject.
 # OR the existing protocol set with Tls12 (rather than replacing) so we add, not remove, protocols.
 [Net.ServicePointManager]::SecurityProtocol = `
@@ -75,17 +92,19 @@ function Get-VesManifest {
     param(
         # Root of the artifact tree to hash (UAT release dir or prod install dir).
         [Parameter(Mandatory)][string]$ReleaseRoot,
-        # Regex of paths to skip: logs/temp/cache/.git and log/tmp/config extensions.
-        # .config is excluded by design (server-specific log4net paths); config is
-        # verified structurally by Verify-Config, not by byte-hash.
-        [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp|config)$'
+        # Regex of paths to skip; see $Global:VES_DEFAULT_EXCLUDE for the rules.
+        [string]$ExcludePattern = $Global:VES_DEFAULT_EXCLUDE
     )
     # Fail early with a clear message if the root doesn't exist (bad path = usage error, not "0 files").
     if (-not (Test-Path -LiteralPath $ReleaseRoot)) {
         throw "ReleaseRoot not found: $ReleaseRoot"
     }
-    # Resolve to an absolute, canonical path; trim trailing '\' so substring math below is exact.
-    $root = (Resolve-Path -LiteralPath $ReleaseRoot).Path.TrimEnd('\')
+    # Normalize via Get-Item, NOT Resolve-Path. Resolve-Path preserves 8.3 short
+    # names (C:\Users\HOWARD~1\...) while the FileInfo.FullName values below expand
+    # them (C:\Users\howardr01\...). The prefixes then differ in length and the
+    # relative-path slice silently comes out wrong, which manifests as a whole tree
+    # reported missing+extra. Get-Item normalizes the same way Get-ChildItem does.
+    $root = (Get-Item -LiteralPath $ReleaseRoot).FullName.TrimEnd('\')
     # Recurse all files including hidden (-Force); stop on access errors rather than silently skipping.
     $items = Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction Stop
 
@@ -93,8 +112,14 @@ function Get-VesManifest {
     $out = New-Object System.Collections.Generic.List[object]
     # Walk every file found under the root.
     foreach ($f in $items) {
-        # Compute the path relative to root (+1 skips the path separator itself).
-        $rel = $f.FullName.Substring($root.Length + 1)
+        # Guard the prefix assumption instead of trusting it. Strip by separator
+        # (TrimStart) rather than by a fixed +1 offset, so any future normalization
+        # mismatch fails loud here rather than silently corrupting every RelPath.
+        if (-not $f.FullName.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Path escapes ReleaseRoot: $($f.FullName) (root: $root)"
+        }
+        # Compute the path relative to root.
+        $rel = $f.FullName.Substring($root.Length).TrimStart('\')
         # Skip anything matching the exclude regex (checked before hashing to save I/O).
         if ($rel -match $ExcludePattern) { continue }
         # Normalize separators to '/' so manifests hash identically regardless of tooling.
@@ -212,7 +237,7 @@ function Compare-VesFiles {
         # Live production tree to compare.
         [Parameter(Mandatory)][string]$ReleaseRoot,
         # Must match the pattern used at capture, or excluded files appear as extras.
-        [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp|config)$'
+        [string]$ExcludePattern = $Global:VES_DEFAULT_EXCLUDE
     )
     # Hash the live tree with the same rules used at capture time.
     $live = Get-VesManifest -ReleaseRoot $ReleaseRoot -ExcludePattern $ExcludePattern
@@ -255,6 +280,50 @@ function Compare-VesFiles {
 # lives in SSM (write-gated). Verify reads the trusted hash from SSM, not the
 # file, so an attacker who edits prod files + manifest still fails the check.
 
+function Invoke-VesAwsCli {
+    <#
+    .SYNOPSIS Run the AWS CLI and return StdOut/StdErr/ExitCode without throwing.
+    .NOTES
+      Exists because of two Windows PowerShell 5.1 traps that silently broke every
+      caller here:
+
+      1. Under $ErrorActionPreference='Stop', a native command writing to stderr
+         becomes a *terminating* NativeCommandError -- with '2>&1' AND with '2>$null'.
+         Callers' own "if ($LASTEXITCODE -ne 0) { throw <useful message> }" lines
+         therefore never ran, and the raw CLI text escaped instead. We scope the
+         preference to 'Continue' around the call so control returns to the caller.
+
+      2. Merging streams with '2>&1' splices stderr into the value. The AWS CLI can
+         emit warnings to stderr on a *successful* call, which would corrupt a
+         parameter value. We split the merged stream back apart by object type, so
+         StdOut carries only real output.
+    #>
+    [CmdletBinding()]
+    param(
+        # Arguments passed through to the aws executable.
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+    # Missing CLI is a clean non-zero result, not a CommandNotFoundException that
+    # would blow past the caller's error handling.
+    if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+        return [PSCustomObject]@{ StdOut=''; StdErr='AWS CLI not found on PATH'; ExitCode=127 }
+    }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out  = & aws @Arguments 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        # Restore even if the call blows up, so we never leak 'Continue' to the caller.
+        $ErrorActionPreference = $prev
+    }
+    # Split the merged stream: ErrorRecords came from stderr, everything else is stdout.
+    $stdout = @($out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
+    $stderr = @($out | Where-Object { $_ -is  [System.Management.Automation.ErrorRecord] } |
+                       ForEach-Object { $_.ToString() }) -join ' '
+    return [PSCustomObject]@{ StdOut=$stdout; StdErr=$stderr; ExitCode=$code }
+}
+
 function Get-VesTrustedHash {
     [CmdletBinding()]
     param(
@@ -264,15 +333,16 @@ function Get-VesTrustedHash {
         [string]$Region = 'us-gov-west-1'
     )
     # Call the AWS CLI directly (no AWSPowerShell module dependency on legacy hosts).
-    # --with-decryption handles SecureString; stderr suppressed, failure detected via exit code.
-    $raw = & aws ssm get-parameter --name $ParameterName --with-decryption `
-        --region $Region --query 'Parameter.Value' --output text 2>$null
+    # --with-decryption handles SecureString; failure detected via exit code.
+    $r = Invoke-VesAwsCli -Arguments @(
+        'ssm','get-parameter','--name',$ParameterName,'--with-decryption',
+        '--region',$Region,'--query','Parameter.Value','--output','text')
     # Treat CLI failure OR empty value as a trust failure -- never proceed on a blank anchor.
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
-        throw "SSM read failed for $ParameterName (region $Region). aws exit=$LASTEXITCODE"
+    if ($r.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($r.StdOut)) {
+        throw ("SSM read failed for $ParameterName (region $Region). aws exit=$($r.ExitCode). $($r.StdErr)").Trim()
     }
     # Trim the trailing newline the CLI text output includes.
-    return $raw.Trim()
+    return $r.StdOut.Trim()
 }
 
 function Set-VesTrustedHash {
@@ -286,10 +356,13 @@ function Set-VesTrustedHash {
         [string]$Region = 'us-gov-west-1'
     )
     # SecureString type gates reads behind kms:Decrypt; --overwrite allows re-pinning on each release.
-    & aws ssm put-parameter --name $ParameterName --value $Value --type SecureString `
-        --overwrite --region $Region | Out-Null
+    $r = Invoke-VesAwsCli -Arguments @(
+        'ssm','put-parameter','--name',$ParameterName,'--value',$Value,
+        '--type','SecureString','--overwrite','--region',$Region)
     # Surface CLI failure as a hard error -- an unpinned baseline must not look like success.
-    if ($LASTEXITCODE -ne 0) { throw "SSM write failed for $ParameterName. aws exit=$LASTEXITCODE" }
+    if ($r.ExitCode -ne 0) {
+        throw ("SSM write failed for $ParameterName. aws exit=$($r.ExitCode). $($r.StdErr)").Trim()
+    }
 }
 
 # --- Datadog (ddog-gov) -------------------------------------------------------
@@ -393,4 +466,4 @@ function Send-VesDatadogEvent {
 Export-ModuleMember -Function `
     Write-VesLog, Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
     Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash, `
-    Send-VesDatadogMetric, Send-VesDatadogEvent, Get-VesDatadogEnvTag
+    Invoke-VesAwsCli, Send-VesDatadogMetric, Send-VesDatadogEvent, Get-VesDatadogEnvTag

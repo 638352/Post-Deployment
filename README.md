@@ -150,7 +150,37 @@ application.properties file is keyvalue).
 
 Config files (*.config) are excluded from the file-hash compare on purpose: the
 legacy App.config carries server-specific log4net paths that differ every
-UAT->PROD, so config is checked by contract (Verify-Config), not by hash.
+UAT->PROD, so config is checked by contract (Verify-Config), not by hash. The
+runtime dirs `logs\`, `temp\`, `cache\` and `.git\` are excluded too, at the root
+and at any depth. All of this lives in one place — `$Global:VES_DEFAULT_EXCLUDE`
+in module/VesVerify.psm1 — because capture and compare must use identical rules;
+if they disagree, excluded files resurface as "Extra" and every check reports drift.
+
+## Upgrading: re-pin baselines captured under the old exclude pattern
+
+The exclude pattern previously matched `logs\`/`temp\`/`cache\`/`.git\` only when
+nested, so a **top-level** one leaked into the baseline. Fixing that changes which
+files a manifest contains, which changes its hash, which breaks the SSM pin — the
+next check would report exit 2 (trust failure).
+
+Only baselines whose release root actually has a top-level `logs\`, `temp\`,
+`cache\` or `.git\` are affected. To find them without touching prod files:
+
+```powershell
+.\Invoke-Preflight.ps1 -TargetsFile D:\ves-verify\targets.json
+```
+
+Any target reporting a `manifest-pattern` **WARN** needs re-capture. WARN does not
+block readiness, so a clean run here means nothing to do. For each flagged target,
+re-capture and re-pin:
+
+```powershell
+.\Invoke-Verification.ps1 -Mode Capture -ReleaseRoot <releaseRoot> `
+  -ManifestPath <manifestPath> -TrustParam <trustParam> -Processor <name>
+```
+
+Baselines with no such directory hash identically before and after the change and
+need nothing.
 
 Monitoring: every script writes structured JSONL via -LogFile and returns a
 meaningful exit code (see above). The drift runner writes one timestamped log

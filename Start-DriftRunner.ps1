@@ -51,7 +51,8 @@ foreach ($t in $targets) {
         ConfigPath = $t.configPath; Processor = $t.processor; Region = $Region
         LogFile = $log; Json = $true
     }
-    $raw  = & $verify @params
+    # discard the -Json line: the per-target JSONL log is the durable record
+    $null = & $verify @params
     $code = $LASTEXITCODE   # grab before anything else runs
 
     # classify the outcome and raise $worst accordingly (trust failure > drift > clean).
@@ -98,14 +99,29 @@ if ($trustFailNames.Count -or $driftedNames.Count) {
         -Text ($lines -join "`n") -AlertType $alertType -Tags $ddTags
 }
 
-# log cleanup: this pass just wrote fresh logs, now drop the stale ones. Only
-# files matching this runner's own name_stamp.jsonl pattern get touched, so a
-# stray file someone parked in the folder survives. Pruning failures are warned,
-# never fatal -- housekeeping must not change the run's exit code.
-if ($LogRetentionDays -gt 0) {
+# log cleanup: this pass just wrote fresh logs, now drop the stale ones.
+#
+# The allowlist is built from the processor names handled THIS run, regex-escaped
+# and anchored with ^. A looser '_<stamp>.jsonl$' match also caught the
+# deploy_<processor>_<stamp>.jsonl audit logs that the processor wrappers write
+# into this same folder -- the drift runner was silently eating the deploy audit
+# trail. Anchoring to known target names keeps deploy_* and any stray file safe.
+#
+# Trade-off: logs for a target later removed from targets.json stop being pruned.
+# That is deliberate -- editing a config file should not silently delete history.
+#
+# Pruning failures are warned, never fatal -- housekeeping must not change the exit code.
+if ($LogRetentionDays -gt 0 -and $targetCount -gt 0) {
     $cutoff = (Get-Date).AddDays(-$LogRetentionDays)
-    $stale = @(Get-ChildItem -LiteralPath $LogDir -File -Filter '*.jsonl' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '_\d{8}T\d{6}Z\.jsonl$' -and $_.LastWriteTime -lt $cutoff })
+    # Guard the empty case: an empty alternation '^()_...' would match everything.
+    $alt = @($targets | ForEach-Object { $_.processor } |
+             Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+             ForEach-Object { [regex]::Escape($_) }) -join '|'
+    $ownLog = "^($alt)_\d{8}T\d{6}Z\.jsonl$"
+    $stale = @(if ($alt) {
+        Get-ChildItem -LiteralPath $LogDir -File -Filter '*.jsonl' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $ownLog -and $_.LastWriteTime -lt $cutoff }
+    })
     foreach ($f in $stale) {
         try { Remove-Item -LiteralPath $f.FullName -Force }
         catch { Write-VesLog WARN "Could not prune $($f.Name): $($_.Exception.Message)" }

@@ -3,15 +3,20 @@
 # TestDrive tree; no AWS, host state, or network.
 
 BeforeAll {
+    . (Join-Path $PSScriptRoot '_helpers.ps1')   # Get-WinPowerShellPath for the child-process case
     $script:ModulePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'module\VesVerify.psm1'
     Import-Module $script:ModulePath -Force
 
     # two real files plus some the default exclude drops: the *.config/*.log/*.tmp
-    # extensions, and nested logs\ / .git\ dirs. The dir rules need \logs\ / \.git\
-    # with a leading separator, so they only bite below the root - hence sub\.
+    # extensions, and the logs\ / temp\ / cache\ / .git\ runtime dirs. The dir rules
+    # must bite at BOTH depths - top-level and nested - so the tree covers both.
     $script:Tree = Join-Path $TestDrive 'release'
     New-Item -ItemType Directory -Path $script:Tree -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $script:Tree 'bin')       -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $script:Tree 'logs')      -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $script:Tree 'temp')      -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $script:Tree 'cache')     -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $script:Tree '.git')      -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $script:Tree 'sub\logs')  -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $script:Tree 'sub\.git')  -Force | Out-Null
 
@@ -22,6 +27,12 @@ BeforeAll {
     Set-Content -Path (Join-Path $script:Tree 'scratch.tmp')      -Value 'drop-tmp'     -NoNewline
     Set-Content -Path (Join-Path $script:Tree 'sub\logs\run.txt') -Value 'drop-logsdir' -NoNewline
     Set-Content -Path (Join-Path $script:Tree 'sub\.git\HEAD')    -Value 'drop-git'     -NoNewline
+    # top-level runtime dirs: these leaked into the baseline before the (^|\\) fix,
+    # and a churning top-level Logs\ meant permanent false drift on every check.
+    Set-Content -Path (Join-Path $script:Tree 'logs\run.txt')     -Value 'drop-toplogs'  -NoNewline
+    Set-Content -Path (Join-Path $script:Tree 'temp\scratch.dat') -Value 'drop-toptemp'  -NoNewline
+    Set-Content -Path (Join-Path $script:Tree 'cache\blob.bin')   -Value 'drop-topcache' -NoNewline
+    Set-Content -Path (Join-Path $script:Tree '.git\HEAD')        -Value 'drop-topgit'   -NoNewline
 }
 
 Describe 'Get-VesManifest' {
@@ -41,6 +52,16 @@ Describe 'Get-VesManifest' {
         $rels | Should -Not -Contain 'scratch.tmp'
         $rels | Should -Not -Contain 'sub/logs/run.txt'
         $rels | Should -Not -Contain 'sub/.git/HEAD'
+    }
+
+    It 'drops TOP-LEVEL logs\ / temp\ / cache\ / .git\ dirs, not just nested ones' {
+        # regression: the old pattern required a separator before the dir name, so
+        # only nested dirs matched and a top-level logs\ leaked into the baseline
+        $rels = $script:Manifest.RelPath
+        $rels | Should -Not -Contain 'logs/run.txt'
+        $rels | Should -Not -Contain 'temp/scratch.dat'
+        $rels | Should -Not -Contain 'cache/blob.bin'
+        $rels | Should -Not -Contain '.git/HEAD'
     }
 
     It 'uses forward-slash relative paths' {
@@ -63,6 +84,105 @@ Describe 'Get-VesManifest' {
 
     It 'throws on a missing release root' {
         { Get-VesManifest -ReleaseRoot (Join-Path $TestDrive 'nope') } | Should -Throw
+    }
+
+    It 'gives identical results whether the root is spelled long or 8.3-short' {
+        # regression: Resolve-Path PRESERVES 8.3 short names while FileInfo.FullName
+        # EXPANDS them, so the old Substring($root.Length + 1) slice came out one
+        # char short and every RelPath was silently corrupted -- a clean tree then
+        # reported as entirely missing + extra.
+        $fso = New-Object -ComObject Scripting.FileSystemObject
+        $short = $fso.GetFolder($script:Tree).ShortPath
+        if ($short -eq $script:Tree) {
+            Set-ItResult -Skipped -Because '8.3 name generation is disabled on this volume'
+            return
+        }
+        $viaLong  = Get-VesManifest -ReleaseRoot $script:Tree
+        $viaShort = Get-VesManifest -ReleaseRoot $short
+        (@($viaShort.RelPath) -join '|') | Should -Be (@($viaLong.RelPath) -join '|')
+        (Get-VesManifestHash -Manifest $viaShort) | Should -Be (Get-VesManifestHash -Manifest $viaLong)
+    }
+
+    It 'defaults ExcludePattern to the shared module constant' {
+        # capture and compare must never drift apart; pin both to one source
+        $d = (Get-Command Get-VesManifest).ScriptBlock.Ast.Body.ParamBlock.Parameters |
+             Where-Object { $_.Name.VariablePath.UserPath -eq 'ExcludePattern' }
+        $d.DefaultValue.Extent.Text | Should -Be '$Global:VES_DEFAULT_EXCLUDE'
+    }
+}
+
+Describe 'Compare-VesFiles exclude default' {
+    It 'defaults ExcludePattern to the same shared module constant' {
+        $d = (Get-Command Compare-VesFiles).ScriptBlock.Ast.Body.ParamBlock.Parameters |
+             Where-Object { $_.Name.VariablePath.UserPath -eq 'ExcludePattern' }
+        $d.DefaultValue.Extent.Text | Should -Be '$Global:VES_DEFAULT_EXCLUDE'
+    }
+}
+
+Describe 'Invoke-VesAwsCli' {
+    BeforeAll {
+        # shim an 'aws' on PATH so no real CLI or AWS account is involved
+        $script:Shim = Join-Path $TestDrive 'awsshim'
+        New-Item -ItemType Directory -Path $script:Shim -Force | Out-Null
+        $script:OldPath = $env:PATH
+        $env:PATH = "$script:Shim;$env:PATH"
+    }
+    AfterAll { $env:PATH = $script:OldPath }
+
+    It 'returns instead of throwing when the CLI writes to stderr and fails' {
+        # regression: under $ErrorActionPreference='Stop', native stderr became a
+        # TERMINATING error (with 2>&1 AND 2>$null), so callers' own error handling
+        # never ran and Preflight aborted its whole report.
+        Set-Content -Path (Join-Path $script:Shim 'aws.cmd') -Value @(
+            '@echo off'
+            'echo An error occurred (ParameterNotFound) when calling GetParameter 1>&2'
+            'exit /b 254')
+        $ErrorActionPreference = 'Stop'
+        # assign outside the assertion scriptblock: a scriptblock invoked by
+        # Should runs in a child scope, so an assignment inside it would not escape
+        { Invoke-VesAwsCli -Arguments @('ssm','get-parameter') } | Should -Not -Throw
+        $r = Invoke-VesAwsCli -Arguments @('ssm','get-parameter')
+        $r.ExitCode | Should -Be 254
+        $r.StdErr   | Should -Match 'ParameterNotFound'
+        $r.StdOut   | Should -Not -Match 'ParameterNotFound'
+    }
+
+    It 'keeps stderr out of StdOut on a successful call' {
+        # the AWS CLI can emit warnings to stderr on exit 0; a naive 2>&1 would
+        # splice them into the returned parameter value
+        Set-Content -Path (Join-Path $script:Shim 'aws.cmd') -Value @(
+            '@echo off'
+            'echo WARNING: deprecated flag 1>&2'
+            'echo real-parameter-value'
+            'exit /b 0')
+        $r = Invoke-VesAwsCli -Arguments @('ssm','get-parameter')
+        $r.ExitCode      | Should -Be 0
+        $r.StdOut.Trim() | Should -Be 'real-parameter-value'
+        $r.StdOut        | Should -Not -Match 'deprecated'
+        $r.StdErr        | Should -Match 'deprecated'
+    }
+
+    It 'surfaces a trust failure message naming the parameter and region' {
+        # Get-VesTrustedHash's own throw used to be dead code: native stderr under
+        # $ErrorActionPreference='Stop' threw first, losing the param name/region.
+        #
+        # This MUST run in a child powershell.exe with EAP=Stop set at SCRIPT scope,
+        # the way every real caller (Invoke-PreDeployGate, Invoke-Verification) sets
+        # it. Setting EAP inside a Pester It does not reach the module the same way,
+        # so an in-process version of this test passes even against the broken code.
+        Set-Content -Path (Join-Path $script:Shim 'aws.cmd') -Value @(
+            '@echo off'
+            'echo An error occurred (AccessDeniedException) 1>&2'
+            'exit /b 254')
+        $driver = Join-Path $TestDrive 'trusted-hash-driver.ps1'
+        Set-Content -Path $driver -Value @(
+            ('Import-Module ''{0}'' -Force' -f $script:ModulePath)
+            '$ErrorActionPreference = ''Stop'''
+            'try { Get-VesTrustedHash -ParameterName ''/ves/demo/baseline-hash'' -Region ''us-gov-west-1'' }'
+            'catch { $_.Exception.Message }')
+        $out = & (Get-WinPowerShellPath) -NoProfile -ExecutionPolicy Bypass -File $driver 2>&1 | Out-String
+        $out | Should -Match '/ves/demo/baseline-hash'
+        $out | Should -Match 'us-gov-west-1'
     }
 }
 

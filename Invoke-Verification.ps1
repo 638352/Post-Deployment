@@ -10,14 +10,14 @@
     Exit codes: 0 match, 1 drift, 2 no baseline / trust failure, 10 usage.
     Replaces the earlier Verify-Deployment.ps1 Capture/Verify script.
 .EXAMPLE
-    .\Invoke-Verification.ps1 -Mode VerifyFiles -ReleaseRoot C:\Procs\SYSTEM_NAME \
-      -ManifestPath D:\baselines\SYSTEM_NAME.json \
+    .\Invoke-Verification.ps1 -Mode VerifyFiles -ReleaseRoot C:\Procs\SYSTEM_NAME `
+      -ManifestPath D:\baselines\SYSTEM_NAME.json `
       -TrustParam /ves/PROCESSOR/baseline-hash
 .EXAMPLE
-    .\Invoke-Verification.ps1 -Mode All -ReleaseRoot C:\Procs\SYSTEM_NAME \
-      -ManifestPath D:\baselines\SYSTEM_NAME.json \
-      -TrustParam /ves/PROCESSOR/baseline-hash \
-      -ConfigContract D:\baselines\PROCESSOR.config.json \
+    .\Invoke-Verification.ps1 -Mode All -ReleaseRoot C:\Procs\SYSTEM_NAME `
+      -ManifestPath D:\baselines\SYSTEM_NAME.json `
+      -TrustParam /ves/PROCESSOR/baseline-hash `
+      -ConfigContract D:\baselines\PROCESSOR.config.json `
       -ConfigPath E:\apps\PROCESSOR\app.config -Json
 #>
 [CmdletBinding()]
@@ -31,16 +31,21 @@ param(
     [string]$Processor = 'unknown',
     [string]$CommitSha = 'unknown',
     [string]$Region = 'us-gov-west-1',
-    # .config excluded from the byte-hash by design (server-specific log4net
-    # paths); config is verified structurally by Verify-Config.ps1. See the
-    # module's Get-VesManifest for the rationale.
-    [string]$ExcludePattern = '(?i)\\(logs|temp|cache|\.git)\\|\.(log|tmp|config)$',
+    # Defaults to $Global:VES_DEFAULT_EXCLUDE, resolved after the module import
+    # below. It cannot be the param default: defaults bind BEFORE the script body
+    # runs, so the module constant does not exist yet at binding time and would
+    # silently bind $null on a fresh session. See the module for the rules --
+    # notably .config is excluded by design and checked by Verify-Config.ps1.
+    [string]$ExcludePattern,
     [string]$LogFile,
     [switch]$Json
 )
 
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+# Now that the module is loaded, fall back to the shared default. Capture and
+# compare must agree on this pattern or excluded files resurface as "Extra".
+if (-not $ExcludePattern) { $ExcludePattern = $Global:VES_DEFAULT_EXCLUDE }
 # accumulates the machine-readable result emitted when -Json is set
 $result = [ordered]@{ mode=$Mode; processor=$Processor; status=$null; detail=@{} }
 
