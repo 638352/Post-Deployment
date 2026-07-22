@@ -1,0 +1,4 @@
+{
+  "Outbound": { "Enabled": "true", "QueueName": "oms-outbound" },
+  "Tls": { "MinVersion": "1.2" }
+}

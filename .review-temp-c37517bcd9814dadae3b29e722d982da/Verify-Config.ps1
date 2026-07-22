@@ -41,7 +41,7 @@ $ErrorActionPreference = 'Stop'
 
 # both inputs must exist; then load the contract that says what the config must satisfy
 if (-not (Test-Path -LiteralPath $ContractPath)) { throw "Contract not found: $ContractPath" }
-if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Config not found: $ConfigPath" }
+if (-not (Test-Path -LiteralPath $ConfigPath))   { throw "Config not found: $ConfigPath" }
 $contract = Get-Content $ContractPath -Raw | ConvertFrom-Json
 
 function Get-FlatConfig([string]$path, [string]$format) {
@@ -81,7 +81,7 @@ function Get-FlatConfig([string]$path, [string]$format) {
 # flatten the live config once, then accumulate the two failure kinds below
 $live = Get-FlatConfig -path $ConfigPath -format $contract.format
 $missingRequired = New-Object System.Collections.Generic.List[string]
-$valueMismatch = New-Object System.Collections.Generic.List[object]
+$valueMismatch   = New-Object System.Collections.Generic.List[object]
 
 # requiredKeys: presence only, value irrelevant. Filter out $null/blank so a
 # contract that omits requiredKeys doesn't pass $null to Hashtable.ContainsKey
@@ -93,7 +93,7 @@ foreach ($k in @($contract.requiredKeys | Where-Object { -not [string]::IsNullOr
 foreach ($p in $contract.expectedValues.PSObject.Properties) {
     if (-not $live.ContainsKey($p.Name)) { $missingRequired.Add($p.Name); continue }
     if ($live[$p.Name] -ne $p.Value) {
-        $valueMismatch.Add([PSCustomObject]@{ key = $p.Name; expected = $p.Value; actual = $live[$p.Name] })
+        $valueMismatch.Add([PSCustomObject]@{ key=$p.Name; expected=$p.Value; actual=$live[$p.Name] })
     }
 }
 # machineKeys deliberately not compared
@@ -106,7 +106,7 @@ if ($contract.PSObject.Properties['ssmExpectedValues'] -and $contract.ssmExpecte
         $expected = Get-VesTrustedHash -ParameterName $p.Value -Region $Region
         if (-not $live.ContainsKey($p.Name)) { $missingRequired.Add($p.Name); continue }
         if ($live[$p.Name] -ne $expected) {
-            $valueMismatch.Add([PSCustomObject]@{ key = $p.Name; expected = "(ssm:$($p.Value))"; actual = $live[$p.Name] })
+            $valueMismatch.Add([PSCustomObject]@{ key=$p.Name; expected="(ssm:$($p.Value))"; actual=$live[$p.Name] })
         }
     }
 }
@@ -115,12 +115,11 @@ if ($contract.PSObject.Properties['ssmExpectedValues'] -and $contract.ssmExpecte
 $pass = (($missingRequired.Count + $valueMismatch.Count) -eq 0)
 if ($pass) {
     Write-VesLog OK 'Config verify PASS.' -LogFile $LogFile
-}
-else {
+} else {
     Write-VesLog DRIFT ("Config verify FAIL: {0} missing, {1} value mismatch" -f `
-            $missingRequired.Count, $valueMismatch.Count) -LogFile $LogFile
+        $missingRequired.Count, $valueMismatch.Count) -LogFile $LogFile
     foreach ($k in $missingRequired) { Write-VesLog DRIFT "  MISSING-KEY $k" -LogFile $LogFile }
-    foreach ($v in $valueMismatch) { Write-VesLog DRIFT "  VALUE $($v.key): expected '$($v.expected)' actual '$($v.actual)'" -LogFile $LogFile }
+    foreach ($v in $valueMismatch)   { Write-VesLog DRIFT "  VALUE $($v.key): expected '$($v.expected)' actual '$($v.actual)'" -LogFile $LogFile }
 }
 
 # structured result the caller (Invoke-Verification) folds into its own report

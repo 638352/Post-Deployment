@@ -97,8 +97,7 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             robocopy $TargetRoot $backupDir /E /NP /R:2 /W:5 | Out-Null
             if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "Backup failed ($LASTEXITCODE); aborting before copy" -LogFile $LogFile; exit $VES_EXIT_DRIFT }
             $global:LASTEXITCODE = 0
-        }
-        else {
+        } else {
             Write-VesLog WARN "TargetRoot does not exist yet; nothing to back up." -LogFile $LogFile
         }
     }
@@ -106,26 +105,22 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
     # Stop -> copy -> restart. try/finally guarantees we re-enable tasks and
     # restart the service even if the copy fails, so we never leave prod down.
     # Stage 3: stop -> copy -> restart, tracking what we disabled so finally can undo it
-    $disabled = New-Object System.Collections.Generic.List[string]
+    $disabled  = New-Object System.Collections.Generic.List[string]
     $copyFailed = $false
     $stopFailed = $false
     try {
         # disable the scheduled tasks that hold the target files open
         foreach ($tn in $ScheduledTasks) {
-            try {
-                Disable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
-                $disabled.Add($tn); Write-VesLog INFO "Disabled task: $tn" -LogFile $LogFile 
-            }
+            try { Disable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
+                  $disabled.Add($tn); Write-VesLog INFO "Disabled task: $tn" -LogFile $LogFile }
             catch { Write-VesLog ERROR "Could not disable task $tn -> $($_.Exception.Message)" -LogFile $LogFile; $stopFailed = $true; break }
         }
         # stop the Windows service too, for Java-service targets
         if (-not $stopFailed -and $ServiceName) {
             $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
             if ($svc) {
-                try {
-                    Stop-Service -Name $ServiceName -Force -ErrorAction Stop
-                    Write-VesLog INFO "Stopped service: $ServiceName" -LogFile $LogFile 
-                }
+                try { Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+                      Write-VesLog INFO "Stopped service: $ServiceName" -LogFile $LogFile }
                 catch { Write-VesLog ERROR "Could not stop service $ServiceName -> $($_.Exception.Message)" -LogFile $LogFile; $stopFailed = $true }
             }
         }
@@ -144,18 +139,14 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
         if ($ServiceName) {
             $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
             if ($svc) {
-                try {
-                    Start-Service -Name $ServiceName -ErrorAction Stop
-                    Write-VesLog INFO "Started service: $ServiceName" -LogFile $LogFile 
-                }
+                try { Start-Service -Name $ServiceName -ErrorAction Stop
+                      Write-VesLog INFO "Started service: $ServiceName" -LogFile $LogFile }
                 catch { Write-VesLog ERROR "FAILED to restart service $ServiceName -> $($_.Exception.Message)" -LogFile $LogFile }
             }
         }
         foreach ($tn in $disabled) {
-            try {
-                Enable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
-                Write-VesLog INFO "Re-enabled task: $tn" -LogFile $LogFile 
-            }
+            try { Enable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
+                  Write-VesLog INFO "Re-enabled task: $tn" -LogFile $LogFile }
             catch { Write-VesLog ERROR "FAILED to re-enable task $tn -> $($_.Exception.Message)" -LogFile $LogFile }
         }
     }
@@ -163,8 +154,7 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
     if ($stopFailed) { Write-VesLog ERROR "Stop phase failed; processor state restored, no copy performed." -LogFile $LogFile; exit $VES_EXIT_DRIFT }
     if ($copyFailed) { exit $VES_EXIT_DRIFT }
 
-}
-else {
+} else {
     # -WhatIf path: the gate already ran, so report success without touching prod
     Write-VesLog WARN 'WhatIf: skipping stop/backup/copy, gate only.' -LogFile $LogFile
     exit $VES_EXIT_OK
@@ -177,13 +167,13 @@ Step 'post-deploy verify' {
     # must verify files only, not fail with a usage error.
     # Array-style args (not hashtable splat) required for child-process invocation.
     $verArgs = @(
-        '-Mode', (if ($ConfigContract) { 'All' } else { 'VerifyFiles' }),
-        '-ReleaseRoot', $TargetRoot,
+        '-Mode',         (if ($ConfigContract) { 'All' } else { 'VerifyFiles' }),
+        '-ReleaseRoot',  $TargetRoot,
         '-ManifestPath', $ManifestPath,
-        '-TrustParam', $TrustParam,
-        '-Processor', $Processor,
-        '-Region', $Region,
-        '-LogFile', $LogFile
+        '-TrustParam',   $TrustParam,
+        '-Processor',    $Processor,
+        '-Region',       $Region,
+        '-LogFile',      $LogFile
     )
     if ($ConfigContract) { $verArgs += '-ConfigContract', $ConfigContract, '-ConfigPath', $ConfigPath }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-Verification.ps1') @verArgs
@@ -197,9 +187,9 @@ Step 'health check' {
     $hcArgs = @('-Processor', $Processor, '-CommitSha', $StagedCommit, '-LogFile', $LogFile)
     foreach ($dll in $RequiredAssemblies) { $hcArgs += '-RequiredAssemblies', $dll }
     if ($ServiceName) { $hcArgs += '-ServiceName', $ServiceName }
-    foreach ($tn in $ScheduledTasks) { $hcArgs += '-ScheduledTasks', $tn }
+    foreach ($tn in $ScheduledTasks)      { $hcArgs += '-ScheduledTasks', $tn }
     if ($FreshLogDir) { $hcArgs += '-FreshLogDir', $FreshLogDir }
-    if ($HealthUrl) { $hcArgs += '-HealthUrl', $HealthUrl }
+    if ($HealthUrl)   { $hcArgs += '-HealthUrl',   $HealthUrl }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-HealthCheck.ps1') @hcArgs
 }
 
@@ -213,10 +203,8 @@ if ($BackupRoot -and $KeepBackups -gt 0 -and (Test-Path -LiteralPath $BackupRoot
         Where-Object { $_.Name -match $pattern } |
         Sort-Object Name -Descending | Select-Object -Skip $KeepBackups)
     foreach ($b in $old) {
-        try {
-            Remove-Item -LiteralPath $b.FullName -Recurse -Force
-            Write-VesLog INFO "Pruned old backup: $($b.Name)" -LogFile $LogFile 
-        }
+        try { Remove-Item -LiteralPath $b.FullName -Recurse -Force
+              Write-VesLog INFO "Pruned old backup: $($b.Name)" -LogFile $LogFile }
         catch { Write-VesLog WARN "Could not prune backup $($b.Name): $($_.Exception.Message)" -LogFile $LogFile }
     }
 }
