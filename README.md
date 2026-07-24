@@ -31,35 +31,33 @@ tests/                       Pester test suite + fixtures
 
 ## Where this runs (OMS)
 
-Scope, per the brief: the OMS .NET and PowerBuilder executables and
-configurations still deployed by manual file copy, including every Citrix
-server that receives a deployment copy. Excluded: cloud services such as the
-gateway services and MERA (VESMERA01, VESOMSVEMS01/02) — they already have
-standard deployment processes, and tying them to the same Git release
-discipline is planned as later work. Database objects (stored procedures,
-triggers, views) fit the same capture-and-verify pattern and are a planned
-fast follow, kept out of the two-week window.
+**Scope (per the leadership brief):** OMS .NET executables, PowerBuilder
+binaries, and their configurations — everything still deployed by manual file
+copy, including every Citrix server that receives a deployment copy. Gateway
+cloud services and MERA are **excluded** because they already have standard
+deployment processes; tying them to this Git release discipline is planned as
+later work. Database objects (stored procedures, triggers, views) fit the same
+SHA-256 capture-and-verify pattern and are planned as a fast follow, kept out
+of the current scope to protect the two-week timeline.
 
-This suite targets the OMS Legacy on-prem Windows tier, which deploys by
-"RDP + Copy" and has no CI/CD. It does NOT target the Salesforce (Copado) or
-CDK-managed AWS paths, which already have pipelines. Two execution contexts:
+This suite does NOT target the Salesforce (Copado) or CDK-managed AWS paths,
+which already have pipelines. Two execution contexts:
 
 - On-prem Windows servers, where files/services/tasks/logs physically live.
   Outbound egress: UAT VESMSEGRESSUAT (all three processors on one box), PROD
   split across VESEMSEGRESS01/02/03 (VEMS-5346). Inbound: UAT VESEMSINGRESUAT,
-  PROD VESEMSINGRESS01 (real-time) / VESEMSINGRESS02 (Handler). The Java hosts
-  VESOMSVEMS01/02 and VESMERA01 and SQL VESSQLOMS101 (OMS2) are excluded per
-  the brief's Scope (later work / fast follow) and stay out of the required
-  inventory. See SERVERS.md for the full per-server/per-processor path map.
-  Run locally on each box or from a central runner over WinRM.
+  PROD VESEMSINGRESS01 (real-time) / VESEMSINGRESS02 (Handler). Java hosts
+  VESOMSVEMS01/02. SQL VESSQLOMS101 (OMS2) in PROD. Citrix server list is
+  pending (see Open items). See SERVERS.md for the full per-server/per-processor
+  path map. MERA (VESMERA01) is out of scope for this effort — defer to the
+  MERA team's existing deployment process. Run locally on each box or from a
+  central runner over WinRM.
 - AWS GovCloud access (us-gov-east-1) for the SSM leg of config-verify. The
   on-prem<->AWS VPN already exists; the runner needs a GovCloud read-only role
   to read the pinned hashes / expected values.
 
 Two target shapes drive the -ServiceName vs -ScheduledTasks split. The Java
-services run as Windows services with a Spring Boot actuator endpoint (that
-profile is retained for the excluded gateway/MERA services when they join the
-release discipline later). The
+services run as Windows services with a Spring Boot actuator endpoint. The
 outbound processors are console EXEs with no health endpoint: a single
 VES.OutboundDBQProcessor.exe is deployed per processor folder and launched by a
 .bat (mode by arg: Ack/XML = RTP, DBQ = RTPDP), typically triggered by Task
@@ -106,44 +104,12 @@ aws ssm put-parameter --name /ves/<system>/approved-commit --value <sha> `
 -ArchiveRepo/-ReleaseTag are the audit layer: the manifest (and contract, when
 passed) are committed under `baselines/<processor>/` in that checkout and the
 commit is tagged, so every approved release leaves a Git-tagged rollback/audit
-point. Tagged rollback points begin with the first verified release; anything
-shipped before that still needs a safe baseline determined manually (the
-generated release record carries the same note).
-`-ReleaseTag` must match `<system>/vMAJOR.MINOR.PATCH`; anything else is
-rejected (exit 10). Add `-PushRemote` (with optional `-Remote`, default
-`origin`) to push the commit and tag off-host immediately — a failed push fails
-the capture, because a release record that exists only on one workstation is
-not an audit trail. Capture also generates `release-record.json` with the
-release tag, source commit, manifest hash, file count, trust parameter, and
-approval provenance. `-TrustParam`, `-ArchiveRepo`, and `-ReleaseTag` are
-required; capture fails closed if any is missing. The
+point. Capture also generates `release-record.json` with the release tag,
+source commit, manifest hash, file count, trust parameter, and approval
+provenance. `-TrustParam`, `-ArchiveRepo`, and `-ReleaseTag` are required;
+capture fails closed if any is missing. The
 `-AllowUntrustedCapture`/`-AllowUnarchivedCapture` switches exist only for
 isolated local tests and must not be used for an approved release.
-
-The archived record is not write-only: the gate and verification can read the
-baseline manifest back out of the release tag instead of a local file, which is
-the brief's "inspect the artifact against the manifest in the Git release tag":
-
-```powershell
-# post-deploy / drift check sourced from the tagged record (SSM anchor still applies)
-.\Invoke-Verification.ps1 -Mode VerifyFiles -ReleaseRoot C:\Procs\<system> `
-  -BaselineRepo D:\ves-verify -ReleaseTag <system>/v1.4.0 `
-  -TrustParam /ves/<system>/baseline-hash -Processor <system>
-
-# pre-deploy gate against the tagged record
-.\Invoke-PreDeployGate.ps1 -StagedRoot D:\stage\<system> -StagedCommit <sha> `
-  -ApprovedCommitParam /ves/<system>/approved-commit `
-  -BaselineRepo D:\ves-verify -ReleaseTag <system>/v1.4.0 -Processor <system>
-```
-
-When `-TrustParam` and `-BaselineRepo` are both supplied, the tag manifest must
-agree with the SSM-pinned hash (a rewritten tag cannot relax the gate). With
-the tag alone the check is logged as tag-anchored. A gate invocation with
-NEITHER a trust parameter nor a tag source exits 10 rather than passing on the
-commit string alone; `-AllowCommitOnly` is the explicit, logged exception.
-Deploy-Processor accepts `-ReleaseTag`/`-BaselineRepo` and threads them through
-the gate, verification, and health stages, so every stage's run log records
-which release tag it checked.
 
 Preflight before a deploy (read-only; touches no prod or staged files). Confirms
 the AWS CLI is present, the SSM parameters actually read back (auth + KMS decrypt
@@ -210,7 +176,6 @@ Health check by target type (any failure exits 3):
   -FreshLogDir C:\VLER_Test\Logs\VES.OutboundProcessor -FreshLogMaxAgeMinutes 60
 
 # Java/Spring Boot service: Windows service state + actuator probe
-# (profile retained for the excluded gateway/MERA services -- later work)
 .\Invoke-HealthCheck.ps1 -Processor pagecount `
   -ServiceName oms-vems-pagecount-prod `
   -HealthUrl http://localhost:9191/actuator/health
@@ -232,11 +197,7 @@ reported as `(masked)` on mismatch, so a secret never lands in a log or
 report — list any secret-bearing key there rather than relying on convention.
 A sensitive key under `expectedValues` is rejected because that would store the
 secret in Git; use `requiredKeys` for non-empty presence or
-`ssmExpectedValues` for a secure comparison. As defense-in-depth, any key whose
-name matches the secret-name pattern (password/pwd/secret/token/credential/
-api-key/key/connectionstring, case-insensitive) is auto-masked in reports even
-when the contract forgot to declare it — the explicit list is still the rule,
-the pattern is the safety net for undeclared secrets.
+`ssmExpectedValues` for a secure comparison.
 
 The contract is exhaustive by default. Every live key must appear under
 `requiredKeys`, `expectedValues`, `ssmExpectedValues`, `machineKeys`, or the
@@ -306,16 +267,11 @@ the fallback for direct invocations.
 Control mapping to the tracked leadership brief
 (`Post-Deployment_Verification_Brief-Master_FINAL_7-7-2026_tracked.docx`):
 
-- **Scope** (closed): inventory and docs match the brief's Scope section —
-  in scope are the OMS .NET/PowerBuilder manual-copy systems including every
-  Citrix server that receives a deployment copy (all must appear in
-  `requiredServers`); cloud services (gateway services, MERA) are excluded as
-  later work and database objects (stored procedures, triggers, views) as a
-  fast follow, so none of them appear in the required inventory.
-- **Rollback point caveat** (closed): the generated release record states the
-  first verified release is the earliest automatic rollback point; older
-  releases require a manually approved safe baseline. Documented above under
-  Usage and emitted in `release-record.json` at capture time.
+- **Scope** (confirmed in brief): OMS .NET executables, PowerBuilder binaries,
+  and their configurations, including every Citrix server that receives a
+  manual deployment copy. Gateway cloud services and MERA are excluded (already
+  have standard deployment processes; Git release discipline planned as later
+  work). Database objects are planned as a fast follow.
 - **Gate names the files** (closed): a content-gate failure now names each
   missing/changed/extra file when `-ManifestPath` is supplied (the deploy
   wrappers pass it automatically), e.g. "Deployment blocked:
@@ -331,31 +287,18 @@ Control mapping to the tracked leadership brief
   Capture -ArchiveRepo <checkout> -ReleaseTag <system>/vX.Y.Z` commits the
   manifest + sanitized contract + generated release record under
   `baselines/<processor>/` and tags the commit. Trust pinning and Git archival
-  are required unless an explicit local-only exception is used. The tag format
-  is enforced (`<system>/vMAJOR.MINOR.PATCH`), `-PushRemote` makes the record
-  durable off-host (a failed push fails the capture), and the record is read
-  back at check time: gate and verification accept `-BaselineRepo`/`-ReleaseTag`
-  to source the baseline manifest from the tag itself ("the manifest in the Git
-  release tag"), cross-checked against the SSM pin when both are configured.
-- **Gate never passes on the commit string alone** (closed): without a content
-  source (SSM trust parameter or tag-archived manifest) the gate exits 10
-  instead of implying the artifact was inspected; `-AllowCommitOnly` is the
-  explicit, logged exception. Deploy-Processor always supplies `-TrustParam`.
-- **Release tag in run evidence** (closed): `-ReleaseTag` threads through
-  deploy -> gate -> verify -> health, and each stage stamps it into its run-start
-  and run-end JSONL records, so every piece of execution evidence names the
-  release it checked.
+  are required unless an explicit local-only exception is used.
 - **Settings are exhaustive and sanitized** (closed): missing, mismatched, and
   undeclared settings are named; machine/ignored differences require an
-  explicit allowlist; sensitive values cannot be embedded in the contract, and
-  secret-named keys are auto-masked in reports even when left undeclared.
+  explicit allowlist; sensitive values cannot be embedded in the contract.
 - **Run evidence and outcomes** (closed): scripts create JSONL evidence by
   default, record run boundaries, and use distinct PASS/FAIL/ERROR exit codes.
 - **Server/Citrix inventory** (enforcement closed, data pending): the runner
   refuses to claim success until a `ves.targets.v1` inventory explicitly covers
-  every required server with confirmed release/file/config/trust fields. The checked-in
-  inventory remains `inventoryComplete=false` until operations supplies the
-  missing Citrix and production path details.
+  every required server — including every Citrix server that receives a
+  deployment copy — with confirmed release/file/config/trust fields. The
+  checked-in inventory remains `inventoryComplete=false` until operations
+  supplies the missing Citrix and production path details.
 - **Missed runs and environment-aware alerting** (closed in code): the installer
   registers an independent heartbeat watchdog. Drift/trust/missed-run events use
   production error severity and lower-environment warning severity. Delivery to
@@ -391,8 +334,14 @@ and fresh-log health probes; do not pass their binaries to
   inventory is confirmed. Documented outbound processors:
   VES.OutboundDBQProcessor.exe / VES.OutboundProcessor.exe, Task Scheduler jobs
   VLER_EM_Outbound_Request_Handler / _Processor (and _2 / _12 variants) and
-  VLER_EM_Real_Time_Outbound_Processor. processors/ holds only the template;
+  VLER_EM_Real_Time_Outbound_Processor. **Citrix server names are not yet
+  documented** and must be added to `requiredServers` and `targets` before
+  `inventoryComplete` can be set to true. processors/ holds only the template;
   copy it per confirmed system and server (3-5 person-days each incl. pilot).
+- Database objects (stored procedures, triggers, views) are **out of scope** for
+  the current two-week window. They fit the same SHA-256 capture-and-verify
+  pattern and are planned as a fast follow; no script changes are needed to
+  support them — the same manifest/compare approach applies to SQL files.
 - Server split (VEMS-5346): PROD spreads the outbound processors across
   VESEMSEGRESS01/02/03 while UAT runs all three on one box, so deploy is
   server-aware (set the processor list per server). See SERVERS.md.
@@ -468,7 +417,6 @@ network.
 ## Host prerequisites
 
 AWS CLI with an instance profile allowing ssm:GetParameter (and PutParameter
-for capture hosts) plus kms:Decrypt. The runner needs rights to manage the
-target services / scheduled tasks. (The Java-host service accounts svc_omsvems
-(VEMS) and svc_mera (MERA) only become relevant if the excluded gateway/MERA
-services join this discipline as later work.) TLS 1.2 is forced in the module.
+for capture hosts) plus kms:Decrypt. The service accounts on the boxes are
+svc_omsvems (VEMS) and svc_mera (MERA); the runner needs rights to manage those
+services / scheduled tasks. TLS 1.2 is forced in the module.

@@ -22,11 +22,6 @@
 param(
     [Parameter(Mandatory)][string]$StagedRoot,
     [Parameter(Mandatory)][string]$StagedCommit,
-    # Release tag of the approved baseline (e.g. OutboundDBQ/v1.4.0); recorded
-    # in every stage's run log. With -BaselineRepo the gate/verify also
-    # cross-check the manifest archived under that tag.
-    [string]$ReleaseTag,
-    [string]$BaselineRepo,
     # Required until the two values marked CONFIRM below have been checked
     # against the current Outbound Deployment Steps runbook.
     [switch]$ConfirmedRunbookValues,
@@ -65,9 +60,6 @@ $fixed = @{
     HealthUrl           = ''
 }
 
-$passthru = @{}
-if ($ReleaseTag)   { $passthru['ReleaseTag'] = $ReleaseTag }
-if ($BaselineRepo) { $passthru['BaselineRepo'] = $BaselineRepo }
-& (Join-Path $core 'Deploy-Processor.ps1') @fixed @passthru `
+& (Join-Path $core 'Deploy-Processor.ps1') @fixed `
     -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Environment 'uat' -Region $Region -LogFile $log
 exit $LASTEXITCODE

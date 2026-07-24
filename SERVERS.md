@@ -4,6 +4,12 @@
 > Source: environment cheat sheet; confirm against the "Outbound Deployment
 > Steps" runbook and Server Notes before wiring a per-server deploy script.
 
+**Scope (per the leadership brief):** OMS .NET executables, PowerBuilder
+binaries, and their configurations, including every Citrix server that receives
+a manual deployment copy. MERA and gateway cloud services are **excluded** —
+they already have standard deployment processes. Database objects are planned
+as a fast follow (out of scope for the current two-week window).
+
 ## Servers by tier
 
 ### Inbound processing
@@ -37,6 +43,14 @@ pattern and are a planned fast follow. Kept here for reference only.
 | DEV  | VESSQLDEV101 | OMS2 |
 | UAT  | VESSQLUAT101 | OMS2 |
 | PROD | VESSQLOMS101 | OMS2 |
+
+### Citrix servers (in scope — details pending)
+
+Every Citrix server that receives a manual deployment copy is in scope per the
+brief. Server names and processor paths have not yet been documented here.
+Operations must supply them before `inventoryComplete` can be set to `true` in
+`targets.json`. Add one `targets.json` entry per server/processor copy and list
+each server in `requiredServers`.
 
 ### Java / cloud-service hosts (out of scope — later work)
 The gateway services and MERA (VESOMSVEMS01/02, VESMERA01) are excluded per
