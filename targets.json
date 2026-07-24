@@ -6,7 +6,8 @@
   "inventoryNotes": [
     "Fail-closed starter inventory only. Confirm every manual-copy target before setting inventoryComplete to true.",
     "Citrix server names are not yet documented in this repository and must be added to requiredServers and targets.",
-    "Confirm production processor paths, task names, configuration paths, and GovCloud region from the deployment runbooks."
+    "Confirm production processor paths, task names, configuration paths, and GovCloud region from the deployment runbooks.",
+    "VESMERA01 (MERA) is OUT OF SCOPE per the leadership brief: MERA already has a standard deployment process. Do not add it here."
   ],
   "requiredServers": [
     "VESDEVAPPS01",
@@ -18,8 +19,7 @@
     "VESEMSEGRESS02",
     "VESEMSEGRESS03",
     "VESOMSVEMS01",
-    "VESOMSVEMS02",
-    "VESMERA01"
+    "VESOMSVEMS02"
   ],
   "targets": [
     {
