@@ -325,4 +325,53 @@ Describe 'Get-VesDatadogEnvTag' {
         $env:DD_ENV = '  UAT  '
         (Get-VesDatadogEnvTag) | Should -Be 'env:uat'
     }
+
+    It 'lets an explicit target environment override DD_ENV' {
+        $env:DD_ENV = 'prod'
+        (Get-VesDatadogEnvTag -Environment 'qa') | Should -Be 'env:qa'
+    }
+}
+
+Describe 'Import-VesTargetInventory' {
+    BeforeEach {
+        $script:InventoryPath = Join-Path $TestDrive ('inventory-{0}.json' -f ([guid]::NewGuid().ToString('N')))
+        $script:Inventory = [ordered]@{
+            schema = 'ves.targets.v1'
+            inventoryComplete = $true
+            requiredServers = @('server-a')
+            targets = @(
+                [ordered]@{
+                    processor='alpha'; server='server-a'; environment='prod'
+                    inventoryStatus='confirmed'; releaseTag='alpha/v1.0.0'
+                    releaseRoot='C:\apps\alpha'
+                    manifestPath='D:\baselines\alpha.json'; trustParam='/ves/alpha/hash'
+                    configContract='D:\baselines\alpha.config.json'
+                    configPath='C:\apps\alpha\alpha.exe.config'
+                }
+            )
+        }
+    }
+
+    It 'accepts an explicitly complete, covered inventory' {
+        ($script:Inventory | ConvertTo-Json -Depth 6) | Out-File -FilePath $script:InventoryPath -Encoding utf8
+        $r = Import-VesTargetInventory -Path $script:InventoryPath
+        $r.Valid | Should -BeTrue
+        $r.Targets.Count | Should -Be 1
+    }
+
+    It 'rejects an inventory that is not explicitly complete' {
+        $script:Inventory.inventoryComplete = $false
+        ($script:Inventory | ConvertTo-Json -Depth 6) | Out-File -FilePath $script:InventoryPath -Encoding utf8
+        $r = Import-VesTargetInventory -Path $script:InventoryPath
+        $r.Valid | Should -BeFalse
+        ($r.Errors -join ' ') | Should -Match 'inventoryComplete'
+    }
+
+    It 'rejects a required server with no confirmed target' {
+        $script:Inventory.requiredServers = @('server-a','citrix-01')
+        ($script:Inventory | ConvertTo-Json -Depth 6) | Out-File -FilePath $script:InventoryPath -Encoding utf8
+        $r = Import-VesTargetInventory -Path $script:InventoryPath
+        $r.Valid | Should -BeFalse
+        ($r.Errors -join ' ') | Should -Match 'citrix-01'
+    }
 }

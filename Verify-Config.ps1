@@ -45,6 +45,10 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix 'verify-config' }
+$runId = [guid]::NewGuid().ToString()
+Write-VesLog INFO 'RUN START: configuration verification' `
+    -Data @{runId=$runId; script='Verify-Config.ps1'; contract=$ContractPath; config=$ConfigPath} -LogFile $LogFile
 
 # both inputs must exist; then load the contract that says what the config must satisfy
 if (-not (Test-Path -LiteralPath $ContractPath)) { throw "Contract not found: $ContractPath" }
@@ -89,6 +93,7 @@ function Get-FlatConfig([string]$path, [string]$format) {
 $live = Get-FlatConfig -path $ConfigPath -format $contract.format
 $missingRequired = New-Object System.Collections.Generic.List[string]
 $valueMismatch = New-Object System.Collections.Generic.List[object]
+$extraKeys = New-Object System.Collections.Generic.List[string]
 
 # sensitiveKeys: their values never reach a log or report ("secrets are never
 # written to any report" — only presence/equality is recorded). Comparison below
@@ -102,33 +107,61 @@ if ($contract.PSObject.Properties['sensitiveKeys'] -and $contract.sensitiveKeys)
 function Get-ReportValue([string]$key, [string]$value) {
     if ($sensitiveKeys.ContainsKey($key)) { '(masked)' } else { $value }
 }
+function Add-MissingKey([string]$key) {
+    if (-not $missingRequired.Contains($key)) { $missingRequired.Add($key) }
+}
+function Test-PresentValue([string]$key) {
+    return ($live.ContainsKey($key) -and -not [string]::IsNullOrWhiteSpace("$($live[$key])"))
+}
+
+# A secret value must never be embedded in the Git-tracked contract. Sensitive
+# keys may be required for presence, machine-specific, or compared to SSM, but
+# not placed under expectedValues.
+$expectedProps = if ($contract.PSObject.Properties['expectedValues'] -and $contract.expectedValues) {
+    @($contract.expectedValues.PSObject.Properties)
+} else { @() }
+foreach ($p in $expectedProps) {
+    if ($sensitiveKeys.ContainsKey($p.Name)) {
+        throw "Contract stores a sensitive key under expectedValues: $($p.Name). Use requiredKeys for presence or ssmExpectedValues for a secure comparison."
+    }
+}
 
 # requiredKeys: presence only, value irrelevant. Filter out $null/blank so a
 # contract that omits requiredKeys doesn't pass $null to Hashtable.ContainsKey
 # (which throws "Key cannot be null" -> caller maps it to a false exit 2).
 foreach ($k in @($contract.requiredKeys | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
-    if (-not $live.ContainsKey($k)) { $missingRequired.Add($k) }
+    if (-not (Test-PresentValue $k)) { Add-MissingKey $k }
 }
 # expectedValues: must be present AND equal to the value pinned in the contract file
-foreach ($p in $contract.expectedValues.PSObject.Properties) {
-    if (-not $live.ContainsKey($p.Name)) { $missingRequired.Add($p.Name); continue }
-    if ($live[$p.Name] -ne $p.Value) {
+foreach ($p in $expectedProps) {
+    if (-not (Test-PresentValue $p.Name)) { Add-MissingKey $p.Name; continue }
+    if ("$($live[$p.Name])" -ne "$($p.Value)") {
         $valueMismatch.Add([PSCustomObject]@{
             key = $p.Name
-            expected = (Get-ReportValue $p.Name $p.Value)
-            actual   = (Get-ReportValue $p.Name $live[$p.Name])
+            expected = (Get-ReportValue $p.Name "$($p.Value)")
+            actual   = (Get-ReportValue $p.Name "$($live[$p.Name])")
         })
     }
 }
-# machineKeys deliberately not compared
+# machineKeys are the controlled per-environment allowlist. Their values may
+# differ, but the setting itself must still be present.
+$machineKeys = if ($contract.PSObject.Properties['machineKeys'] -and $contract.machineKeys) {
+    @($contract.machineKeys | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+} else { @() }
+foreach ($k in $machineKeys) {
+    if (-not (Test-PresentValue $k)) { Add-MissingKey $k }
+}
 
 # expected values held in Parameter Store rather than the contract file, so a
 # tampered contract can't relax them. Get-VesTrustedHash is the generic SSM
 # SecureString reader; a failed read throws and the run ends as trust failure.
-if ($contract.PSObject.Properties['ssmExpectedValues'] -and $contract.ssmExpectedValues) {
-    foreach ($p in $contract.ssmExpectedValues.PSObject.Properties) {
+$ssmProps = if ($contract.PSObject.Properties['ssmExpectedValues'] -and $contract.ssmExpectedValues) {
+    @($contract.ssmExpectedValues.PSObject.Properties)
+} else { @() }
+if ($ssmProps.Count) {
+    foreach ($p in $ssmProps) {
         $expected = Get-VesTrustedHash -ParameterName $p.Value -Region $Region
-        if (-not $live.ContainsKey($p.Name)) { $missingRequired.Add($p.Name); continue }
+        if (-not (Test-PresentValue $p.Name)) { Add-MissingKey $p.Name; continue }
         if ($live[$p.Name] -ne $expected) {
             # actual is ALWAYS masked here: the pinned value is SecureString-gated
             # in SSM, so the live value it diverged from is treated as sensitive too.
@@ -137,17 +170,37 @@ if ($contract.PSObject.Properties['ssmExpectedValues'] -and $contract.ssmExpecte
     }
 }
 
-# pass only when there are zero missing keys and zero value mismatches; log the breakdown
-$pass = (($missingRequired.Count + $valueMismatch.Count) -eq 0)
+# Every live setting must be declared. requiredKeys, expectedValues,
+# ssmExpectedValues, machineKeys, and explicit ignoredKeys form the controlled
+# contract; an undeclared setting is drift, not something silently trusted.
+$knownKeys = @{}
+foreach ($k in @($contract.requiredKeys | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) { $knownKeys[$k] = $true }
+foreach ($k in $machineKeys) { $knownKeys[$k] = $true }
+foreach ($p in $expectedProps) { $knownKeys[$p.Name] = $true }
+foreach ($p in $ssmProps) { $knownKeys[$p.Name] = $true }
+$ignoredKeys = if ($contract.PSObject.Properties['ignoredKeys'] -and $contract.ignoredKeys) {
+    @($contract.ignoredKeys | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+} else { @() }
+foreach ($k in $ignoredKeys) { $knownKeys[$k] = $true }
+foreach ($k in $live.Keys) {
+    if (-not $knownKeys.ContainsKey($k)) { $extraKeys.Add($k) }
+}
+
+# pass only when there are zero missing, mismatched, or undeclared settings
+$pass = (($missingRequired.Count + $valueMismatch.Count + $extraKeys.Count) -eq 0)
 if ($pass) {
     Write-VesLog OK 'Config verify PASS.' -LogFile $LogFile
 }
 else {
-    Write-VesLog DRIFT ("Config verify FAIL: {0} missing, {1} value mismatch" -f `
-            $missingRequired.Count, $valueMismatch.Count) -LogFile $LogFile
+    Write-VesLog DRIFT ("Config verify FAIL: {0} missing, {1} value mismatch, {2} undeclared" -f `
+            $missingRequired.Count, $valueMismatch.Count, $extraKeys.Count) -LogFile $LogFile
     foreach ($k in $missingRequired) { Write-VesLog DRIFT "  MISSING-KEY $k" -LogFile $LogFile }
     foreach ($v in $valueMismatch) { Write-VesLog DRIFT "  VALUE $($v.key): expected '$($v.expected)' actual '$($v.actual)'" -LogFile $LogFile }
+    foreach ($k in $extraKeys) { Write-VesLog DRIFT "  UNDECLARED-KEY $k" -LogFile $LogFile }
 }
+Write-VesLog ($(if ($pass) {'OK'} else {'DRIFT'})) `
+    ("RUN END: configuration verification outcome={0}" -f $(if ($pass) {'PASS'} else {'FAIL'})) `
+    -Data @{runId=$runId; outcome=$(if ($pass) {'PASS'} else {'FAIL'})} -LogFile $LogFile
 
 # structured result the caller (Invoke-Verification) folds into its own report
 [PSCustomObject]@{
@@ -156,5 +209,7 @@ else {
     # throws "Argument types do not match" (valueMismatch is such a list).
     missingRequired    = $missingRequired.ToArray()
     valueMismatch      = $valueMismatch.ToArray()
-    machineKeysIgnored = @($contract.machineKeys)
+    extraKeys          = $extraKeys.ToArray()
+    machineKeysIgnored = $machineKeys
+    ignoredKeys        = $ignoredKeys
 }

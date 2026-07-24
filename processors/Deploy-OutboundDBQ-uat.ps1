@@ -16,19 +16,26 @@
     StartTasksAfter relaunches it via its scheduled task after a clean copy.
     Pilot with -WhatIf first, then a real run on this UAT box, before PROD.
 .EXAMPLE
-    .\Deploy-OutboundDBQ-uat.ps1 -StagedRoot D:\stage\OutboundDBQ -StagedCommit abc1234 -WhatIf
+    .\Deploy-OutboundDBQ-uat.ps1 -StagedRoot D:\stage\OutboundDBQ -StagedCommit abc1234 -ConfirmedRunbookValues -WhatIf
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$StagedRoot,
     [Parameter(Mandatory)][string]$StagedCommit,
+    # Required until the two values marked CONFIRM below have been checked
+    # against the current Outbound Deployment Steps runbook.
+    [switch]$ConfirmedRunbookValues,
+    [string]$AuditLogDir,
     # OMS SSM convention may be us-gov-east-1, not west - confirm the param path/region
     [string]$Region = 'us-gov-west-1'
 )
 $ErrorActionPreference = 'Stop'
 $core = Split-Path -Parent $PSScriptRoot
+if (-not $ConfirmedRunbookValues) {
+    throw 'Refusing to run: confirm the scheduled-task name and fresh-log directory, then pass -ConfirmedRunbookValues.'
+}
 
-$logDir = 'D:\ves-verify\logs'
+$logDir = if ($AuditLogDir) { $AuditLogDir } elseif ($env:VES_AUDIT_LOG_DIR) { $env:VES_AUDIT_LOG_DIR } else { 'D:\ves-verify\logs' }
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 $log = Join-Path $logDir ('deploy_OutboundDBQ_{0}.jsonl' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))
 
@@ -46,6 +53,7 @@ $fixed = @{
     # kill the running console-exe instance before copy; relaunch via task after
     KillProcesses       = $true
     StartTasksAfter     = $true
+    ProcessArgumentPattern = '\bRTPDP\b'
     RequiredAssemblies  = @('C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe')
     # DBQ has no actuator endpoint; leave these empty
     ServiceName         = ''
@@ -53,5 +61,5 @@ $fixed = @{
 }
 
 & (Join-Path $core 'Deploy-Processor.ps1') @fixed `
-    -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Region $Region -LogFile $log
+    -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Environment 'uat' -Region $Region -LogFile $log
 exit $LASTEXITCODE

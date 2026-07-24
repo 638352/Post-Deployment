@@ -27,7 +27,11 @@ param(
     # baseline manifest path; optional, used only to NAME the files behind a
     # content-gate failure (missing/changed/extra) in the block message
     [string]$ManifestPath,
+    # Relative files/folders that the hash manifest intentionally excludes
+    # (notably environment-specific *.config files) but the artifact must carry.
+    [string[]]$RequiredArtifactPaths = @(),
     [string]$Processor = 'unknown',
+    [string]$Environment = 'prod',
     [string]$Region = 'us-gov-west-1',
     [switch]$AllowOverride,
     [string]$OverrideReason,
@@ -35,9 +39,22 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("gate-{0}-{1}" -f $Processor, $StagedCommit) }
+$runId = [guid]::NewGuid().ToString()
+Write-VesLog INFO 'RUN START: pre-deploy gate' `
+    -Data @{runId=$runId; script='Invoke-PreDeployGate.ps1'; processor=$Processor; environment=$Environment; release=$StagedCommit} `
+    -LogFile $LogFile
 
 # Low-cardinality tags shared by every gate event emitted to Datadog.
-$ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag))
+$ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment))
+
+function Stop-Gate([int]$code) {
+    $outcome = Get-VesOutcome -ExitCode $code
+    Write-VesLog ($(if ($outcome -eq 'PASS') {'OK'} elseif ($outcome -eq 'FAIL') {'ERROR'} else {'ERROR'})) `
+        "RUN END: pre-deploy gate outcome=$outcome exit=$code" `
+        -Data @{runId=$runId; outcome=$outcome; exitCode=$code; processor=$Processor; release=$StagedCommit} -LogFile $LogFile
+    exit $code
+}
 
 # central block path: log the reason, honor an audited break-glass override, else block the deploy
 function Fail-Gate([string]$msg) {
@@ -45,7 +62,7 @@ function Fail-Gate([string]$msg) {
     if ($AllowOverride) {
         if ([string]::IsNullOrWhiteSpace($OverrideReason)) {
             Write-VesLog ERROR '-AllowOverride requires -OverrideReason. Refusing.' -LogFile $LogFile
-            exit $VES_EXIT_USAGE
+            Stop-Gate $VES_EXIT_USAGE
         }
         # audited bypass: the override is recorded in the log with who/why/when
         Write-VesLog WARN "OVERRIDE ENGAGED by $env:USERNAME: $OverrideReason (staged=$StagedCommit)" `
@@ -54,14 +71,14 @@ function Fail-Gate([string]$msg) {
         Send-VesDatadogEvent -Title "Deploy gate OVERRIDE: $Processor" `
             -Text "Break-glass override by $env:USERNAME. Reason: $OverrideReason (staged=$StagedCommit). Gate FAIL was: $msg" `
             -AlertType 'warning' -Tags ($ddTags + 'event:gate-override')
-        exit $VES_EXIT_OK
+        Stop-Gate $VES_EXIT_OK
     }
     Write-VesLog ERROR "PRE-DEPLOY BLOCKED $Processor" -LogFile $LogFile
     # Timeline event: a hard block is an error marker on the deploy timeline.
     Send-VesDatadogEvent -Title "Deploy gate BLOCKED: $Processor" `
         -Text "Pre-deploy gate blocked $Processor (staged=$StagedCommit). Reason: $msg" `
-        -AlertType 'error' -Tags ($ddTags + 'event:gate-blocked')
-    exit $VES_EXIT_DRIFT
+        -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:gate-blocked')
+    Stop-Gate $VES_EXIT_DRIFT
 }
 
 try {
@@ -73,6 +90,27 @@ try {
         Fail-Gate "Staged commit $StagedCommit != approved $approved"
     }
     Write-VesLog OK 'Commit gate PASS.' -LogFile $LogFile
+
+    # Gate 1b (explicit structure/config): config files are excluded from byte
+    # hashing because values differ by environment, but their presence must
+    # still block deployment. The same mechanism supports required empty folders.
+    if ($RequiredArtifactPaths.Count) {
+        $stagedFull = [IO.Path]::GetFullPath((Get-Item -LiteralPath $StagedRoot -ErrorAction Stop).FullName).TrimEnd('\')
+        $stagedPrefix = $stagedFull + '\'
+        foreach ($relativePath in $RequiredArtifactPaths) {
+            if ([string]::IsNullOrWhiteSpace($relativePath) -or [IO.Path]::IsPathRooted($relativePath)) {
+                Fail-Gate "Invalid required artifact path '$relativePath'; paths must be non-empty and relative to StagedRoot."
+            }
+            $candidate = [IO.Path]::GetFullPath((Join-Path $stagedFull $relativePath))
+            if (-not $candidate.StartsWith($stagedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                Fail-Gate "Invalid required artifact path '$relativePath'; path escapes StagedRoot."
+            }
+            if (-not (Test-Path -LiteralPath $candidate)) {
+                Fail-Gate "Deployment blocked: $relativePath is missing from the artifact."
+            }
+            Write-VesLog OK "Required artifact path present: $relativePath" -LogFile $LogFile
+        }
+    }
 
     # Gate 2 (content, optional): the staged bytes must hash to the trusted manifest
     if ($TrustParam) {
@@ -120,10 +158,10 @@ try {
     Send-VesDatadogEvent -Title "Deploy gate PASS: $Processor" `
         -Text "Pre-deploy gate passed for $Processor (staged=$StagedCommit, approved)." `
         -AlertType 'success' -Tags ($ddTags + 'event:gate-pass')
-    exit $VES_EXIT_OK
+    Stop-Gate $VES_EXIT_OK
 }
 catch {
     # can't reach SSM or param missing: refuse rather than deploy unanchored
     Write-VesLog ERROR "Gate error (SSM/trust): $($_.Exception.Message)" -LogFile $LogFile
-    exit $VES_EXIT_NOBASE
+    Stop-Gate $VES_EXIT_NOBASE
 }

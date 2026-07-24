@@ -1,22 +1,52 @@
-[
-  {
-    "processor": "OutboundDBQProcessor",
-    "_server": "VESEMSEGRESS01 (PROD outbound); pilot on vesemsegressuat",
-    "_note": "outbound .exe processor; config verified by contract, .config excluded from file hash",
-    "releaseRoot": "C:\\VLER_Test\\Processors\\OutboundDBQProcessor",
-    "manifestPath": "D:\\baselines\\OutboundDBQProcessor.json",
-    "trustParam": "/ves/OutboundDBQProcessor/baseline-hash",
-    "configContract": "D:\\baselines\\OutboundDBQProcessor.config.json",
-    "configPath": "C:\\VLER_Test\\Processors\\OutboundDBQProcessor\\VES.OutboundDBQProcessor.exe.config"
-  },
-  {
-    "processor": "oms-vems-pagecount-prod",
-    "_server": "VESOMSVEMS01 (Java/Spring Boot service, jar under E:\\)",
-    "_note": "health is a separate actuator probe on http://localhost:9191/actuator/health",
-    "releaseRoot": "E:\\oms-vems-pagecount-prod",
-    "manifestPath": "D:\\baselines\\oms-vems-pagecount-prod.json",
-    "trustParam": "/ves/oms-vems-pagecount-prod/baseline-hash",
-    "configContract": "D:\\baselines\\oms-vems-pagecount-prod.config.json",
-    "configPath": "E:\\oms-vems-pagecount-prod\\application.properties"
-  }
-]
+{
+  "schema": "ves.targets.v1",
+  "inventoryComplete": false,
+  "inventoryUpdatedUtc": null,
+  "inventoryOwner": "UNASSIGNED",
+  "inventoryNotes": [
+    "Fail-closed starter inventory only. Confirm every manual-copy target before setting inventoryComplete to true.",
+    "Citrix server names are not yet documented in this repository and must be added to requiredServers and targets.",
+    "Confirm production processor paths, task names, configuration paths, and GovCloud region from the deployment runbooks."
+  ],
+  "requiredServers": [
+    "VESDEVAPPS01",
+    "VESEMSINGRESUAT",
+    "VESEMSINGRESS01",
+    "VESEMSINGRESS02",
+    "VESMSEGRESSUAT",
+    "VESEMSEGRESS01",
+    "VESEMSEGRESS02",
+    "VESEMSEGRESS03",
+    "VESOMSVEMS01",
+    "VESOMSVEMS02",
+    "VESMERA01"
+  ],
+  "targets": [
+    {
+      "processor": "OutboundDBQProcessor",
+      "server": "VESEMSEGRESS02",
+      "environment": "prod",
+      "inventoryStatus": "needs-confirmation",
+      "releaseTag": "TBD",
+      "releaseRoot": "C:\\VLER_Test\\Processors\\OutboundDBQProcessor",
+      "manifestPath": "D:\\baselines\\OutboundDBQProcessor.json",
+      "trustParam": "/ves/OutboundDBQProcessor/baseline-hash",
+      "configContract": "D:\\baselines\\OutboundDBQProcessor.config.json",
+      "configPath": "C:\\VLER_Test\\Processors\\OutboundDBQProcessor\\VES.OutboundDBQProcessor.exe.config",
+      "note": "DBQ is documented on VESEMSEGRESS02/03; create one confirmed entry per deployed copy."
+    },
+    {
+      "processor": "oms-vems-pagecount-prod",
+      "server": "VESOMSVEMS01",
+      "environment": "prod",
+      "inventoryStatus": "needs-confirmation",
+      "releaseTag": "TBD",
+      "releaseRoot": "E:\\oms-vems-pagecount-prod",
+      "manifestPath": "D:\\baselines\\oms-vems-pagecount-prod.json",
+      "trustParam": "/ves/oms-vems-pagecount-prod/baseline-hash",
+      "configContract": "D:\\baselines\\oms-vems-pagecount-prod.config.json",
+      "configPath": "E:\\oms-vems-pagecount-prod\\application.properties",
+      "note": "Confirm whether this Java service remains in the manual-copy scope."
+    }
+  ]
+}

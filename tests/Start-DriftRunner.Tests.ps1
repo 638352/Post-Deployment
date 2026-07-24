@@ -1,7 +1,6 @@
 #Requires -Version 5.1
-# Start-DriftRunner.ps1 log housekeeping. The runner and the per-processor deploy
-# wrappers both write <name>_<stamp>.jsonl into the SAME log dir, so the prune step
-# has to tell them apart. No SSM: targets carry no trustParam, so aws is never called.
+# Start-DriftRunner.ps1 inventory validation, heartbeat, exit contract, and log
+# housekeeping. SSM is stubbed so the target remains trust-anchored.
 
 BeforeAll {
     . (Join-Path $PSScriptRoot '_helpers.ps1')
@@ -10,22 +9,47 @@ BeforeAll {
     # one real target so the runner has something to verify and its logs to prune
     $script:Release  = New-VesTree (Join-Path $TestDrive 'dr-release')
     $script:Manifest = Join-Path $TestDrive 'dr-baseline.json'
-    Export-VesManifest -Manifest (Get-VesManifest -ReleaseRoot $script:Release) `
-        -Path $script:Manifest -Processor 'alpha' | Out-Null
+    $script:TrustedHash = Export-VesManifest -Manifest (Get-VesManifest -ReleaseRoot $script:Release) `
+        -Path $script:Manifest -Processor 'alpha'
+
+    $script:StubDir = Join-Path $TestDrive 'awsstub-drift'
+    New-Item -ItemType Directory -Path $script:StubDir -Force | Out-Null
+    @(
+        '@echo off'
+        ('if "%~4"=="/ves/alpha/baseline-hash" echo {0}& exit /b 0' -f $script:TrustedHash)
+        'echo An error occurred (ParameterNotFound) 1>&2'
+        'exit /b 254'
+    ) | Set-Content -Path (Join-Path $script:StubDir 'aws.cmd') -Encoding ascii
+    $script:OrigPath = $env:PATH
+    $env:PATH = "$($script:StubDir);$env:PATH"
 
     # the runner always calls Invoke-Verification -Mode All, which hard-requires the
     # config params -- omitting them would exit 10 (usage), not 0. Reuse the json
     # fixtures the Verify-Config tests already prove pass together.
     $script:Targets = Join-Path $TestDrive 'dr-targets.json'
-    @(
-        [PSCustomObject]@{
-            processor      = 'alpha'
-            releaseRoot    = $script:Release
-            manifestPath   = $script:Manifest
-            configContract = (Join-Path $PSScriptRoot 'fixtures\json\contract.json')
-            configPath     = (Join-Path $PSScriptRoot 'fixtures\json\config.json')
-        }
-    ) | ConvertTo-Json -Depth 5 | Out-File -FilePath $script:Targets -Encoding utf8
+    [PSCustomObject]@{
+        schema = 'ves.targets.v1'
+        inventoryComplete = $true
+        requiredServers = @('test-server')
+        targets = @(
+            [PSCustomObject]@{
+                processor      = 'alpha'
+                server         = 'test-server'
+                environment    = 'qa'
+                inventoryStatus= 'confirmed'
+                releaseTag     = 'alpha/v1.0.0'
+                releaseRoot    = $script:Release
+                manifestPath   = $script:Manifest
+                trustParam     = '/ves/alpha/baseline-hash'
+                configContract = (Join-Path $PSScriptRoot 'fixtures\json\contract.json')
+                configPath     = (Join-Path $PSScriptRoot 'fixtures\json\config.json')
+            }
+        )
+    } | ConvertTo-Json -Depth 6 | Out-File -FilePath $script:Targets -Encoding utf8
+}
+
+AfterAll {
+    $env:PATH = $script:OrigPath
 }
 
 Describe 'log pruning' {
@@ -95,6 +119,36 @@ Describe 'exit code' {
             $r = Invoke-VesScript 'Start-DriftRunner.ps1' @(
                 '-TargetsFile',$script:Targets,'-LogDir',$logDir,'-LogRetentionDays','0')
             $r.ExitCode | Should -Be 1
+        } finally {
+            Set-Content -Path (Join-Path $script:Release 'app.txt') -Value 'hello' -NoNewline
+        }
+    }
+
+    It 'fails closed when the inventory is not explicitly complete' {
+        $badInventory = Join-Path $TestDrive 'dr-incomplete-targets.json'
+        $doc = Get-Content -LiteralPath $script:Targets -Raw | ConvertFrom-Json
+        $doc.inventoryComplete = $false
+        ($doc | ConvertTo-Json -Depth 6) | Out-File -FilePath $badInventory -Encoding utf8
+        $logDir = Join-Path $TestDrive ('dr-incomplete-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $r = Invoke-VesScript 'Start-DriftRunner.ps1' @(
+            '-TargetsFile',$badInventory,'-LogDir',$logDir,'-LogRetentionDays','0')
+        $r.ExitCode | Should -Be 2
+        $r.Output   | Should -Match 'inventoryComplete'
+    }
+
+    It 'writes a completion heartbeat even when drift is found' {
+        $logDir = Join-Path $TestDrive ('dr-heartbeat-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $heartbeat = Join-Path $logDir 'heartbeat.json'
+        Set-Content -Path (Join-Path $script:Release 'app.txt') -Value 'CHANGED' -NoNewline
+        try {
+            $r = Invoke-VesScript 'Start-DriftRunner.ps1' @(
+                '-TargetsFile',$script:Targets,'-LogDir',$logDir,
+                '-HeartbeatPath',$heartbeat,'-LogRetentionDays','0')
+            $r.ExitCode | Should -Be 1
+            $hb = Get-Content -LiteralPath $heartbeat -Raw | ConvertFrom-Json
+            $hb.schema   | Should -Be 'ves.drift-heartbeat.v1'
+            $hb.outcome  | Should -Be 'FAIL'
+            $hb.exitCode | Should -Be 1
         } finally {
             Set-Content -Path (Join-Path $script:Release 'app.txt') -Value 'hello' -NoNewline
         }

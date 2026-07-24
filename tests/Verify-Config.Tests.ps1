@@ -50,8 +50,8 @@ Describe 'Verify-Config (<Fmt>)' -ForEach @(
     }
 }
 
-Describe 'Verify-Config sensitiveKeys masking' {
-    It 'reports (masked) for a sensitive key mismatch, never the values' {
+Describe 'Verify-Config contract strictness and secret handling' {
+    It 'rejects a secret value embedded in expectedValues' {
         $fx = Join-Path $script:Fx 'json'
         $c = Get-Content -LiteralPath (Join-Path $fx 'contract.json') -Raw | ConvertFrom-Json
         $firstKey = ($c.expectedValues.PSObject.Properties | Select-Object -First 1).Name
@@ -60,12 +60,53 @@ Describe 'Verify-Config sensitiveKeys masking' {
         $bad = Join-Path $TestDrive 'sensitive-contract.json'
         ($c | ConvertTo-Json -Depth 6) | Out-File -FilePath $bad -Encoding utf8
 
-        $r = & $script:VerifyConfig -ContractPath $bad -ConfigPath (Join-Path $fx 'config.json')
+        { & $script:VerifyConfig -ContractPath $bad -ConfigPath (Join-Path $fx 'config.json') } |
+            Should -Throw -ExpectedMessage '*stores a sensitive key*'
+    }
+
+    It 'treats a present-but-empty sensitive key as missing without reporting its value' {
+        $fx = Join-Path $script:Fx 'json'
+        $config = Get-Content -LiteralPath (Join-Path $fx 'config.json') -Raw | ConvertFrom-Json
+        $config.Outbound.QueueName = ''
+        $configPath = Join-Path $TestDrive 'empty-sensitive-config.json'
+        ($config | ConvertTo-Json -Depth 6) | Out-File -FilePath $configPath -Encoding utf8
+
+        $contract = Get-Content -LiteralPath (Join-Path $fx 'contract.json') -Raw | ConvertFrom-Json
+        $contract | Add-Member -NotePropertyName sensitiveKeys -NotePropertyValue @('Outbound:QueueName') -Force
+        $contractPath = Join-Path $TestDrive 'empty-sensitive-contract.json'
+        ($contract | ConvertTo-Json -Depth 6) | Out-File -FilePath $contractPath -Encoding utf8
+
+        $r = & $script:VerifyConfig -ContractPath $contractPath -ConfigPath $configPath
         $r.pass | Should -BeFalse
-        $mm = @($r.valueMismatch) | Where-Object { $_.key -eq $firstKey }
-        $mm | Should -Not -BeNullOrEmpty
-        $mm.expected | Should -Be '(masked)'
-        $mm.actual   | Should -Be '(masked)'
+        @($r.missingRequired) | Should -Contain 'Outbound:QueueName'
+    }
+
+    It 'reports an undeclared live setting as drift' {
+        $fx = Join-Path $script:Fx 'json'
+        $config = Get-Content -LiteralPath (Join-Path $fx 'config.json') -Raw | ConvertFrom-Json
+        $config | Add-Member -NotePropertyName Unexpected -NotePropertyValue 'present' -Force
+        $configPath = Join-Path $TestDrive 'extra-setting.json'
+        ($config | ConvertTo-Json -Depth 6) | Out-File -FilePath $configPath -Encoding utf8
+
+        $r = & $script:VerifyConfig -ContractPath (Join-Path $fx 'contract.json') -ConfigPath $configPath
+        $r.pass | Should -BeFalse
+        @($r.extraKeys) | Should -Contain 'Unexpected'
+    }
+
+    It 'allows only an explicitly ignored live setting' {
+        $fx = Join-Path $script:Fx 'json'
+        $config = Get-Content -LiteralPath (Join-Path $fx 'config.json') -Raw | ConvertFrom-Json
+        $config | Add-Member -NotePropertyName ExpectedRuntimeMetadata -NotePropertyValue 'present' -Force
+        $configPath = Join-Path $TestDrive 'ignored-setting.json'
+        ($config | ConvertTo-Json -Depth 6) | Out-File -FilePath $configPath -Encoding utf8
+
+        $contract = Get-Content -LiteralPath (Join-Path $fx 'contract.json') -Raw | ConvertFrom-Json
+        $contract | Add-Member -NotePropertyName ignoredKeys -NotePropertyValue @('ExpectedRuntimeMetadata') -Force
+        $contractPath = Join-Path $TestDrive 'ignored-setting-contract.json'
+        ($contract | ConvertTo-Json -Depth 6) | Out-File -FilePath $contractPath -Encoding utf8
+
+        $r = & $script:VerifyConfig -ContractPath $contractPath -ConfigPath $configPath
+        $r.pass | Should -BeTrue
     }
 }
 

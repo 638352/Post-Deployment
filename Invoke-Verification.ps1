@@ -7,13 +7,13 @@
       VerifyConfig  structural check of live config against a sanitized contract
       All           VerifyFiles then VerifyConfig
 
-    Capture can also archive the release record to Git: -ArchiveRepo <path to a
-    git checkout> commits the manifest (and the config contract, if -ConfigContract
-    is passed) under baselines/<processor>/, and -ReleaseTag tags the commit
-    (e.g. OutboundDBQ/v1.4.0). This is the audit layer the brief asks for: the
-    manifest and sanitized contract live under a release tag as the rollback/
-    audit point. An archive failure fails the capture (exit 2) -- an unrecorded
-    baseline must not look captured.
+    Capture archives the release record to Git: -ArchiveRepo <path to a git
+    checkout> commits the manifest, optional config contract, and generated
+    release-record.json under baselines/<processor>/; -ReleaseTag tags the
+    commit (e.g. OutboundDBQ/v1.4.0). -TrustParam, -ArchiveRepo, and -ReleaseTag
+    are required for normal capture. Explicit Allow* switches exist only for
+    isolated local development. An untrusted or unrecorded approved baseline
+    must not look captured.
 
     Exit codes: 0 match, 1 drift, 2 no baseline / trust failure, 10 usage.
     Replaces the earlier Verify-Deployment.ps1 Capture/Verify script.
@@ -42,6 +42,7 @@ param(
     [string]$ReleaseTag,
     [string]$Processor = 'unknown',
     [string]$CommitSha = 'unknown',
+    [string]$Environment = 'prod',
     [string]$Region = 'us-gov-west-1',
     # Defaults to $Global:VES_DEFAULT_EXCLUDE, resolved after the module import
     # below. It cannot be the param default: defaults bind BEFORE the script body
@@ -50,19 +51,32 @@ param(
     # notably .config is excluded by design and checked by Verify-Config.ps1.
     [string]$ExcludePattern,
     [string]$LogFile,
+    # Explicit exceptions for local development only. Normal capture fails
+    # closed unless the manifest is trust-pinned and archived under a release tag.
+    [switch]$AllowUntrustedCapture,
+    [switch]$AllowUnarchivedCapture,
     [switch]$Json
 )
 
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("verification-{0}-{1}" -f $Processor, $Mode) }
+$runId = [guid]::NewGuid().ToString()
 # Now that the module is loaded, fall back to the shared default. Capture and
 # compare must agree on this pattern or excluded files resurface as "Extra".
 if (-not $ExcludePattern) { $ExcludePattern = $Global:VES_DEFAULT_EXCLUDE }
 # accumulates the machine-readable result emitted when -Json is set
-$result = [ordered]@{ mode=$Mode; processor=$Processor; status=$null; detail=@{} }
+$result = [ordered]@{ runId=$runId; mode=$Mode; processor=$Processor; environment=$Environment; status=$null; detail=@{} }
+Write-VesLog INFO "RUN START: verification mode=$Mode" `
+    -Data @{runId=$runId; script='Invoke-Verification.ps1'; processor=$Processor; environment=$Environment; release=$CommitSha} `
+    -LogFile $LogFile
 
 # single exit point: optionally print the JSON result, then exit with the given code
 function Out-Result([int]$code) {
+    $outcome = Get-VesOutcome -ExitCode $code
+    Write-VesLog ($(if ($outcome -eq 'PASS') {'OK'} elseif ($outcome -eq 'FAIL') {'DRIFT'} else {'ERROR'})) `
+        "RUN END: verification outcome=$outcome exit=$code" `
+        -Data @{runId=$runId; outcome=$outcome; exitCode=$code; processor=$Processor; release=$CommitSha} -LogFile $LogFile
     if ($Json) { ($result | ConvertTo-Json -Depth 6 -Compress) }
     exit $code
 }
@@ -87,7 +101,7 @@ function Invoke-VesGit([string[]]$GitArgs) {
 # Emit the verify outcome to Datadog as gauges (non-fatal), mirroring Invoke-HealthCheck.
 # $ok = prod matches baseline; $mismatch = count of drifted items. Never blocks a verify.
 function Send-VerifyMetric([bool]$ok, [int]$mismatch) {
-    $ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag), 'check:verify', "mode:$Mode")
+    $ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment), 'check:verify', "mode:$Mode")
     Send-VesDatadogMetric -Metric 'deployment.verify.status'   -Value ([int]$ok) -Tags $ddTags
     Send-VesDatadogMetric -Metric 'deployment.verify.mismatch' -Value $mismatch  -Tags $ddTags
 }
@@ -99,22 +113,27 @@ try {
         'Capture' {
             if (-not $ReleaseRoot) { Write-VesLog ERROR '-ReleaseRoot required for Capture' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
             if (-not $ManifestPath) { Write-VesLog ERROR '-ManifestPath required for Capture' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
+            if (-not $TrustParam -and -not $AllowUntrustedCapture) {
+                Write-VesLog ERROR 'Capture requires -TrustParam so the baseline is tamper-anchored. Use -AllowUntrustedCapture only for local development.' -LogFile $LogFile
+                Out-Result $VES_EXIT_USAGE
+            }
+            if ((-not $ArchiveRepo -or -not $ReleaseTag) -and -not $AllowUnarchivedCapture) {
+                Write-VesLog ERROR 'Capture requires -ArchiveRepo and -ReleaseTag so the approved baseline has a Git release record. Use -AllowUnarchivedCapture only for local development.' -LogFile $LogFile
+                Out-Result $VES_EXIT_USAGE
+            }
+            if ($ReleaseTag -and $ReleaseTag -match '\s') {
+                Write-VesLog ERROR '-ReleaseTag cannot contain whitespace.' -LogFile $LogFile
+                Out-Result $VES_EXIT_USAGE
+            }
             # hash the release tree and write the manifest to disk
             Write-VesLog INFO "Capturing baseline: $ReleaseRoot" -Data @{processor=$Processor} -LogFile $LogFile
             $manifest = Get-VesManifest -ReleaseRoot $ReleaseRoot -ExcludePattern $ExcludePattern
             $hash = Export-VesManifest -Manifest $manifest -Path $ManifestPath -CommitSha $CommitSha -Processor $Processor
             Write-VesLog OK "Manifest written: $($manifest.Count) files, hash=$hash" -LogFile $LogFile
-            # anchor trust: pin the manifest hash to SSM so later verifies can detect tampering
-            if ($TrustParam) {
-                Set-VesTrustedHash -ParameterName $TrustParam -Value $hash -Region $Region
-                Write-VesLog OK "Trusted hash pinned to SSM $TrustParam" -LogFile $LogFile
-            } else {
-                # without the SSM pin this baseline detects drift but not tampering
-                Write-VesLog WARN 'No -TrustParam given; baseline is NOT trust-anchored.' -LogFile $LogFile
-            }
             # Audit layer: commit the release record (manifest + contract) to Git and
-            # optionally tag it. Any failure throws into the outer catch -> exit 2,
-            # because a baseline whose record didn't land must not look captured.
+            # tag it BEFORE updating the active SSM trust pin. If archival fails,
+            # the currently approved baseline remains active instead of pointing
+            # at an unrecorded manifest.
             if ($ArchiveRepo) {
                 if (-not (Test-Path -LiteralPath (Join-Path $ArchiveRepo '.git'))) {
                     throw "-ArchiveRepo is not a git checkout: $ArchiveRepo"
@@ -127,6 +146,24 @@ try {
                     if (-not (Test-Path -LiteralPath $ConfigContract)) { throw "Config contract to archive not found: $ConfigContract" }
                     Copy-Item -LiteralPath $ConfigContract -Destination $dest -Force
                 }
+                # Human- and machine-readable release note stored under the tag.
+                # The tag commit already contains the verification scripts; this
+                # record ties those scripts to the captured manifest and approval.
+                $releaseRecord = [ordered]@{
+                    schema       = 'ves.release-record.v1'
+                    processor    = $Processor
+                    environment  = $Environment
+                    releaseTag   = $ReleaseTag
+                    sourceCommit = $CommitSha
+                    manifestHash = $hash
+                    fileCount    = $manifest.Count
+                    capturedUtc  = (Get-Date).ToUniversalTime().ToString('o')
+                    capturedBy   = "$env:USERNAME@$env:COMPUTERNAME"
+                    trustParam   = $TrustParam
+                    note         = 'First verified release is the earliest automatic rollback point; older releases require a manually approved safe baseline.'
+                }
+                ($releaseRecord | ConvertTo-Json -Depth 5) |
+                    Out-File -FilePath (Join-Path $dest 'release-record.json') -Encoding utf8
                 [void](Invoke-VesGit @('-C', $ArchiveRepo, 'add', '--', $destRel))
                 # skip the commit when a re-capture staged nothing new; the tag (if
                 # any) then lands on the existing record
@@ -143,6 +180,14 @@ try {
                 Write-VesLog OK ("Baseline archived to Git: {0} ({1})" -f $ArchiveRepo, $(if ($ReleaseTag) { "tag $ReleaseTag" } else { 'no tag' })) -LogFile $LogFile
                 $result['detail']['archivedTo'] = $ArchiveRepo
                 if ($ReleaseTag) { $result['detail']['releaseTag'] = $ReleaseTag }
+            }
+            # Activate only after the Git release record is durable.
+            if ($TrustParam) {
+                Set-VesTrustedHash -ParameterName $TrustParam -Value $hash -Region $Region
+                Write-VesLog OK "Trusted hash pinned to SSM $TrustParam" -LogFile $LogFile
+            } else {
+                # Explicit local-development exception only.
+                Write-VesLog WARN 'No -TrustParam given; baseline is NOT trust-anchored.' -LogFile $LogFile
             }
             $result.status = 'captured'; $result.detail['fileCount'] = $manifest.Count; $result.detail['manifestHash'] = $hash
             Out-Result $VES_EXIT_OK
@@ -209,6 +254,7 @@ try {
         $result['detail']['config'] = $cfg
         $configOk = [bool]$cfg.pass
         $cfgMismatch = $cfg.missingRequired.Count + $cfg.valueMismatch.Count
+        if ($cfg.PSObject.Properties['extraKeys']) { $cfgMismatch += $cfg.extraKeys.Count }
         # config-only mode returns on config alone; All mode requires BOTH files and config to pass
         if ($Mode -eq 'VerifyConfig') {
             $result.status = if ($configOk) {'match'} else {'drift'}

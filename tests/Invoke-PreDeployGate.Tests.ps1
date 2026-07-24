@@ -14,7 +14,8 @@ BeforeAll {
     # capture the baseline (no -TrustParam, so capture itself never hits SSM)
     $cap = Invoke-VesScript 'Invoke-Verification.ps1' @(
         '-Mode','Capture','-ReleaseRoot',$script:Release,
-        '-ManifestPath',$script:ManifestPath,'-Processor','gatetest')
+        '-ManifestPath',$script:ManifestPath,'-Processor','gatetest',
+        '-AllowUntrustedCapture','-AllowUnarchivedCapture')
     if ($cap.ExitCode -ne 0) { throw "baseline capture failed: $($cap.Output)" }
     $script:TrustedHash = (Get-Content -LiteralPath $script:ManifestPath -Raw | ConvertFrom-Json).manifestHash
 
@@ -68,6 +69,26 @@ Describe 'gate block names the files' {
         $r.ExitCode | Should -Be 1
         $r.Output   | Should -Match 'CHANGED vs approved:\s+app\.txt'
         $r.Output   | Should -Match 'Deployment blocked: staged artifact does not match the approved release'
+    }
+
+    It 'blocks a missing config path even though config files are hash-excluded' {
+        $r = Invoke-VesScript 'Invoke-PreDeployGate.ps1' (
+            $script:GateArgs + @(
+                '-StagedRoot',$script:Release,
+                '-RequiredArtifactPaths','app.exe.config'))
+        $r.ExitCode | Should -Be 1
+        $r.Output   | Should -Match 'app\.exe\.config is missing from the artifact'
+    }
+
+    It 'passes when an explicitly required hash-excluded config path exists' {
+        $staged = New-VesTree (Join-Path $script:Root 'staged-with-config')
+        Set-Content -Path (Join-Path $staged 'app.exe.config') -Value '<configuration />'
+        $r = Invoke-VesScript 'Invoke-PreDeployGate.ps1' (
+            $script:GateArgs + @(
+                '-StagedRoot',$staged,
+                '-RequiredArtifactPaths','app.exe.config'))
+        $r.ExitCode | Should -Be 0
+        $r.Output   | Should -Match 'Required artifact path present'
     }
 }
 

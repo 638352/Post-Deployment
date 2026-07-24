@@ -12,7 +12,8 @@ BeforeAll {
 
     $script:Cap = Invoke-VesScript 'Invoke-Verification.ps1' @(
         '-Mode','Capture','-ReleaseRoot',$script:Release,
-        '-ManifestPath',$script:ManifestPath,'-Processor','test','-Json')
+        '-ManifestPath',$script:ManifestPath,'-Processor','test',
+        '-AllowUntrustedCapture','-AllowUnarchivedCapture','-Json')
 }
 
 Describe 'Capture' {
@@ -25,6 +26,15 @@ Describe 'Capture' {
     }
     It 'warns when there is no trust anchor' {
         $script:Cap.Output | Should -Match 'NOT trust-anchored'
+    }
+
+    It 'fails closed without explicit local-development exceptions' {
+        $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
+            '-Mode','Capture','-ReleaseRoot',$script:Release,
+            '-ManifestPath',(Join-Path $script:Root 'should-not-capture.json'),
+            '-Processor','test','-Json')
+        $r.ExitCode | Should -Be 10
+        $r.Output   | Should -Match 'requires -TrustParam'
     }
 }
 
@@ -81,10 +91,12 @@ Describe 'Capture -ArchiveRepo' {
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
             '-Mode','Capture','-ReleaseRoot',$script:Release,
             '-ManifestPath',$mp,'-Processor','archtest',
-            '-ArchiveRepo',$script:Repo,'-ReleaseTag','archtest/v1.0.0','-Json')
+            '-ArchiveRepo',$script:Repo,'-ReleaseTag','archtest/v1.0.0',
+            '-AllowUntrustedCapture','-Json')
         $r.ExitCode | Should -Be 0
         $r.Output   | Should -Match 'Baseline archived to Git'
         Test-Path (Join-Path $script:Repo 'baselines\archtest\archived-baseline.json') | Should -BeTrue
+        Test-Path (Join-Path $script:Repo 'baselines\archtest\release-record.json') | Should -BeTrue
         @(git -C $script:Repo tag)              | Should -Contain 'archtest/v1.0.0'
         (git -C $script:Repo log --oneline -1)  | Should -Match 'Baseline capture: archtest'
     }
@@ -95,7 +107,8 @@ Describe 'Capture -ArchiveRepo' {
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
             '-Mode','Capture','-ReleaseRoot',$script:Release,
             '-ManifestPath',(Join-Path $script:Root 'archived-baseline-2.json'),
-            '-Processor','archtest','-ArchiveRepo',$notRepo,'-Json')
+            '-Processor','archtest','-ArchiveRepo',$notRepo,
+            '-ReleaseTag','archtest/v2.0.0','-AllowUntrustedCapture','-Json')
         $r.ExitCode    | Should -Be 2
         $r.Json.status | Should -Be 'error'
         $r.Output      | Should -Match 'not a git checkout'

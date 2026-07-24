@@ -44,6 +44,9 @@ param(
     [Parameter(Mandatory)][string]$ApprovedCommitParam,
     [string]$ConfigContract,
     [string]$ConfigPath,
+    # Relative staged paths that must exist even though they are excluded from
+    # byte hashing (for example *.config files or required empty folders).
+    [string[]]$RequiredArtifactPaths = @(),
     [string[]]$RequiredAssemblies = @(),
     [string]$ServiceName,
     # Task Scheduler jobs on THIS server to disable before copy / re-enable after,
@@ -65,30 +68,72 @@ param(
     [string]$HealthUrl,
     # liveness for endpoint-less .exe processors; passed through to the health check
     [string]$FreshLogDir,
+    [int]$FreshLogMaxAgeMinutes = 60,
+    [string]$ProcessArgumentPattern,
+    [string]$Environment = 'prod',
     [string]$Region = 'us-gov-west-1',
     [string]$LogFile
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
+if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("deploy-{0}-{1}" -f $Processor, $StagedCommit) }
+$runId = [guid]::NewGuid().ToString()
+Write-VesLog INFO 'RUN START: deployment' `
+    -Data @{runId=$runId; script='Deploy-Processor.ps1'; processor=$Processor; environment=$Environment; release=$StagedCommit; target=$TargetRoot} `
+    -LogFile $LogFile
 
 # Low-cardinality tags shared by every deploy event emitted to Datadog.
-$ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag))
+$ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment))
+
+function Stop-Deploy([int]$code) {
+    $outcome = Get-VesOutcome -ExitCode $code
+    Write-VesLog ($(if ($outcome -eq 'PASS') {'OK'} elseif ($outcome -eq 'FAIL') {'ERROR'} else {'ERROR'})) `
+        "RUN END: deployment outcome=$outcome exit=$code" `
+        -Data @{runId=$runId; outcome=$outcome; exitCode=$code; processor=$Processor; release=$StagedCommit} -LogFile $LogFile
+    exit $code
+}
+
+$gateRequired = New-Object System.Collections.Generic.List[string]
+foreach ($path in $RequiredArtifactPaths) {
+    if (-not [string]::IsNullOrWhiteSpace($path) -and -not $gateRequired.Contains($path)) {
+        $gateRequired.Add($path)
+    }
+}
+if ($ConfigContract) {
+    if (-not $ConfigPath) {
+        Write-VesLog ERROR '-ConfigPath is required when -ConfigContract is supplied.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+    # When live config sits inside TargetRoot, derive its staged relative path so
+    # a missing config blocks before copy even though *.config is hash-excluded.
+    $targetFull = [IO.Path]::GetFullPath($TargetRoot).TrimEnd('\')
+    $configFull = [IO.Path]::GetFullPath($ConfigPath)
+    $targetPrefix = $targetFull + '\'
+    if ($configFull.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        $relativeConfig = $configFull.Substring($targetPrefix.Length)
+        if (-not $gateRequired.Contains($relativeConfig)) { $gateRequired.Add($relativeConfig) }
+    } elseif ($gateRequired.Count -eq 0) {
+        Write-VesLog ERROR 'ConfigPath is outside TargetRoot; supply -RequiredArtifactPaths with its staged relative path.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+}
 
 # run a named stage; if it exits non-zero, abort the whole deploy with that stage's code
 function Step($name, $code) {
     Write-VesLog INFO ">>> $name" -LogFile $LogFile
     & $code
     if ($LASTEXITCODE -ne 0) {
-        Write-VesLog ERROR "STAGE FAILED: $name (exit $LASTEXITCODE)" -LogFile $LogFile
+        $stageCode = $LASTEXITCODE
+        Write-VesLog ERROR "STAGE FAILED: $name (exit $stageCode)" -LogFile $LogFile
         # Timeline event on stage failure. The gate self-reports its own block/override
         # events, so skip it here to avoid double-marking the same failure.
         if ($name -ne 'pre-deploy gate') {
             Send-VesDatadogEvent -Title "Deploy FAILED at '$name': $Processor" `
-                -Text "Stage '$name' failed for $Processor $StagedCommit (exit $LASTEXITCODE)." `
-                -AlertType 'error' -Tags ($ddTags + 'event:deploy-failed')
+                -Text "Stage '$name' failed for $Processor $StagedCommit (exit $stageCode)." `
+                -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:deploy-failed')
         }
-        exit $LASTEXITCODE
+        Stop-Deploy $stageCode
     }
 }
 
@@ -101,7 +146,9 @@ Step 'pre-deploy gate' {
     $gateArgs = @(
         '-StagedRoot', $StagedRoot, '-StagedCommit', $StagedCommit,
         '-ApprovedCommitParam', $ApprovedCommitParam, '-TrustParam', $TrustParam,
-        '-ManifestPath', $ManifestPath, '-Processor', $Processor, '-Region', $Region)
+        '-ManifestPath', $ManifestPath, '-Processor', $Processor,
+        '-Environment', $Environment, '-Region', $Region)
+    foreach ($requiredPath in $gateRequired) { $gateArgs += '-RequiredArtifactPaths', $requiredPath }
     if ($LogFile) { $gateArgs += '-LogFile', $LogFile }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-PreDeployGate.ps1') @gateArgs
 }
@@ -116,7 +163,7 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             Write-VesLog INFO "Backup $TargetRoot -> $backupDir" -LogFile $LogFile
             New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
             robocopy $TargetRoot $backupDir /E /NP /R:2 /W:5 | Out-Null
-            if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "Backup failed ($LASTEXITCODE); aborting before copy" -LogFile $LogFile; exit $VES_EXIT_DRIFT }
+            if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "Backup failed ($LASTEXITCODE); aborting before copy" -LogFile $LogFile; Stop-Deploy $VES_EXIT_DRIFT }
             $global:LASTEXITCODE = 0
         }
         else {
@@ -234,14 +281,14 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
         }
     }
     # a failed stop or copy aborts here (processor already restored by finally)
-    if ($stopFailed) { Write-VesLog ERROR "Stop phase failed; processor state restored, no copy performed." -LogFile $LogFile; exit $VES_EXIT_DRIFT }
-    if ($copyFailed) { exit $VES_EXIT_DRIFT }
+    if ($stopFailed) { Write-VesLog ERROR "Stop phase failed; processor state restored, no copy performed." -LogFile $LogFile; Stop-Deploy $VES_EXIT_DRIFT }
+    if ($copyFailed) { Stop-Deploy $VES_EXIT_DRIFT }
 
 }
 else {
     # -WhatIf path: the gate already ran, so report success without touching prod
     Write-VesLog WARN 'WhatIf: skipping stop/backup/copy, gate only.' -LogFile $LogFile
-    exit $VES_EXIT_OK
+    Stop-Deploy $VES_EXIT_OK
 }
 
 # Stage 4: prove the deployed tree matches the trusted baseline (files, and config if supplied)
@@ -258,6 +305,8 @@ Step 'post-deploy verify' {
         '-ManifestPath', $ManifestPath,
         '-TrustParam', $TrustParam,
         '-Processor', $Processor,
+        '-CommitSha', $StagedCommit,
+        '-Environment', $Environment,
         '-Region', $Region
     )
     if ($LogFile) { $verArgs += '-LogFile', $LogFile }
@@ -270,12 +319,16 @@ Step 'health check' {
     # Build arg array so each array-valued param is passed as repeated named args
     # (e.g. -RequiredAssemblies a.dll -RequiredAssemblies b.dll), which PowerShell
     # -File mode binds correctly to [string[]] parameters.
-    $hcArgs = @('-Processor', $Processor, '-CommitSha', $StagedCommit)
+    $hcArgs = @('-Processor', $Processor, '-CommitSha', $StagedCommit, '-Environment', $Environment)
     if ($LogFile) { $hcArgs += '-LogFile', $LogFile }
     foreach ($dll in $RequiredAssemblies) { $hcArgs += '-RequiredAssemblies', $dll }
     if ($ServiceName) { $hcArgs += '-ServiceName', $ServiceName }
     foreach ($tn in $ScheduledTasks) { $hcArgs += '-ScheduledTasks', $tn }
-    if ($FreshLogDir) { $hcArgs += '-FreshLogDir', $FreshLogDir }
+    if ($FreshLogDir) { $hcArgs += '-FreshLogDir', $FreshLogDir, '-FreshLogMaxAgeMinutes', "$FreshLogMaxAgeMinutes" }
+    if ($ScheduledTasks.Count -gt 0) {
+        $hcArgs += '-ProcessPathRoot', $TargetRoot
+        if ($ProcessArgumentPattern) { $hcArgs += '-ProcessArgumentPattern', $ProcessArgumentPattern }
+    }
     if ($HealthUrl) { $hcArgs += '-HealthUrl', $HealthUrl }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-HealthCheck.ps1') @hcArgs
 }
@@ -304,4 +357,4 @@ Write-VesLog OK "DEPLOY COMPLETE: $Processor @ $StagedCommit verified+healthy" -
 Send-VesDatadogEvent -Title "Deploy COMPLETE: $Processor" `
     -Text "Deploy of $Processor $StagedCommit completed: gate + copy + verify + health all green." `
     -AlertType 'success' -Tags ($ddTags + 'event:deploy-complete')
-exit $VES_EXIT_OK
+Stop-Deploy $VES_EXIT_OK

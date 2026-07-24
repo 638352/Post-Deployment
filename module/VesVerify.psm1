@@ -76,7 +76,163 @@ function Write-VesLog {
 
     # Append one compact JSON object per line (JSONL) so logs are grep- and jq-friendly.
     if ($LogFile) {
+        $logDir = Split-Path -Parent $LogFile
+        if ($logDir -and -not (Test-Path -LiteralPath $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
         ($record | ConvertTo-Json -Compress -Depth 6) | Out-File -FilePath $LogFile -Append -Encoding utf8
+    }
+}
+
+function New-VesLogFile {
+    <#
+    .SYNOPSIS Return a unique JSONL log path and create its parent directory.
+    .DESCRIPTION
+      Every entry script uses this when -LogFile is omitted so an interactive
+      run cannot silently leave no execution evidence. Set VES_AUDIT_LOG_DIR to
+      a durable central share on managed hosts; otherwise ProgramData is used.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Prefix,
+        [string]$LogDir
+    )
+    if ([string]::IsNullOrWhiteSpace($LogDir)) {
+        if (-not [string]::IsNullOrWhiteSpace($env:VES_AUDIT_LOG_DIR)) {
+            $LogDir = $env:VES_AUDIT_LOG_DIR
+        } elseif (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+            $LogDir = Join-Path $env:ProgramData 'ves-verify\logs'
+        } else {
+            $LogDir = Join-Path ([IO.Path]::GetTempPath()) 'ves-verify\logs'
+        }
+    }
+    if (-not (Test-Path -LiteralPath $LogDir)) {
+        New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+    }
+    $safePrefix = ($Prefix -replace '[^A-Za-z0-9_.-]', '_').Trim('_')
+    if ([string]::IsNullOrWhiteSpace($safePrefix)) { $safePrefix = 'run' }
+    $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ')
+    $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    return Join-Path $LogDir ("{0}_{1}_{2}.jsonl" -f $safePrefix, $stamp, $suffix)
+}
+
+function Get-VesOutcome {
+    <#
+    .SYNOPSIS Map the exit-code contract to PASS, FAIL, or ERROR.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$ExitCode)
+    if ($ExitCode -eq $Global:VES_EXIT_OK) { return 'PASS' }
+    if ($ExitCode -in @($Global:VES_EXIT_DRIFT, $Global:VES_EXIT_HEALTH)) { return 'FAIL' }
+    return 'ERROR'
+}
+
+function Import-VesTargetInventory {
+    <#
+    .SYNOPSIS Load and fail-closed validate a ves.targets.v1 inventory.
+    .DESCRIPTION
+      The leadership brief requires every server receiving a deployment copy,
+      including Citrix targets, to be inventoried. A bare target array cannot
+      prove that assertion, so the supported document has root metadata:
+
+        schema, inventoryComplete, requiredServers, targets
+
+      inventoryComplete must be explicitly true, every required server must have
+      a confirmed target, and every target must contain the fields needed for a
+      full file+configuration check.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { throw "Targets file not found: $Path" }
+    try { $doc = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json }
+    catch { throw "Targets file is not valid JSON: $($_.Exception.Message)" }
+
+    $errors = New-Object System.Collections.Generic.List[string]
+    $warnings = New-Object System.Collections.Generic.List[string]
+    $targets = @()
+    $requiredServers = @()
+    $schema = $null
+    $inventoryComplete = $false
+
+    if ($doc -is [System.Array]) {
+        $targets = @($doc)
+        $errors.Add("Legacy bare-array inventory is not accepted; use schema 'ves.targets.v1' and set inventoryComplete=true after server/Citrix review.")
+    } else {
+        $schema = if ($doc.PSObject.Properties['schema']) { "$($doc.schema)" } else { $null }
+        $inventoryComplete = ($doc.PSObject.Properties['inventoryComplete'] -and [bool]$doc.inventoryComplete)
+        $targets = @(if ($doc.PSObject.Properties['targets']) { $doc.targets })
+        $requiredServers = @(if ($doc.PSObject.Properties['requiredServers']) {
+            $doc.requiredServers | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") }
+        })
+        if ($schema -ne 'ves.targets.v1') {
+            $errors.Add("Inventory schema must be 'ves.targets.v1' (found '$schema').")
+        }
+        if (-not $inventoryComplete) {
+            $errors.Add('inventoryComplete is not true; confirm every manual-copy and Citrix target before verification can claim coverage.')
+        }
+        if ($requiredServers.Count -eq 0) {
+            $errors.Add('requiredServers is empty; list every server that receives a deployment copy.')
+        }
+    }
+
+    if ($targets.Count -eq 0) { $errors.Add('Inventory contains no targets.') }
+    $requiredFields = @(
+        'processor','server','environment','inventoryStatus','releaseTag','releaseRoot',
+        'manifestPath','trustParam','configContract','configPath'
+    )
+    $seen = @{}
+    foreach ($target in $targets) {
+        $label = if ($target.PSObject.Properties['processor']) { "$($target.processor)" } else { '<unnamed>' }
+        foreach ($field in $requiredFields) {
+            $value = if ($target.PSObject.Properties[$field]) { "$($target.$field)" } else { $null }
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                $errors.Add("Target '$label' is missing required field '$field'.")
+            } elseif ($value -match '(?i)(SYSTEM_NAME|CHANGE_ME|<[^>]+>|\bTBD\b|\bCONFIRM\b|\bUNKNOWN\b)') {
+                $errors.Add("Target '$label' field '$field' still contains a placeholder: $value")
+            }
+        }
+        $status = if ($target.PSObject.Properties['inventoryStatus']) { "$($target.inventoryStatus)" } else { '' }
+        if ($status -ne 'confirmed') {
+            $errors.Add("Target '$label' inventoryStatus must be 'confirmed' (found '$status').")
+        }
+        $environment = if ($target.PSObject.Properties['environment']) { "$($target.environment)".ToLowerInvariant() } else { '' }
+        if ($environment -notin @('dev','qa','uat','prod','production')) {
+            $errors.Add("Target '$label' environment '$environment' is not dev, qa, uat, prod, or production.")
+        }
+        $server = if ($target.PSObject.Properties['server']) { "$($target.server)" } else { '' }
+        $identity = ("{0}|{1}" -f $server, $label).ToLowerInvariant()
+        if ($seen.ContainsKey($identity)) {
+            $errors.Add("Duplicate server/processor target: $server / $label")
+        } else {
+            $seen[$identity] = $true
+        }
+    }
+
+    $coveredServers = @($targets | ForEach-Object {
+        if ($_.PSObject.Properties['server'] -and $_.PSObject.Properties['inventoryStatus'] -and $_.inventoryStatus -eq 'confirmed') {
+            "$($_.server)"
+        }
+    } | Select-Object -Unique)
+    foreach ($server in $requiredServers) {
+        if ($coveredServers -notcontains "$server") {
+            $errors.Add("Required server '$server' has no confirmed target entry.")
+        }
+    }
+    foreach ($server in $coveredServers) {
+        if ($requiredServers.Count -gt 0 -and $requiredServers -notcontains "$server") {
+            $warnings.Add("Confirmed target server '$server' is not listed in requiredServers.")
+        }
+    }
+
+    return [PSCustomObject]@{
+        Schema            = $schema
+        InventoryComplete = $inventoryComplete
+        RequiredServers   = $requiredServers
+        Targets           = $targets
+        Errors            = $errors.ToArray()
+        Warnings          = $warnings.ToArray()
+        Valid             = ($errors.Count -eq 0)
     }
 }
 
@@ -416,10 +572,28 @@ function Get-VesDatadogEnvTag {
     .SYNOPSIS Returns the Datadog env tag, defaulting to env:prod.
     #>
     [CmdletBinding()]
-    param()
-    # Prefer DD_ENV (Datadog standard). Fall back to prod for stable dashboards.
-    $envTagValue = if ([string]::IsNullOrWhiteSpace($env:DD_ENV)) { 'prod' } else { $env:DD_ENV.Trim().ToLowerInvariant() }
+    param([string]$Environment)
+    # An explicit target environment outranks DD_ENV. Fall back to prod for
+    # stable dashboards when neither is supplied.
+    $envTagValue = if (-not [string]::IsNullOrWhiteSpace($Environment)) {
+        $Environment.Trim().ToLowerInvariant()
+    } elseif ([string]::IsNullOrWhiteSpace($env:DD_ENV)) {
+        'prod'
+    } else {
+        $env:DD_ENV.Trim().ToLowerInvariant()
+    }
     return "env:$envTagValue"
+}
+
+function Get-VesAlertType {
+    <#
+    .SYNOPSIS Production failures are errors; lower environments are warnings.
+    #>
+    [CmdletBinding()]
+    param([string]$Environment)
+    $value = if ([string]::IsNullOrWhiteSpace($Environment)) { 'prod' } else { $Environment.Trim().ToLowerInvariant() }
+    if ($value -in @('prod','production')) { return 'error' }
+    return 'warning'
 }
 
 function Send-VesDatadogEvent {
@@ -464,6 +638,8 @@ function Send-VesDatadogEvent {
 
 # Export only the public surface; anything not listed stays module-private.
 Export-ModuleMember -Function `
-    Write-VesLog, Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
+    Write-VesLog, New-VesLogFile, Get-VesOutcome, Import-VesTargetInventory, `
+    Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
     Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash, `
-    Invoke-VesAwsCli, Send-VesDatadogMetric, Send-VesDatadogEvent, Get-VesDatadogEnvTag
+    Invoke-VesAwsCli, Send-VesDatadogMetric, Send-VesDatadogEvent, `
+    Get-VesDatadogEnvTag, Get-VesAlertType

@@ -37,5 +37,13 @@ $cfg.Run.Path         = $Path
 $cfg.Run.PassThru     = $true
 $cfg.Output.Verbosity = 'Detailed'
 
-$result = Invoke-Pester -Configuration $cfg
+$previousAuditLogDir = $env:VES_AUDIT_LOG_DIR
+$testAuditLogDir = Join-Path ([IO.Path]::GetTempPath()) ("ves-verify-test-logs-{0}" -f $PID)
+New-Item -ItemType Directory -Path $testAuditLogDir -Force | Out-Null
+$env:VES_AUDIT_LOG_DIR = $testAuditLogDir
+try {
+    $result = Invoke-Pester -Configuration $cfg
+} finally {
+    $env:VES_AUDIT_LOG_DIR = $previousAuditLogDir
+}
 exit $result.FailedCount

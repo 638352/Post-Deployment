@@ -67,14 +67,18 @@ working directory / command-line arg.
 PROD paths are not captured here yet -- pull them from the Outbound Deployment
 Steps runbook per server before writing the PROD wrappers.
 
-## What this means for the scripts (open)
+## What this means for the scripts
 
-- **Stop for deploy** is not stop-service and not only disable-task: a running
+- **Stop for deploy** is implemented as more than stop-service/disable-task: a running
   instance is a `VES.OutboundDBQProcessor.exe` process holding its folder's files
-  open, so the deploy must kill THAT instance (matched by working dir / arg),
-  not every process of that name. See the deploy-mechanism open item in README.
-- **Health "is running"** likewise must match the specific instance by command
-  line / working dir, since the same exe name covers all processors on the box.
+  open, so `Deploy-Processor.ps1` stops only the instance whose executable path
+  is under the target root; the PID and command line/mode argument are audited.
+- **Health "is running"** uses `-ProcessPathRoot` plus optional
+  `-ProcessArgumentPattern`, so the same executable name in another processor
+  folder cannot satisfy the check.
 - **Per-processor TargetRoot** is the `...\Processors\VES.OutboundProcessor`
   folder for that processor, and it differs per server and tier (C:\ on UAT,
   E:\ on DEV), so each wrapper hard-codes its own paths.
+- **Inventory is fail closed**: add one confirmed `targets.json` entry per
+  server/processor deployment copy. The drift runner will not run while the
+  required-server/Citrix inventory is incomplete.

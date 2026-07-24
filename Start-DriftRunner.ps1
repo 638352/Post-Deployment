@@ -1,136 +1,215 @@
 #Requires -Version 5.1
 <#
 .DESCRIPTION
-    Reads a JSON targets file, runs Invoke-Verification -Mode All per target, and
-    writes a per-target JSONL result under -LogDir. Drift showing up between
-    deploy events is the unauthorized-change signal.
+    Validates the confirmed server inventory, then runs a full files+config
+    verification for every target. Each target gets a timestamped JSONL log.
 
-    The exit code and the JSONL logs ARE the signal: point your monitoring at the
-    logs (or read Task Scheduler's Last Run Result). Each run writes a timestamped
-    log per target, so a missing or stale run log means the scheduled task died.
+    A heartbeat JSON file is atomically updated in finally, even when inventory
+    parsing or a target check fails. Test-DriftHeartbeat.ps1 is scheduled
+    independently and alerts when that heartbeat is missing/stale, so a dead or
+    delayed drift job cannot look like a clean run.
 
-    Exit is the worst per-target code: 0 clean, 1 drift somewhere, 2 trust
-    failure somewhere.
+    Exit is the worst outcome: 0 clean, 1 drift, 2 trust/inventory/runtime error.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$TargetsFile,
     [string]$Region = 'us-gov-west-1',
-    # keep this out of Git, the logs contain prod hostnames and paths
-    [string]$LogDir = 'D:\ves-verify\logs',
-    # prune this runner's own logs after each pass. Default is a full year: the
-    # drift logs are part of the ATO/GovCloud audit trail, and they are small
-    # (JSONL lines; a year of 30-min runs is megabytes). Tighten only once the
-    # logs are being shipped to a durable central store. 0 turns pruning off.
+    # Set VES_AUDIT_LOG_DIR to a central durable share, or pass -LogDir.
+    [string]$LogDir,
+    [string]$HeartbeatPath,
+    # 365 days by default for ATO/GovCloud audit evidence. 0 disables pruning.
     [int]$LogRetentionDays = 365
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
 $verify = Join-Path $PSScriptRoot 'Invoke-Verification.ps1'
 
-# load the target list and ensure the log dir exists; one run stamp groups this run's logs
-if (-not (Test-Path $TargetsFile)) { throw "Targets file not found: $TargetsFile" }
-if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
-$targets = Get-Content $TargetsFile -Raw | ConvertFrom-Json
+if ([string]::IsNullOrWhiteSpace($LogDir)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:VES_AUDIT_LOG_DIR)) {
+        $LogDir = $env:VES_AUDIT_LOG_DIR
+    } else {
+        $LogDir = 'D:\ves-verify\logs'
+    }
+}
+if (-not (Test-Path -LiteralPath $LogDir)) {
+    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+}
+if ([string]::IsNullOrWhiteSpace($HeartbeatPath)) {
+    $HeartbeatPath = Join-Path $LogDir 'ves-verify-drift.heartbeat.json'
+}
+
+$runId = [guid]::NewGuid().ToString()
 $runStamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
-
-# verify every target, tracking the worst exit code seen across all of them
-$worst = $VES_EXIT_OK
-# run-level counters + affected-processor lists feed the Datadog summary below
-$targetCount    = @($targets).Count
-$driftedNames   = New-Object System.Collections.Generic.List[string]
+$runStarted = (Get-Date).ToUniversalTime()
+$runLog = Join-Path $LogDir ("drift-run_{0}.jsonl" -f $runStamp)
+$worst = $VES_EXIT_NOBASE
+$targetCount = 0
+$targets = @()
+$driftedNames = New-Object System.Collections.Generic.List[string]
 $trustFailNames = New-Object System.Collections.Generic.List[string]
-foreach ($t in $targets) {
-    # one JSONL log per target per run; a missing/stale file later means the task died
-    $log  = Join-Path $LogDir ("{0}_{1}.jsonl" -f $t.processor, $runStamp)
-    Write-VesLog INFO "Drift check: $($t.processor)" -LogFile $log
+$errorNames = New-Object System.Collections.Generic.List[string]
 
-    # run a full files+config verify for this target ($params, not $args:
-    # $args is a reserved automatic variable and reusing it invites refactor bugs)
-    $params = @{
-        Mode = 'All'; ReleaseRoot = $t.releaseRoot; ManifestPath = $t.manifestPath
-        TrustParam = $t.trustParam; ConfigContract = $t.configContract
-        ConfigPath = $t.configPath; Processor = $t.processor; Region = $Region
-        LogFile = $log; Json = $true
+function Write-Heartbeat([int]$ExitCode) {
+    $completed = (Get-Date).ToUniversalTime()
+    $outcome = Get-VesOutcome -ExitCode $ExitCode
+    $doc = [ordered]@{
+        schema         = 'ves.drift-heartbeat.v1'
+        runId          = $runId
+        startedUtc     = $runStarted.ToString('o')
+        completedUtc   = $completed.ToString('o')
+        durationSeconds= [math]::Round(($completed - $runStarted).TotalSeconds, 3)
+        outcome        = $outcome
+        exitCode       = $ExitCode
+        targetCount    = $targetCount
+        driftCount     = $driftedNames.Count
+        trustFailCount = $trustFailNames.Count
+        errorCount     = $errorNames.Count
+        host            = $env:COMPUTERNAME
+        targetsFile     = $TargetsFile
     }
-    # discard the -Json line: the per-target JSONL log is the durable record
-    $null = & $verify @params
-    $code = $LASTEXITCODE   # grab before anything else runs
-
-    # classify the outcome and raise $worst accordingly (trust failure > drift > clean).
-    # Only exit 0 is clean: a usage/param error (10) or any other non-zero code means
-    # the target is misconfigured or the check didn't really run -- never report it clean.
-    if ($code -eq $VES_EXIT_NOBASE) {
-        Write-VesLog ERROR "DRIFT-CHECK TRUST FAIL $($t.processor): baseline missing/tampered during scheduled check." -LogFile $log
-        $trustFailNames.Add($t.processor)
-        if ($worst -lt $VES_EXIT_NOBASE) { $worst = $VES_EXIT_NOBASE }
+    $heartbeatDir = Split-Path -Parent $HeartbeatPath
+    if ($heartbeatDir -and -not (Test-Path -LiteralPath $heartbeatDir)) {
+        New-Item -ItemType Directory -Path $heartbeatDir -Force | Out-Null
     }
-    elseif ($code -eq $VES_EXIT_DRIFT) {
-        Write-VesLog DRIFT "DRIFT DETECTED $($t.processor): prod diverged from baseline (no deploy expected)." -LogFile $log
-        $driftedNames.Add($t.processor)
-        if ($worst -lt $VES_EXIT_DRIFT) { $worst = $VES_EXIT_DRIFT }
-    }
-    elseif ($code -eq $VES_EXIT_OK) {
-        Write-VesLog OK "Clean: $($t.processor)" -LogFile $log
-    }
-    else {
-        # exit 10 (usage) or anything unexpected: the check couldn't be trusted to run.
-        # Surface it as at least a trust failure so monitoring doesn't read it as clean.
-        Write-VesLog ERROR "DRIFT-CHECK ERROR $($t.processor): verify exited $code (misconfigured target?); treating as not-clean." -LogFile $log
-        if ($worst -lt $VES_EXIT_NOBASE) { $worst = $VES_EXIT_NOBASE }
+    $tempPath = "$HeartbeatPath.tmp.$([guid]::NewGuid().ToString('N'))"
+    try {
+        ($doc | ConvertTo-Json -Depth 5) | Out-File -FilePath $tempPath -Encoding utf8
+        Move-Item -LiteralPath $tempPath -Destination $HeartbeatPath -Force
+    } finally {
+        if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
     }
 }
 
-# --- Datadog: scheduled drift-run summary (non-fatal) -----------------------
-# Per-target verify gauges already come from Invoke-Verification; here we emit
-# the run-level rollup so a scheduled drift sweep is visible/alertable on its own.
-# Tags stay low-cardinality: no per-target tags on the run rollup.
-$ddTags = @((Get-VesDatadogEnvTag), 'check:drift')
-Send-VesDatadogMetric -Metric 'deployment.drift.run.targets'   -Value $targetCount            -Tags $ddTags
-Send-VesDatadogMetric -Metric 'deployment.drift.run.drift'     -Value $driftedNames.Count     -Tags $ddTags
-Send-VesDatadogMetric -Metric 'deployment.drift.run.trustfail' -Value $trustFailNames.Count   -Tags $ddTags
+try {
+    Write-VesLog INFO 'RUN START: scheduled drift verification' `
+        -Data @{runId=$runId; script='Start-DriftRunner.ps1'; targetsFile=$TargetsFile} -LogFile $runLog
 
-# Only raise an event when something needs attention -- a clean scheduled sweep
-# runs often and shouldn't spam the event stream. Trust failure outranks drift.
-if ($trustFailNames.Count -or $driftedNames.Count) {
-    $alertType = if ($trustFailNames.Count) { 'error' } else { 'warning' }
-    $lines = @()
-    if ($trustFailNames.Count) { $lines += "Trust failures: $($trustFailNames -join ', ')" }
-    if ($driftedNames.Count)   { $lines += "Drift: $($driftedNames -join ', ')" }
-    Send-VesDatadogEvent -Title "Drift sweep flagged $($trustFailNames.Count + $driftedNames.Count)/$targetCount target(s)" `
-        -Text ($lines -join "`n") -AlertType $alertType -Tags $ddTags
-}
-
-# log cleanup: this pass just wrote fresh logs, now drop the stale ones.
-#
-# The allowlist is built from the processor names handled THIS run, regex-escaped
-# and anchored with ^. A looser '_<stamp>.jsonl$' match also caught the
-# deploy_<processor>_<stamp>.jsonl audit logs that the processor wrappers write
-# into this same folder -- the drift runner was silently eating the deploy audit
-# trail. Anchoring to known target names keeps deploy_* and any stray file safe.
-#
-# Trade-off: logs for a target later removed from targets.json stop being pruned.
-# That is deliberate -- editing a config file should not silently delete history.
-#
-# Pruning failures are warned, never fatal -- housekeeping must not change the exit code.
-if ($LogRetentionDays -gt 0 -and $targetCount -gt 0) {
-    $cutoff = (Get-Date).AddDays(-$LogRetentionDays)
-    # Guard the empty case: an empty alternation '^()_...' would match everything.
-    $alt = @($targets | ForEach-Object { $_.processor } |
-             Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-             ForEach-Object { [regex]::Escape($_) }) -join '|'
-    $ownLog = "^($alt)_\d{8}T\d{6}Z\.jsonl$"
-    $stale = @(if ($alt) {
-        Get-ChildItem -LiteralPath $LogDir -File -Filter '*.jsonl' -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match $ownLog -and $_.LastWriteTime -lt $cutoff }
-    })
-    foreach ($f in $stale) {
-        try { Remove-Item -LiteralPath $f.FullName -Force }
-        catch { Write-VesLog WARN "Could not prune $($f.Name): $($_.Exception.Message)" }
+    $inventory = Import-VesTargetInventory -Path $TargetsFile
+    foreach ($warning in $inventory.Warnings) {
+        Write-VesLog WARN "Inventory warning: $warning" -Data @{runId=$runId} -LogFile $runLog
     }
-    if ($stale.Count) { Write-VesLog INFO "Pruned $($stale.Count) drift log(s) older than $LogRetentionDays day(s)." }
+    if (-not $inventory.Valid) {
+        foreach ($problem in $inventory.Errors) {
+            Write-VesLog ERROR "Inventory invalid: $problem" -Data @{runId=$runId} -LogFile $runLog
+        }
+        throw 'Target inventory is incomplete or invalid; no drift target was reported clean.'
+    }
+
+    $targets = @($inventory.Targets)
+    $targetCount = $targets.Count
+    $worst = $VES_EXIT_OK
+
+    foreach ($t in $targets) {
+        $log = Join-Path $LogDir ("{0}_{1}.jsonl" -f $t.processor, $runStamp)
+        Write-VesLog INFO "Drift check: $($t.processor) on $($t.server)" `
+            -Data @{runId=$runId; processor=$t.processor; server=$t.server; environment=$t.environment} -LogFile $log
+
+        $params = @{
+            Mode = 'All'
+            ReleaseRoot = $t.releaseRoot
+            ManifestPath = $t.manifestPath
+            TrustParam = $t.trustParam
+            ConfigContract = $t.configContract
+            ConfigPath = $t.configPath
+            Processor = $t.processor
+            CommitSha = $t.releaseTag
+            Environment = $t.environment
+            Region = $Region
+            LogFile = $log
+            Json = $true
+        }
+        $null = & $verify @params
+        $code = $LASTEXITCODE
+        $targetTags = @(
+            "processor:$($t.processor)",
+            "server:$($t.server)",
+            (Get-VesDatadogEnvTag -Environment $t.environment),
+            'check:drift'
+        )
+
+        if ($code -eq $VES_EXIT_OK) {
+            Write-VesLog OK "Clean: $($t.processor)" -Data @{runId=$runId; outcome='PASS'; exitCode=0} -LogFile $log
+        }
+        elseif ($code -eq $VES_EXIT_DRIFT) {
+            $driftedNames.Add($t.processor)
+            if ($worst -lt $VES_EXIT_DRIFT) { $worst = $VES_EXIT_DRIFT }
+            Write-VesLog DRIFT "DRIFT DETECTED $($t.processor): deployed files/config diverged from baseline." `
+                -Data @{runId=$runId; outcome='FAIL'; exitCode=$code} -LogFile $log
+            Send-VesDatadogEvent -Title "Drift detected: $($t.processor) on $($t.server)" `
+                -Text "The scheduled post-deployment check found drift for $($t.processor) in $($t.environment). See $log." `
+                -AlertType (Get-VesAlertType -Environment $t.environment) -Tags ($targetTags + 'event:drift-detected')
+        }
+        elseif ($code -eq $VES_EXIT_NOBASE) {
+            $trustFailNames.Add($t.processor)
+            if ($worst -lt $VES_EXIT_NOBASE) { $worst = $VES_EXIT_NOBASE }
+            Write-VesLog ERROR "DRIFT-CHECK TRUST FAIL $($t.processor): baseline missing, unreadable, or untrusted." `
+                -Data @{runId=$runId; outcome='ERROR'; exitCode=$code} -LogFile $log
+            Send-VesDatadogEvent -Title "Verification trust failure: $($t.processor) on $($t.server)" `
+                -Text "The scheduled check could not establish a trusted baseline for $($t.processor) in $($t.environment). See $log." `
+                -AlertType (Get-VesAlertType -Environment $t.environment) -Tags ($targetTags + 'event:trust-failure')
+        }
+        else {
+            $errorNames.Add($t.processor)
+            if ($worst -lt $VES_EXIT_NOBASE) { $worst = $VES_EXIT_NOBASE }
+            Write-VesLog ERROR "DRIFT-CHECK ERROR $($t.processor): verify exited $code; treating as unverified." `
+                -Data @{runId=$runId; outcome='ERROR'; exitCode=$code} -LogFile $log
+            Send-VesDatadogEvent -Title "Verification error: $($t.processor) on $($t.server)" `
+                -Text "The scheduled check did not finish reliably for $($t.processor) in $($t.environment) (exit $code). See $log." `
+                -AlertType (Get-VesAlertType -Environment $t.environment) -Tags ($targetTags + 'event:verification-error')
+        }
+    }
+
+    $ddTags = @('check:drift')
+    Send-VesDatadogMetric -Metric 'deployment.drift.run.targets'   -Value $targetCount          -Tags $ddTags
+    Send-VesDatadogMetric -Metric 'deployment.drift.run.drift'     -Value $driftedNames.Count   -Tags $ddTags
+    Send-VesDatadogMetric -Metric 'deployment.drift.run.trustfail' -Value $trustFailNames.Count -Tags $ddTags
+    Send-VesDatadogMetric -Metric 'deployment.drift.run.errors'    -Value $errorNames.Count     -Tags $ddTags
+
+    # Prune only this runner's per-target logs. Never touch deploy audit logs,
+    # run summaries, heartbeat files, removed-target history, or stray files.
+    if ($LogRetentionDays -gt 0 -and $targetCount -gt 0) {
+        $cutoff = (Get-Date).AddDays(-$LogRetentionDays)
+        $alt = @($targets | ForEach-Object { $_.processor } |
+                 Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                 ForEach-Object { [regex]::Escape($_) }) -join '|'
+        $ownLog = "^($alt)_\d{8}T\d{6}Z\.jsonl$"
+        $stale = @(if ($alt) {
+            Get-ChildItem -LiteralPath $LogDir -File -Filter '*.jsonl' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match $ownLog -and $_.LastWriteTime -lt $cutoff }
+        })
+        foreach ($file in $stale) {
+            try { Remove-Item -LiteralPath $file.FullName -Force }
+            catch { Write-VesLog WARN "Could not prune $($file.Name): $($_.Exception.Message)" -LogFile $runLog }
+        }
+        if ($stale.Count) {
+            Write-VesLog INFO "Pruned $($stale.Count) drift log(s) older than $LogRetentionDays day(s)." -LogFile $runLog
+        }
+    }
+}
+catch {
+    $worst = $VES_EXIT_NOBASE
+    Write-VesLog ERROR "Drift run error: $($_.Exception.Message)" `
+        -Data @{runId=$runId; outcome='ERROR'; exitCode=$worst} -LogFile $runLog
+    Send-VesDatadogEvent -Title 'Scheduled drift verification error' `
+        -Text "The drift sweep could not complete on $env:COMPUTERNAME. $($_.Exception.Message)" `
+        -AlertType 'error' -Tags @('check:drift','event:runner-error')
+}
+finally {
+    $outcome = Get-VesOutcome -ExitCode $worst
+    Write-VesLog ($(if ($outcome -eq 'PASS') {'OK'} elseif ($outcome -eq 'FAIL') {'DRIFT'} else {'ERROR'})) `
+        "RUN END: scheduled drift verification outcome=$outcome exit=$worst" `
+        -Data @{runId=$runId; outcome=$outcome; exitCode=$worst; targets=$targetCount} -LogFile $runLog
+    try {
+        Write-Heartbeat -ExitCode $worst
+        Send-VesDatadogMetric -Metric 'deployment.drift.heartbeat.completed_unixtime' `
+            -Value ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) -Tags @('check:drift')
+        Send-VesDatadogMetric -Metric 'deployment.drift.run.status' `
+            -Value ($(if ($worst -eq $VES_EXIT_OK) {1} else {0})) -Tags @('check:drift')
+    } catch {
+        Write-VesLog ERROR "Could not write drift heartbeat: $($_.Exception.Message)" -LogFile $runLog
+        $worst = $VES_EXIT_NOBASE
+    }
 }
 
-# exit with the worst code so the scheduled task's Last Run Result reflects any drift/trust failure
-Write-VesLog INFO "Drift run complete. worst=$worst"
 exit $worst

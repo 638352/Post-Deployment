@@ -57,3 +57,22 @@ Describe 'assembly load' {
         $r.Json.healthy | Should -BeTrue
     }
 }
+
+Describe 'health evidence requirements' {
+    It 'refuses to pass when no probe is configured' {
+        $r = Invoke-VesScript 'Invoke-HealthCheck.ps1' @('-Processor','hc','-Json')
+        $r.ExitCode     | Should -Be 10
+        $r.Json.healthy | Should -BeFalse
+        $r.Json.outcome | Should -Be 'ERROR'
+        $r.Output       | Should -Match 'No health probes'
+    }
+
+    It 'fails when the exact process path root does not exist' {
+        $r = Invoke-VesScript 'Invoke-HealthCheck.ps1' @(
+            '-ProcessPathRoot',(Join-Path $TestDrive 'missing-process-root'),
+            '-ProcessArgumentPattern','\bRTPDP\b','-Processor','hc','-Json')
+        $r.ExitCode     | Should -Be 3
+        $r.Json.healthy | Should -BeFalse
+        $r.Output       | Should -Match 'Process path check failed'
+    }
+}

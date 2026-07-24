@@ -41,12 +41,14 @@
 param(
     [Parameter(Mandatory)][string]$StagedRoot,
     [Parameter(Mandatory)][string]$StagedCommit,
+    [ValidateSet('dev','qa','uat','prod','production')][string]$Environment = 'uat',
+    [string]$AuditLogDir,
     [string]$Region = 'us-gov-west-1'
 )
 $ErrorActionPreference = 'Stop'
 $core = Split-Path -Parent $PSScriptRoot
 
-$logDir = 'D:\ves-verify\logs'
+$logDir = if ($AuditLogDir) { $AuditLogDir } elseif ($env:VES_AUDIT_LOG_DIR) { $env:VES_AUDIT_LOG_DIR } else { 'D:\ves-verify\logs' }
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 $log = Join-Path $logDir ('deploy_SYSTEM_NAME_{0}.jsonl' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))
 
@@ -70,6 +72,8 @@ $fixed = @{
     # command line) and relaunch via the task right after a clean copy
     KillProcesses       = $true
     StartTasksAfter     = $true
+    # Match the processor mode argument as well as the executable path.
+    ProcessArgumentPattern = '\bRTPDP\b'
     # health for an endpoint-less .exe: a fresh line in today's log proves life
     FreshLogDir         = 'C:\VLER_Test\Logs\VES.OutboundProcessor'
     # .NET assembly load check (defect UAT may have signed off on)
@@ -84,5 +88,5 @@ $fixed = @{
 
 # -WhatIf propagates via $WhatIfPreference; Deploy-Processor then runs gate-only
 & (Join-Path $core 'Deploy-Processor.ps1') @fixed `
-    -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Region $Region -LogFile $log
+    -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Environment $Environment -Region $Region -LogFile $log
 exit $LASTEXITCODE

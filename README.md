@@ -18,10 +18,11 @@ Verify-Config.ps1            config contract check (called by the above)
 Invoke-PreDeployGate.ps1     blocks deploys that don't match the approved release
 Invoke-HealthCheck.ps1       assembly load, service, scheduled-task, log, endpoint
 Start-DriftRunner.ps1        scheduled re-verify, writes per-target JSONL logs
-Install-DriftTask.ps1        registers the Task Scheduler job for the runner
+Test-DriftHeartbeat.ps1      independent missed-run watchdog
+Install-DriftTask.ps1        registers the runner + watchdog scheduled tasks
 Deploy-Processor.ps1         gate -> stop -> backup -> copy -> restart -> verify -> health
 processors/                  one thin deploy script per system (template inside)
-targets.json                 drift-runner target list (example values)
+targets.json                 fail-closed server/Citrix inventory starter
 sample.config.json           example config contract
 SERVERS.md                   authoritative server + processor path map
 Invoke-Tests.ps1             dev-time Pester runner (see Testing)
@@ -59,8 +60,10 @@ three tools. Replaces the older Verify-Deployment.ps1.
 
 ## Exit codes
 
-0 ok, 1 drift, 2 no baseline or trust failure, 3 health failure, 10 usage.
-A missing baseline is exit 2, never a pass.
+0 pass, 1 file/config drift, 2 trust/inventory/runtime error, 3 health failure,
+10 usage or unsafe configuration. These map to the brief's three outcomes:
+`PASS` (0), `FAIL` (1 or 3), and `ERROR` (2 or 10). A missing baseline,
+incomplete inventory, dead check, or unconfigured health probe is never a pass.
 
 ## Trust model
 
@@ -91,7 +94,12 @@ aws ssm put-parameter --name /ves/<system>/approved-commit --value <sha> `
 -ArchiveRepo/-ReleaseTag are the audit layer: the manifest (and contract, when
 passed) are committed under `baselines/<processor>/` in that checkout and the
 commit is tagged, so every approved release leaves a Git-tagged rollback/audit
-point. An archive failure fails the capture — re-run it.
+point. Capture also generates `release-record.json` with the release tag,
+source commit, manifest hash, file count, trust parameter, and approval
+provenance. `-TrustParam`, `-ArchiveRepo`, and `-ReleaseTag` are required;
+capture fails closed if any is missing. The
+`-AllowUntrustedCapture`/`-AllowUnarchivedCapture` switches exist only for
+isolated local tests and must not be used for an approved release.
 
 Preflight before a deploy (read-only; touches no prod or staged files). Confirms
 the AWS CLI is present, the SSM parameters actually read back (auth + KMS decrypt
@@ -108,6 +116,16 @@ Exit 0 = ready, 2 = not ready:
 .\Invoke-Preflight.ps1 -TargetsFile D:\ves-verify\targets.json
 ```
 
+`targets.json` uses the `ves.targets.v1` root schema. Set
+`inventoryComplete=true` only after `requiredServers` lists every server that
+receives a manual deployment copy (including all Citrix targets) and every
+server/processor entry is marked `inventoryStatus: "confirmed"`. Preflight and
+the drift runner reject a legacy array, placeholders, incomplete coverage,
+duplicate server/processor entries, or missing release/file/config/trust fields. The
+checked-in file is intentionally incomplete because the Citrix inventory and
+several production paths are not available in this repository; it cannot
+produce a false claim of full coverage.
+
 Deploy (pilot in dev/qa first). Each system gets its own thin script in
 processors/ that pins the fixed values and calls Deploy-Processor.ps1; copy
 processors/Deploy-SYSTEM_NAME.ps1 to onboard a system. -WhatIf runs the gate
@@ -122,10 +140,13 @@ Deploy-Processor.ps1 can still be called directly with the full parameter set
 when scripting something one-off.
 
 Scheduled drift check, every 30 min or whatever cadence fits. Register it once
-(elevated) and it runs as SYSTEM from Task Scheduler:
+(elevated) and it runs as SYSTEM from Task Scheduler. The installer creates
+both the drift task and an independent heartbeat watchdog; the watchdog exits 2
+and emits an alert if the runner does not complete on time:
 
 ```powershell
-.\Install-DriftTask.ps1 -TargetsFile D:\ves-verify\targets.json -IntervalMinutes 30
+.\Install-DriftTask.ps1 -TargetsFile D:\ves-verify\targets.json `
+  -IntervalMinutes 30 -LogDir \\audit-share\ves-verify\logs
 ```
 
 Or run the runner by hand:
@@ -140,6 +161,8 @@ Health check by target type (any failure exits 3):
 # outbound .exe processor (no endpoint): task last-run + fresh log line
 .\Invoke-HealthCheck.ps1 -Processor OutboundDBQ `
   -ScheduledTasks VLER_EM_Real_Time_Outbound_Processor `
+  -ProcessPathRoot C:\VLER_Test\Processors\VES.OutboundProcessor `
+  -ProcessArgumentPattern '\bRTPDP\b' `
   -FreshLogDir C:\VLER_Test\Logs\VES.OutboundProcessor -FreshLogMaxAgeMinutes 60
 
 # Java/Spring Boot service: Windows service state + actuator probe
@@ -147,6 +170,12 @@ Health check by target type (any failure exits 3):
   -ServiceName oms-vems-pagecount-prod `
   -HealthUrl http://localhost:9191/actuator/health
 ```
+
+The console-EXE check matches `ExecutablePath` under the processor folder and
+optionally the mode argument; process name alone is not enough when the same EXE
+runs several times. A health invocation with no assembly, service, exact
+process, task, fresh-log, or endpoint probe exits 10 instead of returning a
+false green result.
 
 Config contracts support ssmExpectedValues (config key -> SSM parameter name)
 for values whose expected value should live in Parameter Store rather than the
@@ -156,6 +185,14 @@ application.properties file is keyvalue). Keys listed under `sensitiveKeys`
 (and every ssmExpectedValues key) are compared on their real values but
 reported as `(masked)` on mismatch, so a secret never lands in a log or
 report — list any secret-bearing key there rather than relying on convention.
+A sensitive key under `expectedValues` is rejected because that would store the
+secret in Git; use `requiredKeys` for non-empty presence or
+`ssmExpectedValues` for a secure comparison.
+
+The contract is exhaustive by default. Every live key must appear under
+`requiredKeys`, `expectedValues`, `ssmExpectedValues`, `machineKeys`, or the
+explicit `ignoredKeys` allowlist. Undeclared keys are reported as drift.
+`machineKeys` may differ by environment but must still be present and non-empty.
 
 Config files (*.config) are excluded from the file-hash compare on purpose: the
 legacy App.config carries server-specific log4net paths that differ every
@@ -185,40 +222,47 @@ re-capture and re-pin:
 
 ```powershell
 .\Invoke-Verification.ps1 -Mode Capture -ReleaseRoot <releaseRoot> `
-  -ManifestPath <manifestPath> -TrustParam <trustParam> -Processor <name>
+  -ManifestPath <manifestPath> -TrustParam <trustParam> -Processor <name> `
+  -ArchiveRepo <git-checkout> -ReleaseTag <name>/vX.Y.Z
 ```
 
 Baselines with no such directory hash identically before and after the change and
 need nothing.
 
-Monitoring: every script writes structured JSONL via -LogFile and returns a
-meaningful exit code (see above). The drift runner writes one timestamped log
-per target per run under its -LogDir. Point whatever monitoring you run at those
-logs (a `"level":"DRIFT"` or `"ERROR"` line = drift/trust failure) and at the
-scheduled task's Last Run Result; a missing/stale run log means the task died.
+Monitoring: every entry script creates a structured JSONL audit log even when
+`-LogFile` is omitted. Set `VES_AUDIT_LOG_DIR` to a durable central share; the
+fallback is `%ProgramData%\ves-verify\logs` (the scheduled runner keeps its
+explicit `-LogDir`). Run boundaries carry a run ID, processor/release context,
+PASS/FAIL/ERROR outcome, and exit code. The drift runner writes one timestamped
+log per target plus a run summary and atomically updates
+`ves-verify-drift.heartbeat.json`.
 
 Datadog hooks in the gate/deploy/health paths are best-effort and never block
 deploy/verify outcomes. Two independent transports with different prerequisites:
 - **Events** (deploy/gate markers) POST to the ddog-gov Events API and need
-  `DD_API_KEY` set; without it they are skipped with a warning.
+  `DD_API_KEY` set; without it they are skipped with a warning. Drift, trust
+  failure, runner error, and missed-heartbeat events are included. Production
+  uses Datadog `error` severity; dev/qa/UAT use `warning`.
 - **Metrics** (verify/health gauges) are DogStatsD packets to a *local* Datadog
   Agent on `127.0.0.1:8125`. On any box without a running agent they are silently
   dropped — the primary check still runs, but nothing reaches the dashboard.
   `Invoke-Preflight -CheckDatadog` reports whether the `datadogagent` service and
   `DD_API_KEY` are in place.
 
-`DD_ENV` (defaults to `prod`) controls the `env:` tag on both metrics and events.
+Target inventory `environment` controls drift severity/tags. `DD_ENV` remains
+the fallback for direct invocations.
 
 ## Brief conformance
 
-Deltas between this suite and the leadership brief (Post-Deployment
-Verification Brief, Master FINAL 7-6-2026), so nobody reads the brief as a
-statement of what is already running:
+Control mapping to the tracked leadership brief
+(`Post-Deployment_Verification_Brief-Master_FINAL_7-7-2026_tracked.docx`):
 
 - **Gate names the files** (closed): a content-gate failure now names each
   missing/changed/extra file when `-ManifestPath` is supplied (the deploy
   wrappers pass it automatically), e.g. "Deployment blocked:
-  bin/Storage.Net.dll is missing from the artifact".
+  bin/Storage.Net.dll is missing from the artifact". Required configuration
+  files/folders are checked separately through `-RequiredArtifactPaths`, so
+  hash-excluded environment configuration still blocks when absent.
 - **Console-EXE stop mechanism** (closed, pilot pending): `Deploy-Processor
   -KillProcesses` stops the running instance whose exe lives under TargetRoot
   (audited by PID + command line), and `-StartTasksAfter` relaunches it via
@@ -226,17 +270,28 @@ statement of what is already running:
   any PROD use.
 - **Release record under a Git tag** (closed): `Invoke-Verification -Mode
   Capture -ArchiveRepo <checkout> -ReleaseTag <system>/vX.Y.Z` commits the
-  manifest + sanitized contract under `baselines/<processor>/` and tags the
-  commit. What still needs a decision is the *upstream* system of record —
-  see "Baseline system of record" below.
-- **Paging is not built in**: the brief's "prod mismatch pages on call" and
-  "missed runs raise their own alert" require monitors on the Datadog metrics
-  (or another sink) that are NOT defined in this repo. Until those exist, the
-  signal is exit codes + JSONL logs + Task Scheduler Last Run Result only.
-- **Log retention**: drift-runner logs are host-local, pruned after
-  `-LogRetentionDays` (365 default, sized for the ATO audit-trail claim;
-  deploy audit logs are never pruned). Central shipping is still a
-  nice-to-have once share/S3 access exists.
+  manifest + sanitized contract + generated release record under
+  `baselines/<processor>/` and tags the commit. Trust pinning and Git archival
+  are required unless an explicit local-only exception is used.
+- **Settings are exhaustive and sanitized** (closed): missing, mismatched, and
+  undeclared settings are named; machine/ignored differences require an
+  explicit allowlist; sensitive values cannot be embedded in the contract.
+- **Run evidence and outcomes** (closed): scripts create JSONL evidence by
+  default, record run boundaries, and use distinct PASS/FAIL/ERROR exit codes.
+- **Server/Citrix inventory** (enforcement closed, data pending): the runner
+  refuses to claim success until a `ves.targets.v1` inventory explicitly covers
+  every required server with confirmed release/file/config/trust fields. The checked-in
+  inventory remains `inventoryComplete=false` until operations supplies the
+  missing Citrix and production path details.
+- **Missed runs and environment-aware alerting** (closed in code): the installer
+  registers an independent heartbeat watchdog. Drift/trust/missed-run events use
+  production error severity and lower-environment warning severity. Delivery to
+  on-call still depends on the host's Datadog API key and the organization's
+  Datadog event monitor/routing.
+- **Log retention/centrality** (closed in code, destination pending): drift logs
+  default to 365 days and deploy audit logs are not pruned. Set
+  `VES_AUDIT_LOG_DIR`/`-LogDir` to the approved central share or shipped
+  directory before production.
 
 ## Limits
 
@@ -244,8 +299,10 @@ File verify proves prod has the same bytes UAT approved. It does not prove
 those bytes were correct. The health check is the only layer that catches a
 defect UAT missed, so keep RequiredAssemblies and the endpoint probe populated.
 
-The assembly-load check is .NET only. If any in-scope system turns out to be
-PowerBuilder or native, that check needs a LoadLibrary variant.
+The assembly-load probe is .NET-only. PowerBuilder/native targets are covered
+by SHA-256 byte verification plus exact executable-path/mode, scheduled-task,
+and fresh-log health probes; do not pass their binaries to
+`-RequiredAssemblies`.
 
 ## Open items
 
@@ -257,7 +314,8 @@ PowerBuilder or native, that check needs a LoadLibrary variant.
   still needs sign-off is that position itself, plus what value to pin as
   /ves/<system>/approved-commit for TFS-sourced systems (a TFS label string
   works: the gate compares strings, it does not require a real Git SHA).
-- In-scope system list is unconfirmed. Documented outbound processors:
+- In-scope system list is unconfirmed. The scripts now fail closed until the
+  inventory is confirmed. Documented outbound processors:
   VES.OutboundDBQProcessor.exe / VES.OutboundProcessor.exe, Task Scheduler jobs
   VLER_EM_Outbound_Request_Handler / _Processor (and _2 / _12 variants) and
   VLER_EM_Real_Time_Outbound_Processor. processors/ holds only the template;
@@ -277,11 +335,10 @@ PowerBuilder or native, that check needs a LoadLibrary variant.
   (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1. Set -Region per
   the confirmed parameter path before running config-verify/preflight for real.
 - Monitoring sink. Primary signal is still exit codes + JSONL logs. A best-effort
-  Datadog push (metrics via the local agent, events via the ddog-gov API) is now
-  wired into the gate/deploy/health/drift paths — see the Monitoring section — but
-  it never blocks an outcome and is silently dropped on boxes without an agent /
-  `DD_API_KEY`. If you need alerting that must not miss, still wire a durable sink
-  (log shipper, Windows Event Log, etc.) off the JSONL logs.
+  Datadog push (metrics via the local agent, events via the ddog-gov API) covers
+  gate/deploy/health/drift/watchdog paths, but it never changes the primary
+  verification outcome. Configure `DD_API_KEY`, the local agent, on-call routing,
+  and a durable central `VES_AUDIT_LOG_DIR` before production.
 - Break-glass: the gate supports -AllowOverride with a mandatory reason and an
   audit line, but Deploy-Processor doesn't pass it. Decide hard-block vs
   audited override before prod.
@@ -310,19 +367,24 @@ CI later. What's covered:
 - **Unit** (`tests/VesVerify.Module.Tests.ps1`): the module's pure functions —
   manifest hashing (stable, order-independent, change-sensitive), the
   export/import round-trip and tamper detection, `Compare-VesFiles` drift
-  detection, and the `Write-VesLog` JSONL format. No AWS/host needed.
+  detection, fail-closed target inventory validation, environment alert tags,
+  and the `Write-VesLog` JSONL format. No AWS/host needed.
 - **End-to-end**: each entry script is driven as a real `powershell.exe` child
   process and asserted against the documented exit-code contract
   (`0/1/2/3/10`) plus its `-Json` output — `Invoke-Verification` (capture / verify
   / drift / usage, and capture's `-ArchiveRepo` commit+tag against a throwaway
-  git repo), `Verify-Config` (all three contract formats + sensitiveKeys
-  masking), `Invoke-HealthCheck` (fresh-log liveness + assembly load),
+  git repo), `Verify-Config` (all three contract formats, undeclared-setting
+  drift, secret-contract rejection, and explicit ignores),
+  `Invoke-HealthCheck` (fresh-log liveness, assembly load, exact-process failure,
+  and no-probe rejection),
   `Invoke-Preflight` (usage + manifest/contract self-check),
   `Invoke-PreDeployGate` (pass / block-naming-the-file / commit block / SSM
   error — SSM is stubbed by a fake `aws.cmd` prepended to PATH, so no real AWS
   is touched), and `Deploy-Processor` (clean deploy, `-WhatIf`, and the
   running-instance abort/kill paths using a real locked process under the
-  target dir).
+  target dir). `Start-DriftRunner` covers inventory enforcement, drift exits,
+  heartbeat writing, and safe pruning; `Test-DriftHeartbeat` covers fresh,
+  stale, and missing heartbeats.
 
 Deliberately out of scope this round (would need more mocking): the real
 SSM read/write paths (`Get-/Set-VesTrustedHash` against actual AWS, and

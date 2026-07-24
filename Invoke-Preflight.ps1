@@ -48,6 +48,10 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("preflight-{0}" -f $Processor) }
+$runId = [guid]::NewGuid().ToString()
+Write-VesLog INFO 'RUN START: preflight' `
+    -Data @{runId=$runId; script='Invoke-Preflight.ps1'; processor=$Processor} -LogFile $LogFile
 
 # every check appends one row here; the final exit code is derived from their statuses
 $checks = New-Object System.Collections.Generic.List[object]
@@ -176,10 +180,22 @@ function Test-ConfigContract([string]$Path) {
     try { $c = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json }
     catch { Add-Check 'config' 'FAIL' "contract not valid JSON: $($_.Exception.Message)"; return }
     $fmt = if ($c.PSObject.Properties['format']) { $c.format } else { $null }
-    if ($fmt -in 'appconfig','json','keyvalue') {
-        Add-Check 'config' 'PASS' "contract parses, format=$fmt"
-    } else {
+    if ($fmt -notin 'appconfig','json','keyvalue') {
         Add-Check 'config' 'FAIL' "contract format missing/unknown: '$fmt' (want appconfig|json|keyvalue)"
+        return
+    }
+    $sensitive = @{}
+    if ($c.PSObject.Properties['sensitiveKeys'] -and $c.sensitiveKeys) {
+        foreach ($k in @($c.sensitiveKeys)) { if (-not [string]::IsNullOrWhiteSpace("$k")) { $sensitive["$k"] = $true } }
+    }
+    $unsafe = @()
+    if ($c.PSObject.Properties['expectedValues'] -and $c.expectedValues) {
+        $unsafe = @($c.expectedValues.PSObject.Properties | Where-Object { $sensitive.ContainsKey($_.Name) } | ForEach-Object { $_.Name })
+    }
+    if ($unsafe.Count) {
+        Add-Check 'config' 'FAIL' "sensitive key(s) stored under expectedValues: $($unsafe -join ', '); use requiredKeys or ssmExpectedValues"
+    } else {
+        Add-Check 'config' 'PASS' "contract parses, format=$fmt, secret values not embedded"
     }
 }
 
@@ -192,11 +208,21 @@ try {
         if (-not (Test-Path -LiteralPath $TargetsFile)) {
             Write-VesLog ERROR "Targets file not found: $TargetsFile" -LogFile $LogFile
             if ($Json) { @{ status='usage' } | ConvertTo-Json -Compress }
+            Write-VesLog ERROR 'RUN END: preflight outcome=ERROR exit=10' `
+                -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_USAGE} -LogFile $LogFile
             exit $VES_EXIT_USAGE
         }
         Test-AwsCli
+        # Validate the coverage assertion before checking individual baselines.
+        # An incomplete inventory must never produce a READY summary.
+        $inventory = Import-VesTargetInventory -Path $TargetsFile
+        foreach ($e in $inventory.Errors) { Add-Check 'inventory' 'FAIL' $e }
+        foreach ($w in $inventory.Warnings) { Add-Check 'inventory' 'WARN' $w }
+        if ($inventory.Valid) {
+            Add-Check 'inventory' 'PASS' ("confirmed: {0} target(s), {1} required server(s)" -f $inventory.Targets.Count, $inventory.RequiredServers.Count)
+        }
         # run the manifest + config checks per target, reading each target's own params
-        $targets = Get-Content -LiteralPath $TargetsFile -Raw | ConvertFrom-Json
+        $targets = $inventory.Targets
         foreach ($t in $targets) {
             $p = if ($t.PSObject.Properties['processor']) { $t.processor } else { '?' }
             Write-VesLog INFO "--- target: $p ---" -LogFile $LogFile
@@ -212,6 +238,8 @@ try {
         if (-not $ApprovedCommitParam -and -not $TrustParam -and -not $ManifestPath -and -not $ConfigContract -and -not $CheckDatadog) {
             Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ApprovedCommitParam / -TrustParam / -ManifestPath / -ConfigContract / -CheckDatadog.' -LogFile $LogFile
             if ($Json) { @{ status='usage' } | ConvertTo-Json -Compress }
+            Write-VesLog ERROR 'RUN END: preflight outcome=ERROR exit=10' `
+                -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_USAGE} -LogFile $LogFile
             exit $VES_EXIT_USAGE
         }
         # $null = : these probe for their PASS/FAIL side effect; discard the
@@ -235,11 +263,17 @@ try {
     if ($Json) {
         [PSCustomObject]@{ processor=$Processor; ready=$ready; checks=$checks.ToArray() } | ConvertTo-Json -Depth 5 -Compress
     }
-    exit ($(if ($ready) { $VES_EXIT_OK } else { $VES_EXIT_NOBASE }))
+    $exitCode = $(if ($ready) { $VES_EXIT_OK } else { $VES_EXIT_NOBASE })
+    Write-VesLog ($(if ($ready) {'OK'} else {'ERROR'})) `
+        ("RUN END: preflight outcome={0} exit={1}" -f $(if ($ready) {'PASS'} else {'ERROR'}), $exitCode) `
+        -Data @{runId=$runId; outcome=$(if ($ready) {'PASS'} else {'ERROR'}); exitCode=$exitCode} -LogFile $LogFile
+    exit $exitCode
 }
 # unexpected failure (bad targets JSON, module error, etc.): treat as not-ready
 catch {
     Write-VesLog ERROR "Preflight error: $($_.Exception.Message)" -LogFile $LogFile
     if ($Json) { @{ status='error'; error=$_.Exception.Message } | ConvertTo-Json -Compress }
+    Write-VesLog ERROR 'RUN END: preflight outcome=ERROR exit=2' `
+        -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_NOBASE} -LogFile $LogFile
     exit $VES_EXIT_NOBASE
 }

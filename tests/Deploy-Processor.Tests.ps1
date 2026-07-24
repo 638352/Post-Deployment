@@ -12,10 +12,12 @@ BeforeAll {
     $script:Release      = New-VesTree (Join-Path $script:Root 'release')
     $script:Staged       = New-VesTree (Join-Path $script:Root 'staged')   # identical tree = same manifest hash
     $script:ManifestPath = Join-Path $script:Root 'baseline.json'
+    $script:HealthAssembly = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.dll'
 
     $cap = Invoke-VesScript 'Invoke-Verification.ps1' @(
         '-Mode','Capture','-ReleaseRoot',$script:Release,
-        '-ManifestPath',$script:ManifestPath,'-Processor','dptest')
+        '-ManifestPath',$script:ManifestPath,'-Processor','dptest',
+        '-AllowUntrustedCapture','-AllowUnarchivedCapture')
     if ($cap.ExitCode -ne 0) { throw "baseline capture failed: $($cap.Output)" }
     $script:TrustedHash = (Get-Content -LiteralPath $script:ManifestPath -Raw | ConvertFrom-Json).manifestHash
 
@@ -39,7 +41,8 @@ BeforeAll {
             '-StagedCommit','abc1234',
             '-ManifestPath',$script:ManifestPath,
             '-TrustParam','/ves/dptest/baseline-hash',
-            '-ApprovedCommitParam','/ves/dptest/approved-commit'
+            '-ApprovedCommitParam','/ves/dptest/approved-commit',
+            '-RequiredAssemblies',$script:HealthAssembly
         ) + $Extra
     }
 
@@ -67,6 +70,16 @@ Describe 'clean deploy' {
         $target = Join-Path $script:Root 'target-whatif'
         $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $target @('-WhatIf'))
         $r.ExitCode | Should -Be 0
+        Test-Path $target | Should -BeFalse
+    }
+
+    It 'blocks before copy when the staged config is missing' {
+        $target = Join-Path $script:Root 'target-missing-config'
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $target @(
+            '-ConfigContract',(Join-Path $PSScriptRoot 'fixtures\json\contract.json'),
+            '-ConfigPath',(Join-Path $target 'app.exe.config')))
+        $r.ExitCode | Should -Be 1
+        $r.Output   | Should -Match 'app\.exe\.config is missing from the artifact'
         Test-Path $target | Should -BeFalse
     }
 }
