@@ -31,17 +31,27 @@ tests/                       Pester test suite + fixtures
 
 ## Where this runs (OMS)
 
-This suite targets the OMS Legacy on-prem Windows tier, which deploys by
-"RDP + Copy" and has no CI/CD. It does NOT target the Salesforce (Copado) or
-CDK-managed AWS paths, which already have pipelines. Two execution contexts:
+**Scope (per the leadership brief):** OMS .NET executables, PowerBuilder
+binaries, and their configurations — everything still deployed by manual file
+copy, including every Citrix server that receives a deployment copy. Gateway
+cloud services and MERA are **excluded** because they already have standard
+deployment processes; tying them to this Git release discipline is planned as
+later work. Database objects (stored procedures, triggers, views) fit the same
+SHA-256 capture-and-verify pattern and are planned as a fast follow, kept out
+of the current scope to protect the two-week timeline.
+
+This suite does NOT target the Salesforce (Copado) or CDK-managed AWS paths,
+which already have pipelines. Two execution contexts:
 
 - On-prem Windows servers, where files/services/tasks/logs physically live.
   Outbound egress: UAT VESMSEGRESSUAT (all three processors on one box), PROD
   split across VESEMSEGRESS01/02/03 (VEMS-5346). Inbound: UAT VESEMSINGRESUAT,
   PROD VESEMSINGRESS01 (real-time) / VESEMSINGRESS02 (Handler). Java hosts
-  VESOMSVEMS01/02 and VESMERA01. SQL VESSQLOMS101 (OMS2) in PROD. See SERVERS.md
-  for the full per-server/per-processor path map. Run locally on each box or
-  from a central runner over WinRM.
+  VESOMSVEMS01/02. SQL VESSQLOMS101 (OMS2) in PROD. Citrix server list is
+  pending (see Open items). See SERVERS.md for the full per-server/per-processor
+  path map. MERA (VESMERA01) is out of scope for this effort — defer to the
+  MERA team's existing deployment process. Run locally on each box or from a
+  central runner over WinRM.
 - AWS GovCloud access (us-gov-east-1) for the SSM leg of config-verify. The
   on-prem<->AWS VPN already exists; the runner needs a GovCloud read-only role
   to read the pinned hashes / expected values.
@@ -257,6 +267,11 @@ the fallback for direct invocations.
 Control mapping to the tracked leadership brief
 (`Post-Deployment_Verification_Brief-Master_FINAL_7-7-2026_tracked.docx`):
 
+- **Scope** (confirmed in brief): OMS .NET executables, PowerBuilder binaries,
+  and their configurations, including every Citrix server that receives a
+  manual deployment copy. Gateway cloud services and MERA are excluded (already
+  have standard deployment processes; Git release discipline planned as later
+  work). Database objects are planned as a fast follow.
 - **Gate names the files** (closed): a content-gate failure now names each
   missing/changed/extra file when `-ManifestPath` is supplied (the deploy
   wrappers pass it automatically), e.g. "Deployment blocked:
@@ -280,9 +295,10 @@ Control mapping to the tracked leadership brief
   default, record run boundaries, and use distinct PASS/FAIL/ERROR exit codes.
 - **Server/Citrix inventory** (enforcement closed, data pending): the runner
   refuses to claim success until a `ves.targets.v1` inventory explicitly covers
-  every required server with confirmed release/file/config/trust fields. The checked-in
-  inventory remains `inventoryComplete=false` until operations supplies the
-  missing Citrix and production path details.
+  every required server — including every Citrix server that receives a
+  deployment copy — with confirmed release/file/config/trust fields. The
+  checked-in inventory remains `inventoryComplete=false` until operations
+  supplies the missing Citrix and production path details.
 - **Missed runs and environment-aware alerting** (closed in code): the installer
   registers an independent heartbeat watchdog. Drift/trust/missed-run events use
   production error severity and lower-environment warning severity. Delivery to
@@ -318,8 +334,14 @@ and fresh-log health probes; do not pass their binaries to
   inventory is confirmed. Documented outbound processors:
   VES.OutboundDBQProcessor.exe / VES.OutboundProcessor.exe, Task Scheduler jobs
   VLER_EM_Outbound_Request_Handler / _Processor (and _2 / _12 variants) and
-  VLER_EM_Real_Time_Outbound_Processor. processors/ holds only the template;
+  VLER_EM_Real_Time_Outbound_Processor. **Citrix server names are not yet
+  documented** and must be added to `requiredServers` and `targets` before
+  `inventoryComplete` can be set to true. processors/ holds only the template;
   copy it per confirmed system and server (3-5 person-days each incl. pilot).
+- Database objects (stored procedures, triggers, views) are **out of scope** for
+  the current two-week window. They fit the same SHA-256 capture-and-verify
+  pattern and are planned as a fast follow; no script changes are needed to
+  support them — the same manifest/compare approach applies to SQL files.
 - Server split (VEMS-5346): PROD spreads the outbound processors across
   VESEMSEGRESS01/02/03 while UAT runs all three on one box, so deploy is
   server-aware (set the processor list per server). See SERVERS.md.

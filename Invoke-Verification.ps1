@@ -160,7 +160,7 @@ try {
                     capturedUtc  = (Get-Date).ToUniversalTime().ToString('o')
                     capturedBy   = "$env:USERNAME@$env:COMPUTERNAME"
                     trustParam   = $TrustParam
-                    note         = 'First verified release is the earliest automatic rollback point; older releases require a manually approved safe baseline.'
+                    note         = 'Tagged rollback points begin with the first verified release; anything shipped before that still needs a safe baseline determined manually.'
                 }
                 ($releaseRecord | ConvertTo-Json -Depth 5) |
                     Out-File -FilePath (Join-Path $dest 'release-record.json') -Encoding utf8
