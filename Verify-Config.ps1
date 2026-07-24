@@ -19,7 +19,12 @@
                          mismatch is reported as '(masked)'. Keys checked via
                          ssmExpectedValues are ALWAYS reported masked (they are
                          SecureString-gated in Parameter Store), whether or not
-                         they are listed here.
+                         they are listed here. Independently of this list, any
+                         key whose name matches the secret-name pattern
+                         (password/secret/token/credential/api-key/key/
+                         connectionstring, case-insensitive) is auto-masked in
+                         reports as defense-in-depth — still list real secrets
+                         explicitly rather than relying on their names.
 
     Contract example:
     {
@@ -104,8 +109,17 @@ if ($contract.PSObject.Properties['sensitiveKeys'] -and $contract.sensitiveKeys)
         $sensitiveKeys[$k] = $true
     }
 }
+# Defense-in-depth: a key whose NAME says secret is masked in reports even when
+# the contract forgot to list it under sensitiveKeys. Masking only — the strict
+# rules (reject sensitive expectedValues, etc.) still key off the explicit list,
+# so a false-positive name match can never break a valid contract, it just
+# hides a value that was probably a secret anyway.
+$script:VES_SENSITIVE_NAME_PATTERN = '(?i)(password|passwd|pwd|secret|token|credential|api[_-]?key|connection\s*string|connectionstring|(^|[:._-])key(s)?($|[:._-]))'
+function Test-SensitiveKeyName([string]$key) {
+    return ($sensitiveKeys.ContainsKey($key) -or $key -match $script:VES_SENSITIVE_NAME_PATTERN)
+}
 function Get-ReportValue([string]$key, [string]$value) {
-    if ($sensitiveKeys.ContainsKey($key)) { '(masked)' } else { $value }
+    if (Test-SensitiveKeyName $key) { '(masked)' } else { $value }
 }
 function Add-MissingKey([string]$key) {
     if (-not $missingRequired.Contains($key)) { $missingRequired.Add($key) }

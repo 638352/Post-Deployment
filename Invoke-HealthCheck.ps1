@@ -1,39 +1,8 @@
-#Requires -Version 5.1
-<#
-.DESCRIPTION
-    Checks, any failure exits 3:
-      1. required assemblies load AND their referenced types resolve
-      2. service or exact executable-path/mode instance is running
-      3. Task Scheduler job(s) enabled and last run succeeded
-      4. a log directory has a file written recently (liveness)
-      5. optional HTTP probe returns the expected status
-
-    Two health profiles, because OMS has two kinds of target:
-      - Java/Spring Boot services (VESOMSVEMS01/02, VESMERA01): use -HealthUrl
-        against the Actuator endpoint, e.g. http://localhost:9193/actuator/health
-        (esr-mover 9193, pagecount 9191/9192, cenl 8181/8182, user-provisioning
-        8081, alert-report 9194, MERA cfilemanagement 9090-9099).
-      - Outbound .exe processors (VESEMSEGRESS0x): NO actuator endpoint, so prove
-        liveness with -ProcessPathRoot/-ProcessArgumentPattern,
-        -ScheduledTasks (Task Scheduler last-run result), and -FreshLogDir
-        (a recent line under C:\VLER_Test\Logs\...). Optionally add a DB signal
-        check separately (FTPOutboundStack Ready->Sent on VESSQLOMS101).
-
-    Assembly loading applies to .NET targets. PowerBuilder/native targets use
-    the exact process-path/mode, scheduled-task result, and fresh-log probes;
-    their executable bytes are already covered by SHA-256 verification.
-    Invoking the script without any probe exits 10 rather than reporting healthy.
-#>
 [CmdletBinding()]
 param(
     [string[]]$RequiredAssemblies = @(),
     [string]$ServiceName,
     [string]$ProcessName,
-    # Exact console-EXE identity. The same executable name runs in several
-    # processor folders, so a production check must match ExecutablePath under
-    # this root; an optional regex can additionally match the mode argument.
-    [string]$ProcessPathRoot,
-    [string]$ProcessArgumentPattern,
     # Task Scheduler jobs for the outbound processors, e.g.
     # VLER_EM_Real_Time_Outbound_Processor. Healthy = enabled + last run == 0.
     [string[]]$ScheduledTasks = @(),
@@ -44,35 +13,13 @@ param(
     [int]$ExpectedStatus = 200,
     [string]$Processor = 'unknown',
     [string]$CommitSha = 'unknown',
-    [string]$Environment = 'prod',
     [string]$LogFile,
     [switch]$Json
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
-if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("health-{0}" -f $Processor) }
-$runId = [guid]::NewGuid().ToString()
-Write-VesLog INFO 'RUN START: health verification' `
-    -Data @{runId=$runId; script='Invoke-HealthCheck.ps1'; processor=$Processor; environment=$Environment; release=$CommitSha} `
-    -LogFile $LogFile
 # every check appends a reason string here; a non-empty list at the end = unhealthy (exit 3)
 $fail = New-Object System.Collections.Generic.List[string]
-
-# A health check with no requested probe is not evidence. Treat it as a usage
-# error so a misconfigured deploy cannot receive a false green result.
-$probeCount = $RequiredAssemblies.Count + $ScheduledTasks.Count
-foreach ($value in @($ServiceName,$ProcessName,$ProcessPathRoot,$FreshLogDir,$HealthUrl)) {
-    if (-not [string]::IsNullOrWhiteSpace($value)) { $probeCount++ }
-}
-if ($probeCount -eq 0) {
-    Write-VesLog ERROR 'No health probes were configured; refusing to report a pass.' `
-        -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_USAGE} -LogFile $LogFile
-    if ($Json) {
-        [PSCustomObject]@{runId=$runId; processor=$Processor; commit=$CommitSha; healthy=$false; outcome='ERROR'; failures=@('no probes configured')} |
-            ConvertTo-Json -Compress
-    }
-    exit $VES_EXIT_USAGE
-}
 
 # Check 1: each required .NET assembly loads and its types resolve (catches a missing dependency)
 foreach ($dll in $RequiredAssemblies) {
@@ -101,28 +48,6 @@ if ($ServiceName) {
         $fail.Add("service:$ServiceName not running")
         Write-VesLog ERROR "Service DOWN: $ServiceName" -LogFile $LogFile
     } else { Write-VesLog OK "Service running: $ServiceName" -LogFile $LogFile }
-}
-elseif ($ProcessPathRoot) {
-    try {
-        $rootItem = Get-Item -LiteralPath $ProcessPathRoot -ErrorAction Stop
-        $rootPrefix = $rootItem.FullName.TrimEnd('\') + '\'
-        $matches = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
-            $_.ExecutablePath -and
-            $_.ExecutablePath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -and
-            ([string]::IsNullOrWhiteSpace($ProcessArgumentPattern) -or $_.CommandLine -match $ProcessArgumentPattern)
-        })
-        if ($matches.Count -eq 0) {
-            $detail = if ($ProcessArgumentPattern) { " under $ProcessPathRoot matching /$ProcessArgumentPattern/" } else { " under $ProcessPathRoot" }
-            $fail.Add("process-path:$ProcessPathRoot not found")
-            Write-VesLog ERROR "Process DOWN:$detail" -LogFile $LogFile
-        } else {
-            $pids = @($matches | ForEach-Object { $_.ProcessId }) -join ','
-            Write-VesLog OK "Process running under $ProcessPathRoot (PID $pids)" -LogFile $LogFile
-        }
-    } catch {
-        $fail.Add("process-path:$ProcessPathRoot -> $($_.Exception.Message)")
-        Write-VesLog ERROR "Process path check failed: $ProcessPathRoot -> $($_.Exception.Message)" -LogFile $LogFile
-    }
 }
 elseif ($ProcessName) {
     if (-not (Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)) {
@@ -203,25 +128,13 @@ if (-not $healthy) {
     Write-VesLog ERROR "HEALTH FAIL $Processor -> $($fail -join ' | ')" -LogFile $LogFile
 }
 
-# --- Datadog: health results as gauges (non-fatal) --------------------------
-# The outbound .exe processors have no endpoint of their own, so this gauge is
-# the only way their liveness reaches a dashboard. Low-cardinality tags only.
-$ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment), "check:health")
-# 1 = all requested checks passed; 0 = at least one failed.
-Send-VesDatadogMetric -Metric 'deployment.health.status'   -Value ([int]$healthy) -Tags $ddTags
-# Failure count gives severity at a glance without per-check tag cardinality.
-Send-VesDatadogMetric -Metric 'deployment.health.failures' -Value $fail.Count     -Tags $ddTags
-
 if ($Json) {
-    # commit included for traceability (which build this liveness result belongs to);
-    # kept out of the Datadog tags above on purpose to avoid per-commit cardinality.
-    [PSCustomObject]@{ runId=$runId; processor=$Processor; commit=$CommitSha; healthy=$healthy; outcome=$(if ($healthy) {'PASS'} else {'FAIL'}); failures=@($fail) } | ConvertTo-Json -Compress
+    [PSCustomObject]@{ processor=$Processor; healthy=$healthy; failures=@($fail) } | ConvertTo-Json -Compress
 }
-Write-VesLog ($(if ($healthy){'OK'}else{'ERROR'})) ("Health check {0}" -f $(if ($healthy){'PASS'}else{'FAIL'})) `
-    -Data @{ processor=$Processor; commit=$CommitSha } -LogFile $LogFile
-$exitCode = $(if ($healthy) { $VES_EXIT_OK } else { $VES_EXIT_HEALTH })
-Write-VesLog ($(if ($healthy){'OK'}else{'ERROR'})) `
-    ("RUN END: health verification outcome={0} exit={1}" -f $(if ($healthy) {'PASS'} else {'FAIL'}), $exitCode) `
-    -Data @{runId=$runId; outcome=$(if ($healthy) {'PASS'} else {'FAIL'}); exitCode=$exitCode; processor=$Processor; release=$CommitSha} `
-    -LogFile $LogFile
-exit $exitCode
+# gauges: the outbound exes expose no endpoint of their own, so this is the only
+# path their liveness has to a dashboard at all
+$hcTags = @("processor:$Processor")
+Send-VesDatadogMetric -Metric 'deployment.health.status'   -Value ($(if ($healthy) { 1 } else { 0 })) -Tags $hcTags
+Send-VesDatadogMetric -Metric 'deployment.health.failures' -Value $fail.Count -Tags $hcTags
+Write-VesLog ($(if ($healthy){'OK'}else{'ERROR'})) ("Health check {0}" -f $(if ($healthy){'PASS'}else{'FAIL'})) -LogFile $LogFile
+exit ($(if ($healthy) { $VES_EXIT_OK } else { $VES_EXIT_HEALTH }))

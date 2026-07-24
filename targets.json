@@ -6,7 +6,9 @@
   "inventoryNotes": [
     "Fail-closed starter inventory only. Confirm every manual-copy target before setting inventoryComplete to true.",
     "Citrix server names are not yet documented in this repository and must be added to requiredServers and targets.",
-    "Confirm production processor paths, task names, configuration paths, and GovCloud region from the deployment runbooks."
+    "Confirm production processor paths, task names, configuration paths, and GovCloud region from the deployment runbooks.",
+    "Excluded per brief Scope: cloud services (gateway services, MERA - VESMERA01, VESOMSVEMS01/02) already have standard deployment processes; joining them to the Git release discipline is later work.",
+    "Excluded per brief Scope: database objects (stored procedures, triggers, views) are a planned fast follow, outside the two-week window."
   ],
   "requiredServers": [
     "VESDEVAPPS01",
@@ -16,10 +18,7 @@
     "VESMSEGRESSUAT",
     "VESEMSEGRESS01",
     "VESEMSEGRESS02",
-    "VESEMSEGRESS03",
-    "VESOMSVEMS01",
-    "VESOMSVEMS02",
-    "VESMERA01"
+    "VESEMSEGRESS03"
   ],
   "targets": [
     {
@@ -34,19 +33,6 @@
       "configContract": "D:\\baselines\\OutboundDBQProcessor.config.json",
       "configPath": "C:\\VLER_Test\\Processors\\OutboundDBQProcessor\\VES.OutboundDBQProcessor.exe.config",
       "note": "DBQ is documented on VESEMSEGRESS02/03; create one confirmed entry per deployed copy."
-    },
-    {
-      "processor": "oms-vems-pagecount-prod",
-      "server": "VESOMSVEMS01",
-      "environment": "prod",
-      "inventoryStatus": "needs-confirmation",
-      "releaseTag": "TBD",
-      "releaseRoot": "E:\\oms-vems-pagecount-prod",
-      "manifestPath": "D:\\baselines\\oms-vems-pagecount-prod.json",
-      "trustParam": "/ves/oms-vems-pagecount-prod/baseline-hash",
-      "configContract": "D:\\baselines\\oms-vems-pagecount-prod.config.json",
-      "configPath": "E:\\oms-vems-pagecount-prod\\application.properties",
-      "note": "Confirm whether this Java service remains in the manual-copy scope."
     }
   ]
 }

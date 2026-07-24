@@ -27,12 +27,22 @@ The PROD split (VEMS-5346) is why deploy/verify is server-aware: a given
 processor only exists on the servers listed above, so each per-server wrapper
 targets only the processors on that box.
 
-### Databases
+### Databases (out of scope — fast follow)
+Database objects (stored procedures, triggers, views) are excluded from the
+current effort per the brief's Scope; they fit the same capture-and-verify
+pattern and are a planned fast follow. Kept here for reference only.
+
 | Tier | Server | Database |
 |------|--------|----------|
 | DEV  | VESSQLDEV101 | OMS2 |
 | UAT  | VESSQLUAT101 | OMS2 |
 | PROD | VESSQLOMS101 | OMS2 |
+
+### Java / cloud-service hosts (out of scope — later work)
+The gateway services and MERA (VESOMSVEMS01/02, VESMERA01) are excluded per
+the brief's Scope: they already have standard deployment processes, and tying
+them to the same Git release discipline is planned as later work. They are not
+part of the required manual-copy inventory in targets.json.
 
 ## How the outbound processors actually run
 

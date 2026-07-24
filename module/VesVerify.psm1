@@ -521,6 +521,80 @@ function Set-VesTrustedHash {
     }
 }
 
+# --- Git archive readback: baseline from the release tag ---------------------
+# Capture commits the manifest under baselines/<processor>/ in the archive repo
+# and tags the commit. These helpers read that record back at a given tag so
+# the gate and verification can source their baseline from the release tag
+# itself instead of only a local file. When SSM is also configured, the tag
+# manifest must agree with the pinned hash; the tag never replaces the anchor.
+
+function Invoke-VesGit {
+    <#
+    .SYNOPSIS Run git and throw a readable error on any non-zero exit.
+    .NOTES
+      Same PS 5.1 trap as the AWS CLI: under ErrorActionPreference=Stop, stderr
+      from a native command becomes terminating, so scope the preference down
+      around the call and surface the real exit code + output instead.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string[]]$GitArgs)
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw 'git not found on PATH'
+    }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $out = & git @GitArgs 2>&1; $code = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    if ($code -ne 0) {
+        throw ("git {0} failed (exit {1}): {2}" -f ($GitArgs -join ' '), $code, ((@($out) | ForEach-Object { "$_" }) -join ' '))
+    }
+    return (@($out) | ForEach-Object { "$_" }) -join "`n"
+}
+
+function Test-VesReleaseTag {
+    <#
+    .SYNOPSIS True when a tag matches <prefix/>vMAJOR.MINOR.PATCH, e.g. OutboundDBQ/v1.4.0.
+    #>
+    [CmdletBinding()]
+    param([string]$Tag)
+    return ($Tag -match '^(?:[A-Za-z0-9._-]+/)?v\d+\.\d+\.\d+$')
+}
+
+function Get-VesManifestFromTag {
+    <#
+    .SYNOPSIS Load the archived baseline manifest from a release tag via git show.
+    .DESCRIPTION
+      Reads baselines/<Processor>/<FileName> at the given tag and returns the
+      same {Doc; StoredHash; RecomputedHash; Consistent} shape as
+      Import-VesManifest so callers reuse identical trust logic. FileName
+      defaults to <Processor>.json, the capture convention. Any git failure
+      (missing tag, missing path, not a checkout) throws; callers map that to
+      exit 2, never a pass.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RepoPath,
+        [Parameter(Mandatory)][string]$Tag,
+        [Parameter(Mandatory)][string]$Processor,
+        [string]$FileName
+    )
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoPath '.git'))) {
+        throw "Baseline repo is not a git checkout: $RepoPath"
+    }
+    if ([string]::IsNullOrWhiteSpace($FileName)) { $FileName = "$Processor.json" }
+    $relPath = 'baselines/{0}/{1}' -f $Processor, $FileName
+    $text = Invoke-VesGit @('-C', $RepoPath, 'show', ('{0}:{1}' -f $Tag, $relPath))
+    $doc = $text | ConvertFrom-Json
+    $recomputed = Get-VesManifestHash -Manifest $doc.files
+    return [PSCustomObject]@{
+        Doc            = $doc
+        StoredHash     = $doc.manifestHash
+        RecomputedHash = $recomputed
+        Consistent     = ($doc.manifestHash -eq $recomputed)
+        Source         = ('{0}:{1}' -f $Tag, $relPath)
+    }
+}
+
 # --- Datadog (ddog-gov) -------------------------------------------------------
 function Send-VesDatadogMetric {
     <#
@@ -641,5 +715,6 @@ Export-ModuleMember -Function `
     Write-VesLog, New-VesLogFile, Get-VesOutcome, Import-VesTargetInventory, `
     Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
     Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash, `
-    Invoke-VesAwsCli, Send-VesDatadogMetric, Send-VesDatadogEvent, `
+    Invoke-VesAwsCli, Invoke-VesGit, Test-VesReleaseTag, Get-VesManifestFromTag, `
+    Send-VesDatadogMetric, Send-VesDatadogEvent, `
     Get-VesDatadogEnvTag, Get-VesAlertType
