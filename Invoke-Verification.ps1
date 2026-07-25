@@ -10,10 +10,17 @@
     Capture archives the release record to Git: -ArchiveRepo <path to a git
     checkout> commits the manifest, optional config contract, and generated
     release-record.json under baselines/<processor>/; -ReleaseTag tags the
-    commit (e.g. OutboundDBQ/v1.4.0). -TrustParam, -ArchiveRepo, and -ReleaseTag
-    are required for normal capture. Explicit Allow* switches exist only for
-    isolated local development. An untrusted or unrecorded approved baseline
-    must not look captured.
+    commit and must match <system>/vMAJOR.MINOR.PATCH (e.g. OutboundDBQ/v1.4.0).
+    -TrustParam, -ArchiveRepo, and -ReleaseTag are required for normal capture.
+    -PushRemote pushes the record and tag off-host (--follow-tags); a failed
+    push fails the capture. Explicit Allow* switches exist only for isolated
+    local development. An untrusted or unrecorded approved baseline must not
+    look captured.
+
+    VerifyFiles/All can source the baseline from the archived record instead of
+    a local file: -BaselineRepo <git checkout> with -ReleaseTag reads the
+    manifest committed under that tag ("the manifest in the Git release tag").
+    The SSM trust anchor still applies when -TrustParam is set.
 
     Exit codes: 0 match, 1 drift, 2 no baseline / trust failure, 10 usage.
     Replaces the earlier Verify-Deployment.ps1 Capture/Verify script.
@@ -40,6 +47,13 @@ param(
     # optional release tag to pin the record under (audit layer; see header)
     [string]$ArchiveRepo,
     [string]$ReleaseTag,
+    # Verify only: read the baseline manifest out of -ReleaseTag in this git
+    # checkout instead of from -ManifestPath (the tag-archived release record).
+    [string]$BaselineRepo,
+    # Capture only: push the release commit and tag to the remote immediately;
+    # a release record that exists only on one workstation is not an audit trail.
+    [switch]$PushRemote,
+    [string]$Remote = 'origin',
     [string]$Processor = 'unknown',
     [string]$CommitSha = 'unknown',
     [string]$Environment = 'prod',
@@ -66,9 +80,9 @@ $runId = [guid]::NewGuid().ToString()
 # compare must agree on this pattern or excluded files resurface as "Extra".
 if (-not $ExcludePattern) { $ExcludePattern = $Global:VES_DEFAULT_EXCLUDE }
 # accumulates the machine-readable result emitted when -Json is set
-$result = [ordered]@{ runId=$runId; mode=$Mode; processor=$Processor; environment=$Environment; status=$null; detail=@{} }
+$result = [ordered]@{ runId=$runId; mode=$Mode; processor=$Processor; environment=$Environment; releaseTag=$ReleaseTag; status=$null; detail=@{} }
 Write-VesLog INFO "RUN START: verification mode=$Mode" `
-    -Data @{runId=$runId; script='Invoke-Verification.ps1'; processor=$Processor; environment=$Environment; release=$CommitSha} `
+    -Data @{runId=$runId; script='Invoke-Verification.ps1'; processor=$Processor; environment=$Environment; release=$CommitSha; releaseTag=$ReleaseTag} `
     -LogFile $LogFile
 
 # single exit point: optionally print the JSON result, then exit with the given code
@@ -76,27 +90,11 @@ function Out-Result([int]$code) {
     $outcome = Get-VesOutcome -ExitCode $code
     Write-VesLog ($(if ($outcome -eq 'PASS') {'OK'} elseif ($outcome -eq 'FAIL') {'DRIFT'} else {'ERROR'})) `
         "RUN END: verification outcome=$outcome exit=$code" `
-        -Data @{runId=$runId; outcome=$outcome; exitCode=$code; processor=$Processor; release=$CommitSha} -LogFile $LogFile
+        -Data @{runId=$runId; outcome=$outcome; exitCode=$code; processor=$Processor; release=$CommitSha; releaseTag=$ReleaseTag} -LogFile $LogFile
     if ($Json) { ($result | ConvertTo-Json -Depth 6 -Compress) }
     exit $code
 }
-
-# Run git and throw a readable error on any non-zero exit. Same PS 5.1 trap as
-# the AWS CLI: under ErrorActionPreference=Stop, stderr from a native command
-# becomes terminating, so scope the preference down around the call.
-function Invoke-VesGit([string[]]$GitArgs) {
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        throw 'git not found on PATH; required for -ArchiveRepo'
-    }
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try { $out = & git @GitArgs 2>&1; $code = $LASTEXITCODE }
-    finally { $ErrorActionPreference = $prev }
-    if ($code -ne 0) {
-        throw ("git {0} failed (exit {1}): {2}" -f ($GitArgs -join ' '), $code, ((@($out) | ForEach-Object { "$_" }) -join ' '))
-    }
-    return (@($out) | ForEach-Object { "$_" }) -join "`n"
-}
+# Git plumbing (Invoke-VesGit) comes from the module, shared with the readback path.
 
 # Emit the verify outcome to Datadog as gauges (non-fatal), mirroring Invoke-HealthCheck.
 # $ok = prod matches baseline; $mismatch = count of drifted items. Never blocks a verify.
@@ -121,8 +119,8 @@ try {
                 Write-VesLog ERROR 'Capture requires -ArchiveRepo and -ReleaseTag so the approved baseline has a Git release record. Use -AllowUnarchivedCapture only for local development.' -LogFile $LogFile
                 Out-Result $VES_EXIT_USAGE
             }
-            if ($ReleaseTag -and $ReleaseTag -match '\s') {
-                Write-VesLog ERROR '-ReleaseTag cannot contain whitespace.' -LogFile $LogFile
+            if ($ReleaseTag -and -not (Test-VesReleaseTag -Tag $ReleaseTag)) {
+                Write-VesLog ERROR "-ReleaseTag must match <system>/vMAJOR.MINOR.PATCH (e.g. OutboundDBQ/v1.4.0); got '$ReleaseTag'." -LogFile $LogFile
                 Out-Result $VES_EXIT_USAGE
             }
             # hash the release tree and write the manifest to disk
@@ -180,6 +178,15 @@ try {
                 Write-VesLog OK ("Baseline archived to Git: {0} ({1})" -f $ArchiveRepo, $(if ($ReleaseTag) { "tag $ReleaseTag" } else { 'no tag' })) -LogFile $LogFile
                 $result['detail']['archivedTo'] = $ArchiveRepo
                 if ($ReleaseTag) { $result['detail']['releaseTag'] = $ReleaseTag }
+                # Make the record durable off-host. A failed push fails the
+                # capture: a release record on one workstation is not an audit trail.
+                if ($PushRemote) {
+                    # Explicit HEAD refspec: works on a checkout whose branch has
+                    # no upstream configured yet (fresh archive repos).
+                    [void](Invoke-VesGit @('-C', $ArchiveRepo, 'push', '--follow-tags', $Remote, 'HEAD'))
+                    Write-VesLog OK ("Release record pushed to remote '{0}' (--follow-tags)." -f $Remote) -LogFile $LogFile
+                    $result['detail']['pushedTo'] = $Remote
+                }
             }
             # Activate only after the Git release record is durable.
             if ($TrustParam) {
@@ -196,10 +203,27 @@ try {
         # VerifyFiles (and the file leg of All): hash-compare the deployed tree to the baseline
         { $_ -in 'VerifyFiles','All' } {
             if (-not $ReleaseRoot) { Write-VesLog ERROR '-ReleaseRoot required for file verification' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
-            if (-not $ManifestPath) { Write-VesLog ERROR '-ManifestPath required' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
+            $useTag = -not [string]::IsNullOrWhiteSpace($BaselineRepo)
+            if ($useTag -and [string]::IsNullOrWhiteSpace($ReleaseTag)) {
+                Write-VesLog ERROR '-BaselineRepo requires -ReleaseTag to locate the archived baseline.' -LogFile $LogFile
+                Out-Result $VES_EXIT_USAGE
+            }
+            if (-not $ManifestPath -and -not $useTag) {
+                Write-VesLog ERROR '-ManifestPath required (or -BaselineRepo/-ReleaseTag to read the tag-archived baseline)' -LogFile $LogFile
+                Out-Result $VES_EXIT_USAGE
+            }
 
-            # load the baseline and reject it up front if its own self-hash doesn't match
-            $m = Import-VesManifest -Path $ManifestPath
+            # load the baseline: from the Git release tag when -BaselineRepo is
+            # set, else from the local manifest file. Both paths yield the same
+            # shape, so the self-hash and SSM trust checks below apply equally.
+            if ($useTag) {
+                $leafName = if ($ManifestPath) { Split-Path -Leaf $ManifestPath } else { $null }
+                $m = Get-VesManifestFromTag -RepoPath $BaselineRepo -Tag $ReleaseTag -Processor $Processor -FileName $leafName
+                Write-VesLog OK ("Baseline manifest read from Git release tag {0} ({1})." -f $ReleaseTag, $m.Source) -LogFile $LogFile
+            } else {
+                $m = Import-VesManifest -Path $ManifestPath
+            }
+            # reject the baseline up front if its own self-hash doesn't match
             if (-not $m.Consistent) {
                 # manifest was edited or corrupted after capture
                 Write-VesLog ERROR "Manifest self-hash mismatch (tampered/corrupt): stored=$($m.StoredHash) recomputed=$($m.RecomputedHash)" -LogFile $LogFile

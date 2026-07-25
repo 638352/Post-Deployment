@@ -104,12 +104,44 @@ aws ssm put-parameter --name /ves/<system>/approved-commit --value <sha> `
 -ArchiveRepo/-ReleaseTag are the audit layer: the manifest (and contract, when
 passed) are committed under `baselines/<processor>/` in that checkout and the
 commit is tagged, so every approved release leaves a Git-tagged rollback/audit
-point. Capture also generates `release-record.json` with the release tag,
-source commit, manifest hash, file count, trust parameter, and approval
-provenance. `-TrustParam`, `-ArchiveRepo`, and `-ReleaseTag` are required;
-capture fails closed if any is missing. The
+point. Tagged rollback points begin with the first verified release; anything
+shipped before that still needs a safe baseline determined manually (the
+generated release record carries the same note). `-ReleaseTag` must match
+`<system>/vMAJOR.MINOR.PATCH`; anything else is rejected (exit 10). Add
+`-PushRemote` (with optional `-Remote`, default `origin`) to push the commit
+and tag off-host immediately — a failed push fails the capture, because a
+release record that exists only on one workstation is not an audit trail.
+Capture also generates `release-record.json` with the release tag, source
+commit, manifest hash, file count, trust parameter, and approval provenance.
+`-TrustParam`, `-ArchiveRepo`, and `-ReleaseTag` are required; capture fails
+closed if any is missing. The
 `-AllowUntrustedCapture`/`-AllowUnarchivedCapture` switches exist only for
 isolated local tests and must not be used for an approved release.
+
+The archived record is not write-only: the gate and verification can read the
+baseline manifest back out of the release tag instead of a local file, which is
+the brief's "inspect the artifact against the manifest in the Git release tag":
+
+```powershell
+# post-deploy / drift check sourced from the tagged record (SSM anchor still applies)
+.\Invoke-Verification.ps1 -Mode VerifyFiles -ReleaseRoot C:\Procs\<system> `
+  -BaselineRepo D:\ves-verify -ReleaseTag <system>/v1.4.0 `
+  -TrustParam /ves/<system>/baseline-hash -Processor <system>
+
+# pre-deploy gate against the tagged record
+.\Invoke-PreDeployGate.ps1 -StagedRoot D:\stage\<system> -StagedCommit <sha> `
+  -ApprovedCommitParam /ves/<system>/approved-commit `
+  -BaselineRepo D:\ves-verify -ReleaseTag <system>/v1.4.0 -Processor <system>
+```
+
+When `-TrustParam` and `-BaselineRepo` are both supplied, the tag manifest must
+agree with the SSM-pinned hash (a rewritten tag cannot relax the gate). With
+the tag alone the check is logged as tag-anchored. A gate invocation with
+NEITHER a trust parameter nor a tag source exits 10 rather than passing on the
+commit string alone; `-AllowCommitOnly` is the explicit, logged exception.
+Deploy-Processor accepts `-ReleaseTag`/`-BaselineRepo` and threads them through
+the gate, verification, and health stages, so every stage's run log records
+which release tag it checked.
 
 Preflight before a deploy (read-only; touches no prod or staged files). Confirms
 the AWS CLI is present, the SSM parameters actually read back (auth + KMS decrypt
@@ -176,6 +208,7 @@ Health check by target type (any failure exits 3):
   -FreshLogDir C:\VLER_Test\Logs\VES.OutboundProcessor -FreshLogMaxAgeMinutes 60
 
 # Java/Spring Boot service: Windows service state + actuator probe
+# (profile retained for the excluded gateway/MERA services -- later work)
 .\Invoke-HealthCheck.ps1 -Processor pagecount `
   -ServiceName oms-vems-pagecount-prod `
   -HealthUrl http://localhost:9191/actuator/health
@@ -197,7 +230,11 @@ reported as `(masked)` on mismatch, so a secret never lands in a log or
 report — list any secret-bearing key there rather than relying on convention.
 A sensitive key under `expectedValues` is rejected because that would store the
 secret in Git; use `requiredKeys` for non-empty presence or
-`ssmExpectedValues` for a secure comparison.
+`ssmExpectedValues` for a secure comparison. As defense-in-depth, any key whose
+name matches the secret-name pattern (password/pwd/secret/token/credential/
+api-key/key/connectionstring, case-insensitive) is auto-masked in reports even
+when the contract forgot to declare it — the explicit list is still the rule,
+the pattern is the safety net for undeclared secrets.
 
 The contract is exhaustive by default. Every live key must appear under
 `requiredKeys`, `expectedValues`, `ssmExpectedValues`, `machineKeys`, or the
@@ -287,10 +324,29 @@ Control mapping to the tracked leadership brief
   Capture -ArchiveRepo <checkout> -ReleaseTag <system>/vX.Y.Z` commits the
   manifest + sanitized contract + generated release record under
   `baselines/<processor>/` and tags the commit. Trust pinning and Git archival
-  are required unless an explicit local-only exception is used.
+  are required unless an explicit local-only exception is used. The tag format
+  is enforced (`<system>/vMAJOR.MINOR.PATCH`), `-PushRemote` makes the record
+  durable off-host (a failed push fails the capture), and the record is read
+  back at check time: gate and verification accept `-BaselineRepo`/`-ReleaseTag`
+  to source the baseline manifest from the tag itself ("the manifest in the Git
+  release tag"), cross-checked against the SSM pin when both are configured.
+- **Rollback point caveat** (closed): the generated release record states that
+  tagged rollback points begin with the first verified release; anything
+  shipped before that still needs a safe baseline determined manually.
+  Documented above under Usage and emitted in `release-record.json` at capture
+  time.
+- **Gate never passes on the commit string alone** (closed): without a content
+  source (SSM trust parameter or tag-archived manifest) the gate exits 10
+  instead of implying the artifact was inspected; `-AllowCommitOnly` is the
+  explicit, logged exception. Deploy-Processor always supplies `-TrustParam`.
+- **Release tag in run evidence** (closed): `-ReleaseTag` threads through
+  deploy -> gate -> verify -> health, and each stage stamps it into its run-start
+  and run-end JSONL records, so every piece of execution evidence names the
+  release it checked.
 - **Settings are exhaustive and sanitized** (closed): missing, mismatched, and
   undeclared settings are named; machine/ignored differences require an
-  explicit allowlist; sensitive values cannot be embedded in the contract.
+  explicit allowlist; sensitive values cannot be embedded in the contract, and
+  secret-named keys are auto-masked in reports even when left undeclared.
 - **Run evidence and outcomes** (closed): scripts create JSONL evidence by
   default, record run boundaries, and use distinct PASS/FAIL/ERROR exit codes.
 - **Server/Citrix inventory** (enforcement closed, data pending): the runner
@@ -417,6 +473,7 @@ network.
 ## Host prerequisites
 
 AWS CLI with an instance profile allowing ssm:GetParameter (and PutParameter
-for capture hosts) plus kms:Decrypt. The service accounts on the boxes are
-svc_omsvems (VEMS) and svc_mera (MERA); the runner needs rights to manage those
-services / scheduled tasks. TLS 1.2 is forced in the module.
+for capture hosts) plus kms:Decrypt. The runner needs rights to manage the
+target services / scheduled tasks. (The Java-host service accounts svc_omsvems
+(VEMS) and svc_mera (MERA) only become relevant if the excluded gateway/MERA
+services join this discipline as later work.) TLS 1.2 is forced in the module.

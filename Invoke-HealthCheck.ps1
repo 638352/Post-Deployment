@@ -9,7 +9,9 @@
       5. optional HTTP probe returns the expected status
 
     Two health profiles, because OMS has two kinds of target:
-      - Java/Spring Boot services (VESOMSVEMS01/02, VESMERA01): use -HealthUrl
+      - Java/Spring Boot services (VESOMSVEMS01/02, VESMERA01): excluded from
+        the current scope per the brief (gateway/MERA = later work); profile
+        retained for when they join the release discipline. Use -HealthUrl
         against the Actuator endpoint, e.g. http://localhost:9193/actuator/health
         (esr-mover 9193, pagecount 9191/9192, cenl 8181/8182, user-provisioning
         8081, alert-report 9194, MERA cfilemanagement 9090-9099).
@@ -44,6 +46,9 @@ param(
     [int]$ExpectedStatus = 200,
     [string]$Processor = 'unknown',
     [string]$CommitSha = 'unknown',
+    # Release tag of the checked release (evidence only): stamped into the run
+    # log so the health record names the release it verified.
+    [string]$ReleaseTag,
     [string]$Environment = 'prod',
     [string]$LogFile,
     [switch]$Json
@@ -53,7 +58,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("health-{0}" -f $Processor) }
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: health verification' `
-    -Data @{runId=$runId; script='Invoke-HealthCheck.ps1'; processor=$Processor; environment=$Environment; release=$CommitSha} `
+    -Data @{runId=$runId; script='Invoke-HealthCheck.ps1'; processor=$Processor; environment=$Environment; release=$CommitSha; releaseTag=$ReleaseTag} `
     -LogFile $LogFile
 # every check appends a reason string here; a non-empty list at the end = unhealthy (exit 3)
 $fail = New-Object System.Collections.Generic.List[string]
@@ -222,6 +227,6 @@ Write-VesLog ($(if ($healthy){'OK'}else{'ERROR'})) ("Health check {0}" -f $(if (
 $exitCode = $(if ($healthy) { $VES_EXIT_OK } else { $VES_EXIT_HEALTH })
 Write-VesLog ($(if ($healthy){'OK'}else{'ERROR'})) `
     ("RUN END: health verification outcome={0} exit={1}" -f $(if ($healthy) {'PASS'} else {'FAIL'}), $exitCode) `
-    -Data @{runId=$runId; outcome=$(if ($healthy) {'PASS'} else {'FAIL'}); exitCode=$exitCode; processor=$Processor; release=$CommitSha} `
+    -Data @{runId=$runId; outcome=$(if ($healthy) {'PASS'} else {'FAIL'}); exitCode=$exitCode; processor=$Processor; release=$CommitSha; releaseTag=$ReleaseTag} `
     -LogFile $LogFile
 exit $exitCode

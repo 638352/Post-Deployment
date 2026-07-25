@@ -42,6 +42,12 @@ param(
     [Parameter(Mandatory)][string]$ManifestPath,
     [Parameter(Mandatory)][string]$TrustParam,
     [Parameter(Mandatory)][string]$ApprovedCommitParam,
+    # Release tag of the approved baseline (e.g. OutboundDBQ/v1.4.0). Threaded
+    # through the gate, verification, and health stages so every stage's run log
+    # names the release it checked. With -BaselineRepo the gate and verification
+    # also cross-check the manifest archived under that tag.
+    [string]$ReleaseTag,
+    [string]$BaselineRepo,
     [string]$ConfigContract,
     [string]$ConfigPath,
     # Relative staged paths that must exist even though they are excluded from
@@ -80,8 +86,16 @@ $here = $PSScriptRoot
 if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("deploy-{0}-{1}" -f $Processor, $StagedCommit) }
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: deployment' `
-    -Data @{runId=$runId; script='Deploy-Processor.ps1'; processor=$Processor; environment=$Environment; release=$StagedCommit; target=$TargetRoot} `
+    -Data @{runId=$runId; script='Deploy-Processor.ps1'; processor=$Processor; environment=$Environment; release=$StagedCommit; releaseTag=$ReleaseTag; target=$TargetRoot} `
     -LogFile $LogFile
+
+# A tag source needs both halves; fail closed before any stage runs.
+if ($BaselineRepo -and [string]::IsNullOrWhiteSpace($ReleaseTag)) {
+    Write-VesLog ERROR '-BaselineRepo requires -ReleaseTag.' -LogFile $LogFile
+    Write-VesLog ERROR 'RUN END: deployment outcome=ERROR exit=10' `
+        -Data @{runId=$runId; outcome='ERROR'; exitCode=10; processor=$Processor; release=$StagedCommit} -LogFile $LogFile
+    exit $VES_EXIT_USAGE
+}
 
 # Low-cardinality tags shared by every deploy event emitted to Datadog.
 $ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment))
@@ -90,7 +104,7 @@ function Stop-Deploy([int]$code) {
     $outcome = Get-VesOutcome -ExitCode $code
     Write-VesLog ($(if ($outcome -eq 'PASS') {'OK'} elseif ($outcome -eq 'FAIL') {'ERROR'} else {'ERROR'})) `
         "RUN END: deployment outcome=$outcome exit=$code" `
-        -Data @{runId=$runId; outcome=$outcome; exitCode=$code; processor=$Processor; release=$StagedCommit} -LogFile $LogFile
+        -Data @{runId=$runId; outcome=$outcome; exitCode=$code; processor=$Processor; release=$StagedCommit; releaseTag=$ReleaseTag} -LogFile $LogFile
     exit $code
 }
 
@@ -149,6 +163,8 @@ Step 'pre-deploy gate' {
         '-ManifestPath', $ManifestPath, '-Processor', $Processor,
         '-Environment', $Environment, '-Region', $Region)
     foreach ($requiredPath in $gateRequired) { $gateArgs += '-RequiredArtifactPaths', $requiredPath }
+    if ($ReleaseTag)   { $gateArgs += '-ReleaseTag', $ReleaseTag }
+    if ($BaselineRepo) { $gateArgs += '-BaselineRepo', $BaselineRepo }
     if ($LogFile) { $gateArgs += '-LogFile', $LogFile }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-PreDeployGate.ps1') @gateArgs
 }
@@ -309,6 +325,8 @@ Step 'post-deploy verify' {
         '-Environment', $Environment,
         '-Region', $Region
     )
+    if ($ReleaseTag)   { $verArgs += '-ReleaseTag', $ReleaseTag }
+    if ($BaselineRepo) { $verArgs += '-BaselineRepo', $BaselineRepo }
     if ($LogFile) { $verArgs += '-LogFile', $LogFile }
     if ($ConfigContract) { $verArgs += '-ConfigContract', $ConfigContract, '-ConfigPath', $ConfigPath }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-Verification.ps1') @verArgs
@@ -320,6 +338,7 @@ Step 'health check' {
     # (e.g. -RequiredAssemblies a.dll -RequiredAssemblies b.dll), which PowerShell
     # -File mode binds correctly to [string[]] parameters.
     $hcArgs = @('-Processor', $Processor, '-CommitSha', $StagedCommit, '-Environment', $Environment)
+    if ($ReleaseTag) { $hcArgs += '-ReleaseTag', $ReleaseTag }
     if ($LogFile) { $hcArgs += '-LogFile', $LogFile }
     foreach ($dll in $RequiredAssemblies) { $hcArgs += '-RequiredAssemblies', $dll }
     if ($ServiceName) { $hcArgs += '-ServiceName', $ServiceName }

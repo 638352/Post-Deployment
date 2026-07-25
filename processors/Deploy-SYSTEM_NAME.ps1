@@ -26,6 +26,8 @@
       - Java/Spring Boot service (VESOMSVEMS0x, VESMERA0x): set ServiceName (e.g.
         oms-vems-pagecount-prod) and HealthUrl (e.g.
         http://localhost:9191/actuator/health), leave ScheduledTasks empty.
+        NOTE: these services are excluded from the current scope per the brief
+        (gateway/MERA = later work); shape kept for that later onboarding.
 
     SERVER-AWARE: PROD splits the outbound processors across VESEMSEGRESS01/02/03
     (VEMS-5346) while UAT runs all three on one host. Set ScheduledTasks to only
@@ -41,6 +43,11 @@
 param(
     [Parameter(Mandatory)][string]$StagedRoot,
     [Parameter(Mandatory)][string]$StagedCommit,
+    # Release tag of the approved baseline (e.g. SYSTEM_NAME/v1.4.0); recorded
+    # in every stage's run log. With -BaselineRepo the gate/verify also
+    # cross-check the manifest archived under that tag.
+    [string]$ReleaseTag,
+    [string]$BaselineRepo,
     [ValidateSet('dev','qa','uat','prod','production')][string]$Environment = 'uat',
     [string]$AuditLogDir,
     [string]$Region = 'us-gov-west-1'
@@ -87,6 +94,9 @@ $fixed = @{
 # ------------------------------------------------------------------------------
 
 # -WhatIf propagates via $WhatIfPreference; Deploy-Processor then runs gate-only
-& (Join-Path $core 'Deploy-Processor.ps1') @fixed `
+$passthru = @{}
+if ($ReleaseTag)   { $passthru['ReleaseTag'] = $ReleaseTag }
+if ($BaselineRepo) { $passthru['BaselineRepo'] = $BaselineRepo }
+& (Join-Path $core 'Deploy-Processor.ps1') @fixed @passthru `
     -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Environment $Environment -Region $Region -LogFile $log
 exit $LASTEXITCODE

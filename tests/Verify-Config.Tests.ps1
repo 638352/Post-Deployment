@@ -110,6 +110,44 @@ Describe 'Verify-Config contract strictness and secret handling' {
     }
 }
 
+Describe 'Verify-Config auto-masking by key name' {
+    BeforeAll {
+        # A live config carrying a secret under a key the contract FORGOT to
+        # declare sensitive. The name-pattern mask is the safety net: neither
+        # the pinned nor the live value may reach the report.
+        $script:AutoCfgPath = Join-Path $TestDrive 'automask-config.json'
+        @{ Db = @{ Password = 'live-secret-value'; Host = 'db01' }; Tls = @{ MinVersion = '1.0' } } |
+            ConvertTo-Json -Depth 4 | Out-File -FilePath $script:AutoCfgPath -Encoding utf8
+        $script:AutoContractPath = Join-Path $TestDrive 'automask-contract.json'
+        @{
+            format = 'json'
+            expectedValues = @{ 'Db:Password' = 'pinned-secret-value'; 'Tls:MinVersion' = '1.2' }
+            machineKeys = @('Db:Host')
+        } | ConvertTo-Json -Depth 4 | Out-File -FilePath $script:AutoContractPath -Encoding utf8
+    }
+
+    It 'masks a mismatched value whose key name says secret, without sensitiveKeys' {
+        $r = & $script:VerifyConfig -ContractPath $script:AutoContractPath -ConfigPath $script:AutoCfgPath
+        $r.pass | Should -BeFalse
+        $pw = @($r.valueMismatch) | Where-Object { $_.key -eq 'Db:Password' }
+        $pw.expected | Should -Be '(masked)'
+        $pw.actual   | Should -Be '(masked)'
+    }
+
+    It 'still reports plain values for non-sensitive key names' {
+        $r = & $script:VerifyConfig -ContractPath $script:AutoContractPath -ConfigPath $script:AutoCfgPath
+        $tls = @($r.valueMismatch) | Where-Object { $_.key -eq 'Tls:MinVersion' }
+        $tls.expected | Should -Be '1.2'
+        $tls.actual   | Should -Be '1.0'
+    }
+
+    It 'never writes either secret value into the console/report output' {
+        $out = & $script:VerifyConfig -ContractPath $script:AutoContractPath -ConfigPath $script:AutoCfgPath *>&1 | Out-String
+        $out | Should -Not -Match 'live-secret-value'
+        $out | Should -Not -Match 'pinned-secret-value'
+    }
+}
+
 Describe 'Verify-Config errors' {
     It 'throws on a missing contract file' {
         { & $script:VerifyConfig -ContractPath (Join-Path $TestDrive 'no-contract.json') `
