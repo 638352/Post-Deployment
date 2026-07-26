@@ -313,12 +313,12 @@ Describe 'Write-VesLog' {
 }
 
 Describe 'Test-VesReleaseTag' {
-    It 'accepts prefixed and bare vMAJOR.MINOR.PATCH tags' {
+    It 'accepts system-prefixed vMAJOR.MINOR.PATCH tags' {
         Test-VesReleaseTag 'OutboundDBQ/v1.4.0' | Should -BeTrue
         Test-VesReleaseTag 'archtest/v10.20.30' | Should -BeTrue
-        Test-VesReleaseTag 'v1.0.0'             | Should -BeTrue
     }
-    It 'rejects tags without a semantic version' {
+    It 'rejects tags without a system prefix or semantic version' {
+        Test-VesReleaseTag 'v1.0.0'             | Should -BeFalse
         Test-VesReleaseTag 'release-1'          | Should -BeFalse
         Test-VesReleaseTag 'OutboundDBQ/1.4.0'  | Should -BeFalse
         Test-VesReleaseTag 'OutboundDBQ/v1.4'   | Should -BeFalse

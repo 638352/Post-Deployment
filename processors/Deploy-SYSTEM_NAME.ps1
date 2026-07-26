@@ -15,7 +15,7 @@
       2. replace every SYSTEM_NAME and fill in the stop/health section
       3. capture its baseline (Invoke-Verification -Mode Capture) and pin
          /ves/<system>/approved-commit in SSM
-      4. pilot on the UAT egress (vesemsegressuat) with -WhatIf first, then
+      4. pilot on the UAT egress (VESMSEGRESSUAT) with -WhatIf first, then
          for real, before touching a PROD egress server
 
     Two shapes to fill in, pick the one that matches the system:

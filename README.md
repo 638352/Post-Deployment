@@ -398,7 +398,7 @@ and fresh-log health probes; do not pass their binaries to
   PID + command line, mode arg visible), and relaunched via its scheduled task
   with -StartTasksAfter after a clean copy. Without -KillProcesses a detected
   instance aborts the deploy before robocopy can fight a file lock. Pilot on
-  the UAT egress box (vesemsegressuat) before any PROD use.
+  the UAT egress box (VESMSEGRESSUAT) before any PROD use.
 - SSM region. Examples default to us-gov-west-1, but the OMS SSM convention
   (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1. Set -Region per
   the confirmed parameter path before running config-verify/preflight for real.

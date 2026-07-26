@@ -553,11 +553,11 @@ function Invoke-VesGit {
 
 function Test-VesReleaseTag {
     <#
-    .SYNOPSIS True when a tag matches <prefix/>vMAJOR.MINOR.PATCH, e.g. OutboundDBQ/v1.4.0.
+    .SYNOPSIS True when a tag matches <system>/vMAJOR.MINOR.PATCH, e.g. OutboundDBQ/v1.4.0.
     #>
     [CmdletBinding()]
     param([string]$Tag)
-    return ($Tag -match '^(?:[A-Za-z0-9._-]+/)?v\d+\.\d+\.\d+$')
+    return ($Tag -match '^[A-Za-z0-9._-]+/v\d+\.\d+\.\d+$')
 }
 
 function Get-VesManifestFromTag {
