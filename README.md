@@ -182,6 +182,27 @@ only, no copy:
 Deploy-Processor.ps1 can still be called directly with the full parameter set
 when scripting something one-off.
 
+The copy mirrors the staged tree in (`robocopy /MIR`), so stale files from the
+previous release are removed — but anything the server owns rather than the
+release must be named, or the mirror deletes it:
+
+```powershell
+# per-server config is preserved by default; name the rest per processor
+-PreserveFiles '*.config','server-local-cert.pem' -PreserveDirs 'inflight'
+```
+
+Preserved items are excluded from the copy (`/XF`, `/XD`) and from the
+post-deploy file verification, since they are not part of the release artifact
+and would otherwise be reported as Extra. The run log names exactly what was
+preserved. Passing no preserve list at all is allowed and logs a warning: every
+file under the target that the artifact does not carry will be deleted.
+
+Note for anything invoking these scripts as a child process: `powershell.exe
+-File` cannot pass a real array — a repeated named parameter is a binding error
+and a comma-joined value arrives as one string — so multi-valued arguments
+(`-PreserveFiles`, `-ScheduledTasks`, `-RequiredAssemblies`) travel comma-joined
+and are normalized on arrival by `ConvertTo-VesList`.
+
 Scheduled drift check, every 30 min or whatever cadence fits. Register it once
 (elevated) and it runs as SYSTEM from Task Scheduler. The installer creates
 both the drift task and an independent heartbeat watchdog; the watchdog exits 2
@@ -400,19 +421,20 @@ and fresh-log health probes; do not pass their binaries to
   with -StartTasksAfter after a clean copy. Without -KillProcesses a detected
   instance aborts the deploy before robocopy can fight a file lock. Pilot on
   the UAT egress box (VESMSEGRESSUAT) before any PROD use.
-- Per-server config is overwritten by the copy. `Deploy-Processor.ps1:252`
-  mirrors with `robocopy /MIR` and no `/XF`, so a config file living under
-  TargetRoot is replaced by the staged one, and files that exist only on that
-  server are deleted outright. On a server whose config legitimately differs
-  (endpoints, thumbprints), the deploy flattens it. Worse, the post-deploy check
-  still reports PASS: `.config` is excluded from the hash compare by design, and
-  the mirror makes everything else match the manifest, so nothing surfaces the
-  loss. The gate only proves the file is *present* (`-RequiredArtifactPaths`),
-  and Verify-Config inspects the live file *after* the copy has already replaced
-  it. The dated backup taken at `Deploy-Processor.ps1:171` is the only
-  recovery. Decide the fix before PROD: exclude configs from the mirror
-  (`/XF *.config`), or stage the per-server config alongside the artifact so the
-  mirrored copy is already correct.
+- Per-server files and the mirror (**fixed**; confirm the list per processor).
+  The copy previously mirrored with `robocopy /MIR` and no `/XF`, so a config
+  living under TargetRoot was replaced by the staged one and anything the
+  artifact did not carry was deleted outright — and the post-deploy check still
+  reported PASS, because `.config` is excluded from the hash compare by design
+  and the mirror made everything else match the manifest. `Deploy-Processor.ps1`
+  now takes `-PreserveFiles` (default `*.config`) and `-PreserveDirs`, passed to
+  robocopy as `/XF` / `/XD`, so preserved items are neither overwritten nor
+  deleted. The same lists widen the post-deploy verify's exclude pattern, since
+  server-local files are not part of the release artifact and would otherwise
+  read as Extra. What was preserved is named in the run log. **Per processor you
+  still must decide what belongs on that list** — certificates, in-flight queue
+  folders, anything the server owns — and set it in the wrapper. The dated
+  backup at `Deploy-Processor.ps1:171` remains the recovery path.
 - SSM region. Examples default to us-gov-west-1, but the OMS SSM convention
   (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1. Set -Region per
   the confirmed parameter path before running config-verify/preflight for real.
@@ -420,21 +442,15 @@ and fresh-log health probes; do not pass their binaries to
   metrics, timeline events, and on-call alert routing are planned for the next
   release; until then set a durable central `VES_AUDIT_LOG_DIR` before
   production and review the drift log folder on a schedule.
-- `Verify-Config.ps1` has no exit code. It returns a result object (consumed by
-  `Invoke-Verification` as `$cfg.pass`) and never calls `exit`, so running it
-  **directly** returns 0 even when the check fails — a tester reading `$LASTEXITCODE`
-  sees a false pass. Verified: a config violating two `expectedValues` prints
-  `pass : False` and still exits 0, while the same inputs through
-  `Invoke-Verification -Mode VerifyConfig` correctly exit 1. Until this is
-  resolved, always route config checks through `Invoke-Verification`, and note
-  that the parameters are `-ConfigContract`/`-ConfigPath` there (not
-  `-ContractPath`). Fixing it means adding an exit without breaking the object
-  return the caller depends on — decide before the testing guide ships.
-- `Manifest written: <n> files` logs a blank count under Windows PowerShell 5.1
-  when the manifest holds a single file. `$manifest.Count` on an unrolled
-  `PSCustomObject` is empty on 5.1 (the production engine) but returns 1 on
-  PS7, so the audit log silently loses the count. Fix is `@($manifest).Count`
-  at `Invoke-Verification.ps1:122`.
+- `Verify-Config.ps1` exit code (**fixed**). It used to return its result object
+  and never call `exit`, so a direct run returned 0 even on a FAIL and a tester
+  reading `$LASTEXITCODE` saw a false pass. It now exits on the contract (0 pass,
+  1 drift) while still returning the object `Invoke-Verification` consumes as
+  `$cfg.pass`. Note the parameter names differ between the two entry points:
+  `-ContractPath`/`-ConfigPath` here, `-ConfigContract`/`-ConfigPath` there.
+- `Manifest written: <n> files` blank count (**fixed**). `$manifest.Count` on an
+  unrolled `PSCustomObject` is empty on 5.1 (the production engine) and 1 on PS7,
+  so a single-file manifest logged no count. Now `@($manifest).Count`.
 - Break-glass: the gate supports -AllowOverride with a mandatory reason and an
   audit line, but Deploy-Processor doesn't pass it. Decide hard-block vs
   audited override before prod.

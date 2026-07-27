@@ -119,7 +119,7 @@ try {
             Write-VesLog INFO "Capturing baseline: $ReleaseRoot" -Data @{processor=$Processor} -LogFile $LogFile
             $manifest = Get-VesManifest -ReleaseRoot $ReleaseRoot -ExcludePattern $ExcludePattern
             $hash = Export-VesManifest -Manifest $manifest -Path $ManifestPath -CommitSha $CommitSha -Processor $Processor
-            Write-VesLog OK "Manifest written: $($manifest.Count) files, hash=$hash" -LogFile $LogFile
+            Write-VesLog OK "Manifest written: $(@($manifest).Count) files, hash=$hash" -LogFile $LogFile
             # Audit layer: commit the release record (manifest + contract) to Git and
             # tag it BEFORE updating the active SSM trust pin. If archival fails,
             # the currently approved baseline remains active instead of pointing
@@ -131,16 +131,11 @@ try {
                 $destRel = Join-Path 'baselines' $Processor
                 $dest = Join-Path $ArchiveRepo $destRel
                 if (-not (Test-Path -LiteralPath $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-                # Archive under <Processor>.json regardless of what the local
-                # manifest is called. Get-VesManifestFromTag reads exactly that
-                # name back out of the tag, so a manifest kept locally as, say,
-                # OutboundDBQ-v1.4.json would archive fine and then fail readback
-                # with a trust error that looks like tampering.
-                $archivedName = "$Processor.json"
-                Copy-Item -LiteralPath $ManifestPath -Destination (Join-Path $dest $archivedName) -Force
-                if ((Split-Path -Leaf $ManifestPath) -ne $archivedName) {
-                    Write-VesLog INFO ("Archived manifest as {0} (readback convention)" -f $archivedName) -LogFile $LogFile
-                }
+                # Archived under the manifest's own leaf name. Readback resolves
+                # the leaf from -ManifestPath ($leafName below), falling back to
+                # <Processor>.json, so a readback given no -ManifestPath must be
+                # reading a baseline captured under that convention.
+                Copy-Item -LiteralPath $ManifestPath -Destination $dest -Force
                 if ($ConfigContract) {
                     if (-not (Test-Path -LiteralPath $ConfigContract)) { throw "Config contract to archive not found: $ConfigContract" }
                     Copy-Item -LiteralPath $ConfigContract -Destination $dest -Force
@@ -155,7 +150,7 @@ try {
                     releaseTag   = $ReleaseTag
                     sourceCommit = $CommitSha
                     manifestHash = $hash
-                    fileCount    = $manifest.Count
+                    fileCount    = @($manifest).Count
                     capturedUtc  = (Get-Date).ToUniversalTime().ToString('o')
                     capturedBy   = "$env:USERNAME@$env:COMPUTERNAME"
                     trustParam   = $TrustParam
@@ -197,7 +192,7 @@ try {
                 # Explicit local-development exception only.
                 Write-VesLog WARN 'No -TrustParam given; baseline is NOT trust-anchored.' -LogFile $LogFile
             }
-            $result.status = 'captured'; $result.detail['fileCount'] = $manifest.Count; $result.detail['manifestHash'] = $hash
+            $result.status = 'captured'; $result.detail['fileCount'] = @($manifest).Count; $result.detail['manifestHash'] = $hash
             Out-Result $VES_EXIT_OK
         }
 

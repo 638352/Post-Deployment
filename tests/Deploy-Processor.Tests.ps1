@@ -143,8 +143,9 @@ Describe 'per-server files survive the mirror' {
 
     It 'keeps named files and directories when -PreserveFiles / -PreserveDirs are given' {
         $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $script:PsTarget @(
-                '-PreserveFiles', '*.config', '-PreserveFiles', 'server-local.pem',
+                '-PreserveFiles', '*.config,server-local.pem',
                 '-PreserveDirs', 'inflight'))
+        # comma-joined is how a -File caller has to pass two values
         $r.ExitCode | Should -Be 0
         Test-Path (Join-Path $script:PsTarget 'server-local.pem')    | Should -BeTrue
         Test-Path (Join-Path $script:PsTarget 'inflight\pending.xml') | Should -BeTrue
@@ -160,7 +161,7 @@ Describe 'per-server files survive the mirror' {
 
     It 'warns when nothing is preserved' {
         $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $script:PsTarget @(
-                '-PreserveFiles', @()))
+                '-PreserveFiles', ' '))
         $r.Output | Should -Match 'Mirror preserving nothing'
     }
 }

@@ -370,3 +370,67 @@ Describe 'Import-VesTargetInventory' {
         ($r.Errors -join ' ') | Should -Match 'citrix-01'
     }
 }
+
+Describe 'ConvertTo-VesPreserveExclude' {
+    It 'returns null when nothing is preserved' {
+        ConvertTo-VesPreserveExclude -Files @() -Dirs @() | Should -BeNullOrEmpty
+        ConvertTo-VesPreserveExclude -Files @('') -Dirs @(' ') | Should -BeNullOrEmpty
+    }
+
+    It 'matches a wildcard file pattern at any depth' {
+        $rx = ConvertTo-VesPreserveExclude -Files @('*.config')
+        'app.exe.config'      | Should -Match $rx
+        'bin\worker.config'   | Should -Match $rx
+        'app.exe'             | Should -Not -Match $rx
+        'config
+eadme.txt'   | Should -Not -Match $rx
+    }
+
+    It 'matches a named file without matching a longer neighbour' {
+        $rx = ConvertTo-VesPreserveExclude -Files @('server-local.pem')
+        'server-local.pem'          | Should -Match $rx
+        'certs\server-local.pem'    | Should -Match $rx
+        'other-server-local.pem'    | Should -Not -Match $rx
+        'server-local.pem.bak'      | Should -Not -Match $rx
+    }
+
+    It 'covers everything beneath a preserved directory' {
+        $rx = ConvertTo-VesPreserveExclude -Dirs @('inflight')
+        'inflight\pending.xml'        | Should -Match $rx
+        'inflight\sub\deeper.xml'     | Should -Match $rx
+        'queue\inflight\pending.xml'  | Should -Match $rx
+        'inflight-notes.txt'          | Should -Not -Match $rx
+    }
+
+    It 'treats dots in a name literally, not as regex' {
+        $rx = ConvertTo-VesPreserveExclude -Files @('v1.2.dll')
+        'v1.2.dll' | Should -Match $rx
+        'v1x2.dll' | Should -Not -Match $rx
+    }
+}
+
+Describe 'ConvertTo-VesList' {
+    # powershell.exe -File cannot pass a real array: repeating a named parameter
+    # is a ParameterAlreadyBound error and a comma-joined value binds as one
+    # string. Multi-valued args therefore travel comma-joined and land here.
+    It 'splits a comma-joined value into its parts' {
+        $r = ConvertTo-VesList 'a.dll,b.dll'
+        $r.Count | Should -Be 2
+        $r[0] | Should -Be 'a.dll'
+        $r[1] | Should -Be 'b.dll'
+    }
+    It 'passes a real array through unchanged' {
+        $r = ConvertTo-VesList @('one', 'two')
+        $r.Count | Should -Be 2
+        $r[1] | Should -Be 'two'
+    }
+    It 'trims whitespace and drops blanks' {
+        $r = ConvertTo-VesList @(' a ', '', '  ', 'b , c')
+        $r.Count | Should -Be 3
+        $r -join '|' | Should -Be 'a|b|c'
+    }
+    It 'returns an empty list for no input' {
+        @(ConvertTo-VesList @()).Count | Should -Be 0
+        @(ConvertTo-VesList).Count     | Should -Be 0
+    }
+}

@@ -17,8 +17,8 @@ every canonical PowerShell script in that repository:
 - the test scripts under `tests\`.
 
 Files with ` - Copy` in their names are personal working copies and are not
-tested as release scripts. `Post-Deployment-datadog-558667ed\` is a frozen
-reference snapshot and is also excluded.
+tested as release scripts. The snapshot folder in the repository root is a
+frozen reference copy and is also excluded.
 
 ## Read this before testing
 
@@ -33,12 +33,12 @@ Do not begin with a production server. Use this order:
 
 The labels used in this guide mean:
 
-| Label | Meaning |
-|---|---|
-| **SAFE** | Uses test files on a workstation. It does not need a server, AWS, or the network. |
-| **READ-ONLY** | Reads files, AWS parameters, services, tasks, or logs. It does not deploy files, but it may write an audit log. |
-| **CHANGES TEST HOST** | Adds or removes test scheduled tasks. Use an approved DEV/UAT host and an Administrator window. |
-| **DEPLOYMENT** | Can stop a process, copy files, or restart a task or service. A change owner must control this test. |
+| Label                 | Meaning                                                                                                         |
+| --------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **SAFE**              | Uses test files on a workstation. It does not need a server, AWS, or the network.                               |
+| **READ-ONLY**         | Reads files, AWS parameters, services, tasks, or logs. It does not deploy files, but it may write an audit log. |
+| **CHANGES TEST HOST** | Adds or removes test scheduled tasks. Use an approved DEV/UAT host and an Administrator window.                 |
+| **DEPLOYMENT**        | Can stop a process, copy files, or restart a task or service. A change owner must control this test.            |
 
 ### Current stop signs
 
@@ -61,13 +61,13 @@ These are expected conditions in the repository, not test surprises:
 
 Most runnable scripts use these exit codes:
 
-| Exit code | Plain-language meaning |
-|---:|---|
-| `0` | Passed |
-| `1` | Files/settings differ, or a deployment gate was blocked |
-| `2` | Baseline, trust, inventory, AWS, or runtime problem |
-| `3` | Health check failed |
-| `10` | Missing input or unsafe setup |
+| Exit code | Plain-language meaning                                  |
+| --------: | ------------------------------------------------------- |
+|       `0` | Passed                                                  |
+|       `1` | Files/settings differ, or a deployment gate was blocked |
+|       `2` | Baseline, trust, inventory, AWS, or runtime problem     |
+|       `3` | Health check failed                                     |
+|      `10` | Missing input or unsafe setup                           |
 
 After each command in this guide, enter:
 
@@ -260,9 +260,23 @@ Pass:
 - `pass` is `True`.
 - `missingRequired`, `valueMismatch`, and `extraKeys` are empty.
 
-Important: this low-level script returns a result object. For an operational
-check with a standard exit code, use `Invoke-Verification.ps1 -Mode
-VerifyConfig`, described next.
+This script both returns a result object and exits on the contract: `0` when the
+config meets the contract, `1` when it does not. (It previously returned the
+object and fell off the end at `0`, so a failed check read as a pass to anyone
+following the exit code.) Run in-process as above you get the object; run as a
+child process you get the exit code:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File .\Verify-Config.ps1 `
+    -ContractPath .\tests\fixtures\json\contract.json `
+    -ConfigPath .\tests\fixtures\json\config.json
+$LASTEXITCODE
+```
+
+For the operational check that also covers files, use `Invoke-Verification.ps1
+-Mode VerifyConfig`, described next — note the parameter names there are
+`-ConfigContract`/`-ConfigPath`.
 
 ## Test 5: Test capture and verification
 
@@ -694,7 +708,7 @@ heartbeat writing, and safe pruning of only the runner's own old target logs.
 
 ### Confirm the current inventory fails closed
 
-Run this on a development workstation without production Datadog credentials:
+Run this on a development workstation without production monitoring credentials:
 
 ```powershell
 $DriftTestLog = Join-Path $env:TEMP (
@@ -858,18 +872,18 @@ Never use the production task names for this installation/removal test.
 The files under `tests\` are not run as production scripts. `Invoke-Tests.ps1`
 loads them through Pester.
 
-| Test file | What it checks |
-|---|---|
-| `tests\_helpers.ps1` | Shared temporary-folder and child-process helpers. Do not run it by itself. |
-| `tests\Deploy-Processor.Tests.ps1` | Deployment order, gate-only mode, required configuration, and running-process safety. |
-| `tests\Invoke-HealthCheck.Tests.ps1` | Fresh/stale logs, assemblies, missing probes, and exact process paths. |
-| `tests\Invoke-PreDeployGate.Tests.ps1` | Commit/content gates, SSM errors, required paths, and Git-tag baselines. |
-| `tests\Invoke-Preflight.Tests.ps1` | Usage, manifests, contracts, stale patterns, inventory, and SSM failure reporting. |
-| `tests\Invoke-Verification.Tests.ps1` | Capture, verify, drift, tamper detection, Git archive/tag, and config mode. |
-| `tests\Start-DriftRunner.Tests.ps1` | Clean/drift exits, inventory refusal, retention, and heartbeat writing. |
-| `tests\Test-DriftHeartbeat.Tests.ps1` | Fresh, stale, and missing heartbeats. |
-| `tests\Verify-Config.Tests.ps1` | All three formats, required/extra/wrong settings, and secret masking. |
-| `tests\VesVerify.Module.Tests.ps1` | Shared manifest, trust, inventory, logging, AWS, and Datadog functions. |
+| Test file                              | What it checks                                                                        |
+| -------------------------------------- | ------------------------------------------------------------------------------------- |
+| `tests\_helpers.ps1`                   | Shared temporary-folder and child-process helpers. Do not run it by itself.           |
+| `tests\Deploy-Processor.Tests.ps1`     | Deployment order, gate-only mode, required configuration, and running-process safety. |
+| `tests\Invoke-HealthCheck.Tests.ps1`   | Fresh/stale logs, assemblies, missing probes, and exact process paths.                |
+| `tests\Invoke-PreDeployGate.Tests.ps1` | Commit/content gates, SSM errors, required paths, and Git-tag baselines.              |
+| `tests\Invoke-Preflight.Tests.ps1`     | Usage, manifests, contracts, stale patterns, inventory, and SSM failure reporting.    |
+| `tests\Invoke-Verification.Tests.ps1`  | Capture, verify, drift, tamper detection, Git archive/tag, and config mode.           |
+| `tests\Start-DriftRunner.Tests.ps1`    | Clean/drift exits, inventory refusal, retention, and heartbeat writing.               |
+| `tests\Test-DriftHeartbeat.Tests.ps1`  | Fresh, stale, and missing heartbeats.                                                 |
+| `tests\Verify-Config.Tests.ps1`        | All three formats, required/extra/wrong settings, and secret masking.                 |
+| `tests\VesVerify.Module.Tests.ps1`     | Shared manifest, trust, inventory, logging, AWS, and retired monitoring helpers.      |
 
 The full-suite command in Test 2 is the simplest way to test all of them.
 
@@ -878,8 +892,8 @@ The full-suite command in Test 2 is the simplest way to test all of them.
 Keep one row for every test:
 
 | Date/time | Tester | Computer | Script/test | Environment | Exit code | Pass or fail | Audit log or evidence |
-|---|---|---|---|---|---:|---|---|
-|  |  |  |  |  |  |  |  |
+| --------- | ------ | -------- | ----------- | ----------- | --------: | ------------ | --------------------- |
+|           |        |          |             |             |           |              |                       |
 
 For a failure, attach:
 

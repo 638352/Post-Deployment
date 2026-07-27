@@ -600,8 +600,70 @@ function Get-VesManifestFromTag {
 # place: console output, exit codes, JSONL logs, and Task Scheduler history.
 
 # Export only the public surface; anything not listed stays module-private.
+function ConvertTo-VesList {
+    <#
+    .SYNOPSIS Normalize a [string[]] parameter that may arrive comma-joined.
+    .DESCRIPTION
+      These scripts invoke each other as child processes with powershell.exe
+      -File, and -File binds every argument as one literal string: a repeated
+      named parameter ('-X a -X b') is a ParameterAlreadyBound error, and a
+      comma-joined one ('-X a,b') binds as the single string 'a,b'. Neither
+      reaches the child as two values, so a processor with two scheduled tasks
+      or two preserved files silently got one wrong value.
+
+      Callers therefore pass multi-valued arguments comma-joined and the
+      receiving script normalizes here. Values are trimmed and blanks dropped,
+      so a caller-supplied array is returned unchanged. Names containing a comma
+      cannot be passed this way -- none of the runbook names do.
+    #>
+    [CmdletBinding()]
+    param([string[]]$Value = @())
+    @($Value |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { $_ -split ',' } |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ })
+}
+
+function ConvertTo-VesPreserveExclude {
+    <#
+    .SYNOPSIS Turn deploy preserve-lists into a manifest exclude regex fragment.
+    .DESCRIPTION
+      Deploy-Processor keeps per-server files out of the mirror (robocopy /XF,
+      /XD). Those files are server-local, so the baseline never held them, and
+      the post-deploy verify would report them as Extra unless it skips them the
+      same way it already skips .config. This builds that regex fragment from the
+      same lists, so one setting drives both halves and they cannot drift apart.
+
+      Names are matched against manifest-style relative paths (backslash
+      separated, no leading root). Wildcards * and ? are honored; everything else
+      is escaped, so a name like 'v1.2.dll' cannot behave as a regex.
+    #>
+    [CmdletBinding()]
+    param(
+        # robocopy /XF entries, e.g. '*.config', 'server-local.pem'
+        [string[]]$Files = @(),
+        # robocopy /XD entries, e.g. 'inflight'
+        [string[]]$Dirs = @()
+    )
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($f in @($Files | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        # escape first, then re-open the two wildcards robocopy accepts
+        $rx = [regex]::Escape($f.Trim()) -replace '\\\*', '.*' -replace '\\\?', '.'
+        $parts.Add("(^|\\)$rx$")
+    }
+    foreach ($d in @($Dirs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $rx = [regex]::Escape($d.Trim().TrimEnd('\')) -replace '\\\*', '.*' -replace '\\\?', '.'
+        # a directory exclusion covers everything beneath it
+        $parts.Add("(^|\\)$rx\\")
+    }
+    if (-not $parts.Count) { return $null }
+    '(?i)' + (($parts) -join '|')
+}
+
 Export-ModuleMember -Function `
     Write-VesLog, New-VesLogFile, Get-VesOutcome, Import-VesTargetInventory, `
     Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
     Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash, `
-    Invoke-VesAwsCli, Invoke-VesGit, Test-VesReleaseTag, Get-VesManifestFromTag
+    Invoke-VesAwsCli, Invoke-VesGit, Test-VesReleaseTag, Get-VesManifestFromTag, `
+    ConvertTo-VesPreserveExclude, ConvertTo-VesList

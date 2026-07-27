@@ -5,7 +5,7 @@
 Work from the repository root in `c:\Users\howardr01\Post-Deployment`.
 That root folder is the source of truth for scripts, tests, and docs because it contains the live Git history.
 
-Treat `Post-Deployment-datadog-558667ed/` as a snapshot/reference copy only. Do not make changes there unless you are explicitly comparing against the snapshot.
+Treat the snapshot/reference copy folder in the repository root as read-only context. Do not make changes there unless you are explicitly comparing against the snapshot.
 
 ## What to read first
 

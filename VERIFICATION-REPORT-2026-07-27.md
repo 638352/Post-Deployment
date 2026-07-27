@@ -4,7 +4,7 @@ Date: 2026-07-27
 Repository: Post-Deployment
 Branch: main
 Scope: Canonical root repository only (`C:\Users\howardr01\Post-Deployment`)
-Snapshot policy: `Post-Deployment-datadog-558667ed\` treated as frozen reference only
+Snapshot policy: repository snapshot folder treated as frozen reference only
 
 ## Objective
 

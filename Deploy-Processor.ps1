@@ -266,8 +266,8 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             # absent from it, which is the whole point -- per-server config, certs,
             # and in-flight work have to survive a deploy.
             $roboArgs = @('/MIR', '/NP', '/R:2', '/W:5')
-            $preserveF = @($PreserveFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-            $preserveD = @($PreserveDirs  | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            $preserveF = ConvertTo-VesList $PreserveFiles
+            $preserveD = ConvertTo-VesList $PreserveDirs
             if ($preserveF.Count) { $roboArgs += '/XF'; $roboArgs += $preserveF }
             if ($preserveD.Count) { $roboArgs += '/XD'; $roboArgs += $preserveD }
             if ($preserveF.Count -or $preserveD.Count) {
@@ -345,21 +345,35 @@ Step 'post-deploy verify' {
     if ($ReleaseTag)   { $verArgs += '-ReleaseTag', $ReleaseTag }
     if ($BaselineRepo) { $verArgs += '-BaselineRepo', $BaselineRepo }
     if ($LogFile) { $verArgs += '-LogFile', $LogFile }
+    # Anything the mirror preserves is per-server material, not part of the
+    # release artifact, so the baseline never held it -- and the verify would
+    # otherwise report it as Extra and call a correct deploy drift. This is the
+    # same reasoning that already excludes .config from the manifest. Whatever
+    # is excluded here is named in the deploy log above, so the widening is
+    # auditable rather than silent.
+    $preservePattern = ConvertTo-VesPreserveExclude -Files (ConvertTo-VesList $PreserveFiles) -Dirs (ConvertTo-VesList $PreserveDirs)
+    if ($preservePattern) {
+        $verArgs += '-ExcludePattern', ("{0}|{1}" -f $Global:VES_DEFAULT_EXCLUDE, $preservePattern)
+    }
     if ($ConfigContract) { $verArgs += '-ConfigContract', $ConfigContract, '-ConfigPath', $ConfigPath }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-Verification.ps1') @verArgs
 }
 
 # Stage 5: confirm the processor is actually alive after the restart (service/task/log/endpoint)
 Step 'health check' {
-    # Build arg array so each array-valued param is passed as repeated named args
-    # (e.g. -RequiredAssemblies a.dll -RequiredAssemblies b.dll), which PowerShell
-    # -File mode binds correctly to [string[]] parameters.
+    # Array-valued params go over comma-joined, and Invoke-HealthCheck normalizes
+    # them with ConvertTo-VesList. Repeating a named parameter (-X a -X b) is a
+    # ParameterAlreadyBound error under -File, so the previous loop form failed
+    # the whole health stage for any processor with two scheduled tasks or two
+    # required assemblies -- one value worked only by never being exercised.
     $hcArgs = @('-Processor', $Processor, '-CommitSha', $StagedCommit, '-Environment', $Environment)
     if ($ReleaseTag) { $hcArgs += '-ReleaseTag', $ReleaseTag }
     if ($LogFile) { $hcArgs += '-LogFile', $LogFile }
-    foreach ($dll in $RequiredAssemblies) { $hcArgs += '-RequiredAssemblies', $dll }
+    $dlls = ConvertTo-VesList $RequiredAssemblies
+    if ($dlls.Count) { $hcArgs += '-RequiredAssemblies', ($dlls -join ',') }
     if ($ServiceName) { $hcArgs += '-ServiceName', $ServiceName }
-    foreach ($tn in $ScheduledTasks) { $hcArgs += '-ScheduledTasks', $tn }
+    $tasks = ConvertTo-VesList $ScheduledTasks
+    if ($tasks.Count) { $hcArgs += '-ScheduledTasks', ($tasks -join ',') }
     if ($FreshLogDir) { $hcArgs += '-FreshLogDir', $FreshLogDir, '-FreshLogMaxAgeMinutes', "$FreshLogMaxAgeMinutes" }
     if ($ScheduledTasks.Count -gt 0) {
         $hcArgs += '-ProcessPathRoot', $TargetRoot

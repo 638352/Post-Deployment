@@ -55,6 +55,11 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+# Deploy-Processor invokes this with -File, which cannot pass a real array, so
+# multi-valued arguments arrive comma-joined. Normalize before anything counts
+# or iterates them; a caller-supplied array passes through unchanged.
+$RequiredAssemblies = ConvertTo-VesList $RequiredAssemblies
+$ScheduledTasks = ConvertTo-VesList $ScheduledTasks
 if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("health-{0}" -f $Processor) }
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: health verification' `
