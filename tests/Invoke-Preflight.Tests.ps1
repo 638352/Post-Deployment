@@ -192,3 +192,67 @@ Describe 'SSM failure reporting' {
         @($r.Json.checks | Where-Object { $_.check -eq 'ssm:/ves/bravo/baseline-hash' }).Count | Should -Be 1
     }
 }
+
+Describe 'run evidence' {
+    # Regression: the log-file bootstrap and the RUN START / RUN END lines were
+    # dropped from this script, so a preflight run without -LogFile wrote console
+    # text and nothing else -- a box could be declared READY with no record of it.
+    BeforeEach {
+        $script:EvidenceDir = Join-Path $TestDrive ("evidence-{0}" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:EvidenceDir -Force | Out-Null
+        $script:PrevAuditDir = $env:VES_AUDIT_LOG_DIR
+        $env:VES_AUDIT_LOG_DIR = $script:EvidenceDir
+    }
+    AfterEach { $env:VES_AUDIT_LOG_DIR = $script:PrevAuditDir }
+
+    It 'writes a JSONL log with run boundaries when -LogFile is omitted' {
+        $r = Invoke-VesScript 'Invoke-Preflight.ps1' @(
+            '-Processor', 'pf', '-ManifestPath', $script:GoodManifest)
+        $r.ExitCode | Should -Be 0
+
+        $logs = @(Get-ChildItem -LiteralPath $script:EvidenceDir -Filter '*.jsonl')
+        $logs.Count | Should -BeGreaterThan 0
+        $text = Get-Content -LiteralPath $logs[0].FullName -Raw
+        $text | Should -Match 'RUN START: preflight'
+        $text | Should -Match 'RUN END: preflight outcome=PASS exit=0'
+    }
+
+    It 'records a RUN END on the not-ready path too' {
+        $r = Invoke-VesScript 'Invoke-Preflight.ps1' @(
+            '-Processor', 'pf', '-ManifestPath', $script:BadManifest)
+        $r.ExitCode | Should -Be 2
+        $text = (Get-ChildItem -LiteralPath $script:EvidenceDir -Filter '*.jsonl' |
+            ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
+        $text | Should -Match 'RUN END: preflight outcome=ERROR exit=2'
+    }
+
+    It 'records a RUN END on the usage path too' {
+        $r = Invoke-VesScript 'Invoke-Preflight.ps1' @('-Json')
+        $r.ExitCode | Should -Be 10
+        $text = (Get-ChildItem -LiteralPath $script:EvidenceDir -Filter '*.jsonl' |
+            ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
+        $text | Should -Match 'RUN END: preflight outcome=ERROR exit=10'
+    }
+}
+
+Describe 'manifest metadata outside the trust hash' {
+    It 'reports the counted file total and warns when fileCount disagrees' {
+        # fileCount, commitSha and capturedBy sit outside the hashed files[], so
+        # they can be edited without breaking the anchor. Preflight must not echo
+        # a forged number back as trust-anchored fact.
+        $forged = Join-Path $TestDrive 'forged-count.json'
+        $doc = Get-Content -LiteralPath $script:GoodManifest -Raw | ConvertFrom-Json
+        $real = @($doc.files).Count
+        $doc.fileCount = 999
+        ($doc | ConvertTo-Json -Depth 6) | Out-File -FilePath $forged -Encoding utf8
+
+        $r = Invoke-VesScript 'Invoke-Preflight.ps1' @('-Processor', 'pf', '-ManifestPath', $forged, '-Json')
+        $r.ExitCode | Should -Be 0
+        $manifestRow = @($r.Json.checks | Where-Object { $_.check -eq 'manifest' })[0]
+        $manifestRow.detail | Should -Match ("\({0} files\)" -f $real)
+        $manifestRow.detail | Should -Not -Match '999'
+        $metaRow = @($r.Json.checks | Where-Object { $_.check -eq 'manifest-metadata' })
+        $metaRow.Count     | Should -Be 1
+        $metaRow[0].status | Should -Be 'WARN'
+    }
+}

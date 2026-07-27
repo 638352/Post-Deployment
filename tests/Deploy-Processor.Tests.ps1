@@ -119,3 +119,48 @@ Describe 'running console-EXE instance' {
         Test-Path (Join-Path $target 'bin\lib.dll')         | Should -BeTrue
     }
 }
+
+Describe 'per-server files survive the mirror' {
+    # Regression: robocopy /MIR with no exclusions replaced each server's own
+    # config with the staged (UAT) copy and deleted anything the artifact did not
+    # carry -- and the post-deploy verify still passed, because the mirror had
+    # made the target match the manifest.
+    BeforeEach {
+        $script:PsTarget = Join-Path $script:Root ("target-preserve-{0}" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path (Join-Path $script:PsTarget 'inflight') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:PsTarget 'app.exe.config') -Value '<config env="PROD"/>' -NoNewline
+        Set-Content -LiteralPath (Join-Path $script:PsTarget 'server-local.pem') -Value 'per-server material' -NoNewline
+        Set-Content -LiteralPath (Join-Path $script:PsTarget 'inflight\pending.xml') -Value 'unprocessed work' -NoNewline
+    }
+
+    It 'keeps the target config by default and still deploys the artifact' {
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $script:PsTarget)
+        $r.ExitCode | Should -Be 0
+        Get-Content -LiteralPath (Join-Path $script:PsTarget 'app.exe.config') -Raw | Should -Match 'PROD'
+        Test-Path (Join-Path $script:PsTarget 'bin\lib.dll') | Should -BeTrue
+        $r.Output | Should -Match 'Mirror preserving: \*\.config'
+    }
+
+    It 'keeps named files and directories when -PreserveFiles / -PreserveDirs are given' {
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $script:PsTarget @(
+                '-PreserveFiles', '*.config', '-PreserveFiles', 'server-local.pem',
+                '-PreserveDirs', 'inflight'))
+        $r.ExitCode | Should -Be 0
+        Test-Path (Join-Path $script:PsTarget 'server-local.pem')    | Should -BeTrue
+        Test-Path (Join-Path $script:PsTarget 'inflight\pending.xml') | Should -BeTrue
+        Get-Content -LiteralPath (Join-Path $script:PsTarget 'app.exe.config') -Raw | Should -Match 'PROD'
+    }
+
+    It 'still removes stale artifact files that are not preserved' {
+        Set-Content -LiteralPath (Join-Path $script:PsTarget 'stale-old-release.dll') -Value 'previous release' -NoNewline
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $script:PsTarget)
+        $r.ExitCode | Should -Be 0
+        Test-Path (Join-Path $script:PsTarget 'stale-old-release.dll') | Should -BeFalse
+    }
+
+    It 'warns when nothing is preserved' {
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $script:PsTarget @(
+                '-PreserveFiles', @()))
+        $r.Output | Should -Match 'Mirror preserving nothing'
+    }
+}
