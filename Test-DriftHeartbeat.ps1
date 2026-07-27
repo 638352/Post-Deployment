@@ -4,9 +4,9 @@
     Independently detects a missed or dead scheduled drift run.
 .DESCRIPTION
     Reads the atomic heartbeat written by Start-DriftRunner.ps1. A missing,
-    unreadable, future-dated, or stale heartbeat is an ERROR (exit 2), writes
-    structured evidence, and emits a Datadog event. Production uses error
-    severity; lower environments use warning severity.
+    unreadable, future-dated, or stale heartbeat is an ERROR (exit 2) and writes
+    structured evidence to the JSONL log. Datadog emit is commented out for this
+    release, so the exit code and log are the only signal -- see README.md.
 
     Schedule this as a separate task so it can report when the drift task itself
     never starts or hangs before completion.

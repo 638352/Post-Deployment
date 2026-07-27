@@ -128,19 +128,21 @@ function Step($name, $code) {
         $stageCode = $LASTEXITCODE
         Write-VesLog ERROR "STAGE FAILED: $name (exit $stageCode)" -LogFile $LogFile
         # Timeline event on stage failure. The gate self-reports its own block/override
-        # events, so skip it here to avoid double-marking the same failure.
-        if ($name -ne 'pre-deploy gate') {
-            # Send-VesDatadogEvent -Title "Deploy FAILED at '$name': $Processor" `
-            #     -Text "Stage '$name' failed for $Processor $StagedCommit (exit $stageCode)." `
-            #     -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:deploy-failed')
-        }
+        # events, so skip it here to avoid double-marking the same failure. The guard
+        # is commented out with its body: it exists only to scope the Datadog emit.
+        # if ($name -ne 'pre-deploy gate') {
+        #     Send-VesDatadogEvent -Title "Deploy FAILED at '$name': $Processor" `
+        #         -Text "Stage '$name' failed for $Processor $StagedCommit (exit $stageCode)." `
+        #         -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:deploy-failed')
+        # }
         Stop-Deploy $stageCode
     }
 }
 
 # Stage 1: block the deploy unless the staged commit/content matches the approved baseline
 # Invoked via powershell.exe child process so that `exit N` inside the script terminates only
-# the child -- not this process -- allowing Step's error logging and Datadog event to fire.
+# the child -- not this process -- allowing Step's error logging (and, once Datadog is
+# restored, its event emit) to fire.
 Step 'pre-deploy gate' {
     # -LogFile appended only when set: PS 5.1 drops empty-string args to native
     # commands, which would leave a bare -LogFile expecting a value in the child.
