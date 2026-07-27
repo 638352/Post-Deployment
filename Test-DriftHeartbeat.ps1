@@ -4,9 +4,8 @@
     Independently detects a missed or dead scheduled drift run.
 .DESCRIPTION
     Reads the atomic heartbeat written by Start-DriftRunner.ps1. A missing,
-    unreadable, future-dated, or stale heartbeat is an ERROR (exit 2), writes
-    structured evidence, and emits a Datadog event. Production uses error
-    severity; lower environments use warning severity.
+    unreadable, future-dated, or stale heartbeat is an ERROR (exit 2) and
+    writes structured evidence.
 
     Schedule this as a separate task so it can report when the drift task itself
     never starts or hangs before completion.
@@ -66,12 +65,6 @@ catch {
     $detail = $_.Exception.Message
 }
 
-$tags = @((Get-VesDatadogEnvTag -Environment $Environment), 'check:drift-heartbeat')
-Send-VesDatadogMetric -Metric 'deployment.drift.heartbeat.status' -Value ([int]$fresh) -Tags $tags
-if ($null -ne $ageMinutes) {
-    Send-VesDatadogMetric -Metric 'deployment.drift.heartbeat.age_minutes' -Value $ageMinutes -Tags $tags
-}
-
 if ($fresh) {
     Write-VesLog OK $detail -Data @{runId=$runId; outcome='PASS'; exitCode=0; ageMinutes=$ageMinutes} -LogFile $LogFile
     if ($Json) {
@@ -85,9 +78,6 @@ if ($fresh) {
 
 Write-VesLog ERROR "MISSED DRIFT RUN: $detail" `
     -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_NOBASE; ageMinutes=$ageMinutes} -LogFile $LogFile
-Send-VesDatadogEvent -Title "Missed scheduled drift verification on $env:COMPUTERNAME" `
-    -Text "$detail Heartbeat path: $HeartbeatPath" `
-    -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($tags + 'event:missed-run')
 if ($Json) {
     [PSCustomObject]@{runId=$runId; fresh=$false; ageMinutes=$ageMinutes; error=$detail} |
         ConvertTo-Json -Compress

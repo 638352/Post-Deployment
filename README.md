@@ -284,20 +284,11 @@ PASS/FAIL/ERROR outcome, and exit code. The drift runner writes one timestamped
 log per target plus a run summary and atomically updates
 `ves-verify-drift.heartbeat.json`.
 
-Datadog hooks in the gate/deploy/health paths are best-effort and never block
-deploy/verify outcomes. Two independent transports with different prerequisites:
-- **Events** (deploy/gate markers) POST to the ddog-gov Events API and need
-  `DD_API_KEY` set; without it they are skipped with a warning. Drift, trust
-  failure, runner error, and missed-heartbeat events are included. Production
-  uses Datadog `error` severity; dev/qa/UAT use `warning`.
-- **Metrics** (verify/health gauges) are DogStatsD packets to a *local* Datadog
-  Agent on `127.0.0.1:8125`. On any box without a running agent they are silently
-  dropped — the primary check still runs, but nothing reaches the dashboard.
-  `Invoke-Preflight -CheckDatadog` reports whether the `datadogagent` service and
-  `DD_API_KEY` are in place.
-
-Target inventory `environment` controls drift severity/tags. `DD_ENV` remains
-the fallback for direct invocations.
+Monitoring/telemetry emit (dashboard metrics, deploy/drift timeline events,
+alert routing) is planned for the next release. Until then, detection relies on
+the four independent channels above — console output, exit codes, JSONL logs,
+and Task Scheduler history — plus the drift heartbeat watchdog
+(`Test-DriftHeartbeat`, exit 2 on a stale or missing heartbeat).
 
 ## Brief conformance
 
@@ -355,11 +346,10 @@ Control mapping to the tracked leadership brief
   deployment copy — with confirmed release/file/config/trust fields. The
   checked-in inventory remains `inventoryComplete=false` until operations
   supplies the missing Citrix and production path details.
-- **Missed runs and environment-aware alerting** (closed in code): the installer
-  registers an independent heartbeat watchdog. Drift/trust/missed-run events use
-  production error severity and lower-environment warning severity. Delivery to
-  on-call still depends on the host's Datadog API key and the organization's
-  Datadog event monitor/routing.
+- **Missed runs** (closed in code): the installer registers an independent
+  heartbeat watchdog; a stale or missing heartbeat exits 2 with structured
+  evidence. Automated delivery to on-call (monitoring/alert routing) is planned
+  for the next release.
 - **Log retention/centrality** (closed in code, destination pending): drift logs
   default to 365 days and deploy audit logs are not pruned. Set
   `VES_AUDIT_LOG_DIR`/`-LogDir` to the approved central share or shipped
@@ -412,11 +402,10 @@ and fresh-log health probes; do not pass their binaries to
 - SSM region. Examples default to us-gov-west-1, but the OMS SSM convention
   (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1. Set -Region per
   the confirmed parameter path before running config-verify/preflight for real.
-- Monitoring sink. Primary signal is still exit codes + JSONL logs. A best-effort
-  Datadog push (metrics via the local agent, events via the ddog-gov API) covers
-  gate/deploy/health/drift/watchdog paths, but it never changes the primary
-  verification outcome. Configure `DD_API_KEY`, the local agent, on-call routing,
-  and a durable central `VES_AUDIT_LOG_DIR` before production.
+- Monitoring sink. Primary signal is exit codes + JSONL logs. Dashboard
+  metrics, timeline events, and on-call alert routing are planned for the next
+  release; until then set a durable central `VES_AUDIT_LOG_DIR` before
+  production and review the drift log folder on a schedule.
 - Break-glass: the gate supports -AllowOverride with a mandatory reason and an
   audit line, but Deploy-Processor doesn't pass it. Decide hard-block vs
   audited override before prod.

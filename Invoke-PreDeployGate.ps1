@@ -62,9 +62,6 @@ Write-VesLog INFO 'RUN START: pre-deploy gate' `
     -Data @{runId=$runId; script='Invoke-PreDeployGate.ps1'; processor=$Processor; environment=$Environment; release=$StagedCommit; releaseTag=$ReleaseTag} `
     -LogFile $LogFile
 
-# Low-cardinality tags shared by every gate event emitted to Datadog.
-$ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment))
-
 function Stop-Gate([int]$code) {
     $outcome = Get-VesOutcome -ExitCode $code
     Write-VesLog ($(if ($outcome -eq 'PASS') {'OK'} elseif ($outcome -eq 'FAIL') {'ERROR'} else {'ERROR'})) `
@@ -84,17 +81,9 @@ function Fail-Gate([string]$msg) {
         # audited bypass: the override is recorded in the log with who/why/when
         Write-VesLog WARN "OVERRIDE ENGAGED by $env:USERNAME: $OverrideReason (staged=$StagedCommit)" `
             -Data @{processor=$Processor;override=$true;by=$env:USERNAME;reason=$OverrideReason} -LogFile $LogFile
-        # Timeline event: an override is the exception worth seeing on the dashboard.
-        Send-VesDatadogEvent -Title "Deploy gate OVERRIDE: $Processor" `
-            -Text "Break-glass override by $env:USERNAME. Reason: $OverrideReason (staged=$StagedCommit). Gate FAIL was: $msg" `
-            -AlertType 'warning' -Tags ($ddTags + 'event:gate-override')
         Stop-Gate $VES_EXIT_OK
     }
     Write-VesLog ERROR "PRE-DEPLOY BLOCKED $Processor" -LogFile $LogFile
-    # Timeline event: a hard block is an error marker on the deploy timeline.
-    Send-VesDatadogEvent -Title "Deploy gate BLOCKED: $Processor" `
-        -Text "Pre-deploy gate blocked $Processor (staged=$StagedCommit). Reason: $msg" `
-        -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:gate-blocked')
     Stop-Gate $VES_EXIT_DRIFT
 }
 
@@ -220,10 +209,6 @@ try {
 
     # both gates passed: signal the deploy may proceed
     Write-VesLog OK "GATE PASS: deploy may proceed (staged=$StagedCommit approved)." -LogFile $LogFile
-    # Timeline event: gate pass anchors the "authorized change" marker for drift overlay.
-    Send-VesDatadogEvent -Title "Deploy gate PASS: $Processor" `
-        -Text "Pre-deploy gate passed for $Processor (staged=$StagedCommit, approved)." `
-        -AlertType 'success' -Tags ($ddTags + 'event:gate-pass')
     Stop-Gate $VES_EXIT_OK
 }
 catch {
