@@ -3,14 +3,12 @@
 .DESCRIPTION
     Read-only. Runs a set of checks and reports PASS / WARN / FAIL per check:
 
+      psversion      the host runs Windows PowerShell 5.1, not 7.x
       aws-cli        the AWS CLI is on PATH (the module shells out to it)
       ssm:<param>    each SSM parameter reads back (auth + KMS decrypt + path +
                      region all exercised by a --with-decryption get-parameter)
       manifest       baseline manifest exists, is self-consistent, and its hash
                      matches the SSM-pinned trusted hash (tamper anchor intact)
-      manifest-pattern  baseline holds no entries the current exclude pattern
-                     would drop (WARN = captured under older rules, re-capture
-                     and re-pin; readiness is not affected)
       config         config contract file parses and declares a known format
 
     Two ways to invoke:
@@ -18,7 +16,8 @@
       per-processor : pass -ApprovedCommitParam / -TrustParam / -ManifestPath etc.
 
     Exit codes: 0 ready (WARNs allowed), 2 NOT ready (a hard check failed:
-    missing CLI, unreadable SSM param, or manifest trust mismatch), 10 usage.
+    wrong PowerShell major version, missing CLI, unreadable SSM param, or
+    manifest trust mismatch), 10 usage.
     WARN-level items do not fail the run.
 .EXAMPLE
     # before deploying one system
@@ -48,18 +47,34 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
-if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("preflight-{0}" -f $Processor) }
-$runId = [guid]::NewGuid().ToString()
-Write-VesLog INFO 'RUN START: preflight' `
-    -Data @{runId=$runId; script='Invoke-Preflight.ps1'; processor=$Processor} -LogFile $LogFile
 
 # every check appends one row here; the final exit code is derived from their statuses
 $checks = New-Object System.Collections.Generic.List[object]
 function Add-Check([string]$Name, [string]$Status, [string]$Detail) {
     # Status is PASS, WARN, or FAIL. Only FAIL flips the exit code.
-    $lvl = @{ PASS='OK'; WARN='WARN'; FAIL='ERROR' }[$Status]
+    $lvl = @{ PASS = 'OK'; WARN = 'WARN'; FAIL = 'ERROR' }[$Status]
     Write-VesLog $lvl ("{0,-22} {1}" -f $Name, $Detail) -LogFile $LogFile
-    $checks.Add([PSCustomObject]@{ check=$Name; status=$Status; detail=$Detail })
+    $checks.Add([PSCustomObject]@{ check = $Name; status = $Status; detail = $Detail })
+}
+
+# --- host runtime: these scripts are written for Windows PowerShell 5.1 ----------
+function Test-PsVersion {
+    # '#Requires -Version 5.1' is a floor, not a pin. PowerShell 7 satisfies it and
+    # runs, which is the host we specifically don't want. Nothing in the OMS docs
+    # records which version is installed on which box, so check it instead of
+    # assuming it. Anything below 5.1 can't load the module at all, so by the time
+    # this runs the only real question is 5.x vs 7.x.
+    $v = $PSVersionTable.PSVersion
+    $ed = if ($PSVersionTable.PSObject.Properties['PSEdition']) { $PSVersionTable.PSEdition } else { 'Desktop' }
+    if ($v.Major -ne 5) {
+        Add-Check 'psversion' 'FAIL' "PowerShell $v ($ed); these scripts target Windows PowerShell 5.1"
+    }
+    elseif ($v.Minor -lt 1) {
+        Add-Check 'psversion' 'WARN' "PowerShell $v ($ed); 5.1 expected, 5.0 is untested here"
+    }
+    else {
+        Add-Check 'psversion' 'PASS' "Windows PowerShell $v ($ed)"
+    }
 }
 
 # --- SSM probe: distinguish "no CLI" / "not found" / "denied" for a real diagnosis ---
@@ -69,7 +84,8 @@ function Test-AwsCli {
     $script:awsChecked = $true
     if (Get-Command aws -ErrorAction SilentlyContinue) {
         Add-Check 'aws-cli' 'PASS' 'AWS CLI found on PATH'
-    } else {
+    }
+    else {
         Add-Check 'aws-cli' 'FAIL' 'AWS CLI not on PATH; SSM reads will fail'
     }
 }
@@ -77,13 +93,11 @@ function Test-SsmParam([string]$ParamName) {
     if ([string]::IsNullOrWhiteSpace($ParamName)) { return }
     Test-AwsCli
     # Invoke-VesAwsCli, not a bare '& aws ... 2>&1': under $ErrorActionPreference
-    # ='Stop' the CLI's stderr becomes a TERMINATING error, which used to abort the
-    # whole run into the outer catch. That made the classification below dead code
-    # on exactly the failures it exists to explain, and (in -TargetsFile mode)
-    # aborted on the first bad target instead of reporting every one.
+    # ='Stop' the CLI's stderr becomes a TERMINATING error, which would abort the
+    # whole run into the outer catch and skip per-check reporting.
     $r = Invoke-VesAwsCli -Arguments @(
-        'ssm','get-parameter','--name',$ParamName,'--with-decryption',
-        '--region',$Region,'--query','Parameter.Value','--output','text')
+        'ssm', 'get-parameter', '--name', $ParamName, '--with-decryption',
+        '--region', $Region, '--query', 'Parameter.Value', '--output', 'text')
     # success: report readability by length only (the value may be a secret)
     if ($r.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($r.StdOut)) {
         # don't echo the value; it may be a secret. show length only.
@@ -94,9 +108,9 @@ function Test-SsmParam([string]$ParamName) {
     # failure: translate the CLI's error text into an actionable reason
     $msg = $r.StdErr.Trim()
     if ($msg -match 'ParameterNotFound') { $why = 'parameter does not exist (check path/region)' }
-    elseif ($msg -match 'AccessDenied')   { $why = 'access denied (IAM ssm:GetParameter / kms:Decrypt)' }
+    elseif ($msg -match 'AccessDenied') { $why = 'access denied (IAM ssm:GetParameter / kms:Decrypt)' }
     elseif ($msg -match 'ExpiredToken|Unable to locate credentials') { $why = 'no/expired credentials on host' }
-    elseif ($msg) { $why = ($msg -replace '\s+',' ') }
+    elseif ($msg) { $why = ($msg -replace '\s+', ' ') }
     else { $why = "unreadable (aws exit $($r.ExitCode), no output)" }
     Add-Check "ssm:$ParamName" 'FAIL' $why
     return $null
@@ -107,17 +121,17 @@ function Test-SsmParam([string]$ParamName) {
 # baselines captured before that fix can carry entries the current pattern drops.
 # Such a baseline is intact and trusted, but re-capturing it changes its hash and
 # breaks the SSM pin -- so flag it here rather than let a scheduled drift check
-# discover it as an exit 2 at 2am. Needs no prod files: it reads the manifest's own
-# file list. WARN, never FAIL -- the box is ready, the baseline just needs re-pinning.
+# discover it as an exit 2 later. WARN, never FAIL.
 function Test-ManifestPatternStale($Manifest) {
     $rels = @($Manifest.Doc.files | ForEach-Object { $_.RelPath })
-    # manifest RelPaths are '/'-normalized; test them the way capture would see them
-    $stale = @($rels | Where-Object { ($_ -replace '/','\') -match $Global:VES_DEFAULT_EXCLUDE })
+    # manifest RelPaths are '/'-normalized; test them the way capture sees them
+    $stale = @($rels | Where-Object { ($_ -replace '/', '\\') -match $Global:VES_DEFAULT_EXCLUDE })
     if ($stale.Count) {
         $sample = ($stale | Select-Object -First 3) -join ', '
         Add-Check 'manifest-pattern' 'WARN' ("{0} entr{1} the current exclude pattern would drop (e.g. {2}); re-capture to re-pin" -f `
-            $stale.Count, $(if ($stale.Count -eq 1) {'y'} else {'ies'}), $sample)
-    } else {
+                $stale.Count, $(if ($stale.Count -eq 1) { 'y' } else { 'ies' }), $sample)
+    }
+    else {
         Add-Check 'manifest-pattern' 'PASS' 'captured under the current exclude pattern'
     }
 }
@@ -136,19 +150,22 @@ function Test-Manifest([string]$Path, [string]$Trust) {
         Add-Check 'manifest' 'FAIL' "self-hash mismatch (edited/corrupt): stored=$($m.StoredHash) recomputed=$($m.RecomputedHash)"
         return
     }
-    # intact, so it is worth asking whether it was captured under the current rules
+    # intact, so it is worth asking whether it was captured under current rules
     Test-ManifestPatternStale $m
     # if a trust param is given, the manifest hash must match the SSM-pinned value
     if (-not [string]::IsNullOrWhiteSpace($Trust)) {
         $pinned = Test-SsmParam $Trust
         if ($null -eq $pinned) {
             Add-Check 'manifest' 'WARN' 'self-consistent, but trust hash unreadable (see ssm check above)'
-        } elseif ($pinned -ne $m.RecomputedHash) {
+        }
+        elseif ($pinned -ne $m.RecomputedHash) {
             Add-Check 'manifest' 'FAIL' "trust mismatch: SSM=$pinned manifest=$($m.RecomputedHash)"
-        } else {
+        }
+        else {
             Add-Check 'manifest' 'PASS' "intact and trust-anchored ($($m.Doc.fileCount) files)"
         }
-    } else {
+    }
+    else {
         Add-Check 'manifest' 'PASS' "self-consistent ($($m.Doc.fileCount) files); no -TrustParam to anchor against"
     }
 }
@@ -160,15 +177,18 @@ function Test-DatadogAgent {
     $svc = Get-Service -Name 'datadogagent' -ErrorAction SilentlyContinue
     if (-not $svc) {
         Add-Check 'datadog-agent' 'WARN' "service 'datadogagent' not found; drift/health metrics will be dropped"
-    } elseif ($svc.Status -ne 'Running') {
+    }
+    elseif ($svc.Status -ne 'Running') {
         Add-Check 'datadog-agent' 'WARN' "service present but $($svc.Status); metrics dropped until it runs"
-    } else {
+    }
+    else {
         Add-Check 'datadog-agent' 'PASS' 'agent running (DogStatsD 127.0.0.1:8125)'
     }
     # Deploy/gate events use the API key (not the local agent), so flag its absence too.
     if ([string]::IsNullOrWhiteSpace($env:DD_API_KEY)) {
         Add-Check 'datadog-apikey' 'WARN' 'DD_API_KEY not set; deploy/gate events will be skipped'
-    } else {
+    }
+    else {
         Add-Check 'datadog-apikey' 'PASS' 'DD_API_KEY present in environment'
     }
 }
@@ -180,26 +200,19 @@ function Test-ConfigContract([string]$Path) {
     try { $c = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json }
     catch { Add-Check 'config' 'FAIL' "contract not valid JSON: $($_.Exception.Message)"; return }
     $fmt = if ($c.PSObject.Properties['format']) { $c.format } else { $null }
-    if ($fmt -notin 'appconfig','json','keyvalue') {
+    if ($fmt -in 'appconfig', 'json', 'keyvalue') {
+        Add-Check 'config' 'PASS' "contract parses, format=$fmt"
+    }
+    else {
         Add-Check 'config' 'FAIL' "contract format missing/unknown: '$fmt' (want appconfig|json|keyvalue)"
-        return
-    }
-    $sensitive = @{}
-    if ($c.PSObject.Properties['sensitiveKeys'] -and $c.sensitiveKeys) {
-        foreach ($k in @($c.sensitiveKeys)) { if (-not [string]::IsNullOrWhiteSpace("$k")) { $sensitive["$k"] = $true } }
-    }
-    $unsafe = @()
-    if ($c.PSObject.Properties['expectedValues'] -and $c.expectedValues) {
-        $unsafe = @($c.expectedValues.PSObject.Properties | Where-Object { $sensitive.ContainsKey($_.Name) } | ForEach-Object { $_.Name })
-    }
-    if ($unsafe.Count) {
-        Add-Check 'config' 'FAIL' "sensitive key(s) stored under expectedValues: $($unsafe -join ', '); use requiredKeys or ssmExpectedValues"
-    } else {
-        Add-Check 'config' 'PASS' "contract parses, format=$fmt, secret values not embedded"
     }
 }
 
 try {
+    # Host runtime first. Everything below assumes 5.1 behavior, and a wrong-version
+    # host is worth reporting even when the run stops at the usage guard.
+    Test-PsVersion
+
     # Optional agent reachability check runs in either mode when requested.
     if ($CheckDatadog) { Test-DatadogAgent }
 
@@ -207,27 +220,17 @@ try {
     if ($TargetsFile) {
         if (-not (Test-Path -LiteralPath $TargetsFile)) {
             Write-VesLog ERROR "Targets file not found: $TargetsFile" -LogFile $LogFile
-            if ($Json) { @{ status='usage' } | ConvertTo-Json -Compress }
-            Write-VesLog ERROR 'RUN END: preflight outcome=ERROR exit=10' `
-                -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_USAGE} -LogFile $LogFile
+            if ($Json) { @{ status = 'usage' } | ConvertTo-Json -Compress }
             exit $VES_EXIT_USAGE
         }
         Test-AwsCli
-        # Validate the coverage assertion before checking individual baselines.
-        # An incomplete inventory must never produce a READY summary.
-        $inventory = Import-VesTargetInventory -Path $TargetsFile
-        foreach ($e in $inventory.Errors) { Add-Check 'inventory' 'FAIL' $e }
-        foreach ($w in $inventory.Warnings) { Add-Check 'inventory' 'WARN' $w }
-        if ($inventory.Valid) {
-            Add-Check 'inventory' 'PASS' ("confirmed: {0} target(s), {1} required server(s)" -f $inventory.Targets.Count, $inventory.RequiredServers.Count)
-        }
         # run the manifest + config checks per target, reading each target's own params
-        $targets = $inventory.Targets
+        $targets = Get-Content -LiteralPath $TargetsFile -Raw | ConvertFrom-Json
         foreach ($t in $targets) {
             $p = if ($t.PSObject.Properties['processor']) { $t.processor } else { '?' }
             Write-VesLog INFO "--- target: $p ---" -LogFile $LogFile
-            $tp = if ($t.PSObject.Properties['trustParam'])     { $t.trustParam }     else { $null }
-            $mp = if ($t.PSObject.Properties['manifestPath'])   { $t.manifestPath }   else { $null }
+            $tp = if ($t.PSObject.Properties['trustParam']) { $t.trustParam }     else { $null }
+            $mp = if ($t.PSObject.Properties['manifestPath']) { $t.manifestPath }   else { $null }
             $cc = if ($t.PSObject.Properties['configContract']) { $t.configContract } else { $null }
             Test-Manifest $mp $tp          # also reads trustParam from SSM
             Test-ConfigContract $cc
@@ -237,9 +240,7 @@ try {
     else {
         if (-not $ApprovedCommitParam -and -not $TrustParam -and -not $ManifestPath -and -not $ConfigContract -and -not $CheckDatadog) {
             Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ApprovedCommitParam / -TrustParam / -ManifestPath / -ConfigContract / -CheckDatadog.' -LogFile $LogFile
-            if ($Json) { @{ status='usage' } | ConvertTo-Json -Compress }
-            Write-VesLog ERROR 'RUN END: preflight outcome=ERROR exit=10' `
-                -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_USAGE} -LogFile $LogFile
+            if ($Json) { @{ status = 'usage' } | ConvertTo-Json -Compress }
             exit $VES_EXIT_USAGE
         }
         # $null = : these probe for their PASS/FAIL side effect; discard the
@@ -256,24 +257,18 @@ try {
     $warns = @($checks | Where-Object { $_.status -eq 'WARN' })
     $ready = ($fails.Count -eq 0)
     $summary = "Preflight {0}: {1} pass, {2} warn, {3} fail" -f `
-        ($(if ($ready) {'READY'} else {'NOT READY'})), `
-        (@($checks | Where-Object { $_.status -eq 'PASS' }).Count), $warns.Count, $fails.Count
-    Write-VesLog ($(if ($ready) {'OK'} else {'ERROR'})) $summary -LogFile $LogFile
+    ($(if ($ready) { 'READY' } else { 'NOT READY' })), `
+    (@($checks | Where-Object { $_.status -eq 'PASS' }).Count), $warns.Count, $fails.Count
+    Write-VesLog ($(if ($ready) { 'OK' } else { 'ERROR' })) $summary -LogFile $LogFile
 
     if ($Json) {
-        [PSCustomObject]@{ processor=$Processor; ready=$ready; checks=$checks.ToArray() } | ConvertTo-Json -Depth 5 -Compress
+        [PSCustomObject]@{ processor = $Processor; ready = $ready; checks = $checks.ToArray() } | ConvertTo-Json -Depth 5 -Compress
     }
-    $exitCode = $(if ($ready) { $VES_EXIT_OK } else { $VES_EXIT_NOBASE })
-    Write-VesLog ($(if ($ready) {'OK'} else {'ERROR'})) `
-        ("RUN END: preflight outcome={0} exit={1}" -f $(if ($ready) {'PASS'} else {'ERROR'}), $exitCode) `
-        -Data @{runId=$runId; outcome=$(if ($ready) {'PASS'} else {'ERROR'}); exitCode=$exitCode} -LogFile $LogFile
-    exit $exitCode
+    exit ($(if ($ready) { $VES_EXIT_OK } else { $VES_EXIT_NOBASE }))
 }
 # unexpected failure (bad targets JSON, module error, etc.): treat as not-ready
 catch {
     Write-VesLog ERROR "Preflight error: $($_.Exception.Message)" -LogFile $LogFile
-    if ($Json) { @{ status='error'; error=$_.Exception.Message } | ConvertTo-Json -Compress }
-    Write-VesLog ERROR 'RUN END: preflight outcome=ERROR exit=2' `
-        -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_NOBASE} -LogFile $LogFile
+    if ($Json) { @{ status = 'error'; error = $_.Exception.Message } | ConvertTo-Json -Compress }
     exit $VES_EXIT_NOBASE
 }

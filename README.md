@@ -145,8 +145,9 @@ which release tag it checked.
 
 Preflight before a deploy (read-only; touches no prod or staged files). Confirms
 the AWS CLI is present, the SSM parameters actually read back (auth + KMS decrypt
-+ correct path/region), and the baseline manifest is intact and trust-anchored.
-Exit 0 = ready, 2 = not ready:
+
+- correct path/region), and the baseline manifest is intact and trust-anchored.
+  Exit 0 = ready, 2 = not ready:
 
 ```powershell
 .\Invoke-Preflight.ps1 -Processor <system> `
@@ -241,7 +242,7 @@ The contract is exhaustive by default. Every live key must appear under
 explicit `ignoredKeys` allowlist. Undeclared keys are reported as drift.
 `machineKeys` may differ by environment but must still be present and non-empty.
 
-Config files (*.config) are excluded from the file-hash compare on purpose: the
+Config files (\*.config) are excluded from the file-hash compare on purpose: the
 legacy App.config carries server-specific log4net paths that differ every
 UAT->PROD, so config is checked by contract (Verify-Config), not by hash. The
 runtime dirs `logs\`, `temp\`, `cache\` and `.git\` are excluded too, at the root
@@ -286,11 +287,12 @@ log per target plus a run summary and atomically updates
 
 Datadog hooks in the gate/deploy/health paths are best-effort and never block
 deploy/verify outcomes. Two independent transports with different prerequisites:
+
 - **Events** (deploy/gate markers) POST to the ddog-gov Events API and need
   `DD_API_KEY` set; without it they are skipped with a warning. Drift, trust
   failure, runner error, and missed-heartbeat events are included. Production
   uses Datadog `error` severity; dev/qa/UAT use `warning`.
-- **Metrics** (verify/health gauges) are DogStatsD packets to a *local* Datadog
+- **Metrics** (verify/health gauges) are DogStatsD packets to a _local_ Datadog
   Agent on `127.0.0.1:8125`. On any box without a running agent they are silently
   dropped — the primary check still runs, but nothing reaches the dashboard.
   `Invoke-Preflight -CheckDatadog` reports whether the `datadogagent` service and
@@ -316,12 +318,12 @@ Control mapping to the tracked leadership brief
   files/folders are checked separately through `-RequiredArtifactPaths`, so
   hash-excluded environment configuration still blocks when absent.
 - **Console-EXE stop mechanism** (closed, pilot pending): `Deploy-Processor
-  -KillProcesses` stops the running instance whose exe lives under TargetRoot
+-KillProcesses` stops the running instance whose exe lives under TargetRoot
   (audited by PID + command line), and `-StartTasksAfter` relaunches it via
   its scheduled task after a clean copy. Pilot on the UAT egress box before
   any PROD use.
 - **Release record under a Git tag** (closed): `Invoke-Verification -Mode
-  Capture -ArchiveRepo <checkout> -ReleaseTag <system>/vX.Y.Z` commits the
+Capture -ArchiveRepo <checkout> -ReleaseTag <system>/vX.Y.Z` commits the
   manifest + sanitized contract + generated release record under
   `baselines/<processor>/` and tags the commit. Trust pinning and Git archival
   are required unless an explicit local-only exception is used. The tag format
@@ -389,7 +391,7 @@ and fresh-log health probes; do not pass their binaries to
 - In-scope system list is unconfirmed. The scripts now fail closed until the
   inventory is confirmed. Documented outbound processors:
   VES.OutboundDBQProcessor.exe / VES.OutboundProcessor.exe, Task Scheduler jobs
-  VLER_EM_Outbound_Request_Handler / _Processor (and _2 / _12 variants) and
+  VLER_EM_Outbound_Request_Handler / \_Processor (and \_2 / \_12 variants) and
   VLER_EM_Real_Time_Outbound_Processor. **Citrix server names are not yet
   documented** and must be added to `requiredServers` and `targets` before
   `inventoryComplete` can be set to true. processors/ holds only the template;
@@ -409,6 +411,14 @@ and fresh-log health probes; do not pass their binaries to
   with -StartTasksAfter after a clean copy. Without -KillProcesses a detected
   instance aborts the deploy before robocopy can fight a file lock. Pilot on
   the UAT egress box (vesemsegressuat) before any PROD use.
+- Per-server config is overwritten by the copy. `Deploy-Processor.ps1` mirrors
+  with `robocopy /MIR` and no `/XF`, so a config file living under TargetRoot is
+  replaced by the staged one — on a server whose config legitimately differs
+  (endpoints, thumbprints), the deploy flattens it. The gate only proves the
+  file is *present* (-RequiredArtifactPaths), and Verify-Config checks the live
+  file *after* the copy has already replaced it. Decide the fix before PROD:
+  exclude configs from the mirror (`/XF *.config`), or stage the per-server
+  config alongside the artifact so the mirrored copy is already correct.
 - SSM region. Examples default to us-gov-west-1, but the OMS SSM convention
   (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1. Set -Region per
   the confirmed parameter path before running config-verify/preflight for real.
