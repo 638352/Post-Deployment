@@ -131,7 +131,16 @@ try {
                 $destRel = Join-Path 'baselines' $Processor
                 $dest = Join-Path $ArchiveRepo $destRel
                 if (-not (Test-Path -LiteralPath $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-                Copy-Item -LiteralPath $ManifestPath -Destination $dest -Force
+                # Archive under <Processor>.json regardless of what the local
+                # manifest is called. Get-VesManifestFromTag reads exactly that
+                # name back out of the tag, so a manifest kept locally as, say,
+                # OutboundDBQ-v1.4.json would archive fine and then fail readback
+                # with a trust error that looks like tampering.
+                $archivedName = "$Processor.json"
+                Copy-Item -LiteralPath $ManifestPath -Destination (Join-Path $dest $archivedName) -Force
+                if ((Split-Path -Leaf $ManifestPath) -ne $archivedName) {
+                    Write-VesLog INFO ("Archived manifest as {0} (readback convention)" -f $archivedName) -LogFile $LogFile
+                }
                 if ($ConfigContract) {
                     if (-not (Test-Path -LiteralPath $ConfigContract)) { throw "Config contract to archive not found: $ConfigContract" }
                     Copy-Item -LiteralPath $ConfigContract -Destination $dest -Force

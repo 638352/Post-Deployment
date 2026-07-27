@@ -64,6 +64,18 @@ param(
     # start the re-enabled scheduled tasks right after a clean copy, so the
     # processor relaunches now instead of at its next trigger
     [switch]$StartTasksAfter,
+    # Files under the target the mirror must leave alone, as robocopy /XF
+    # wildcards. Default *.config: the artifact carries the UAT copy of the
+    # config, the server carries its own, and the manifest excludes .config by
+    # design (Verify-Config.ps1 checks it separately). Without this the mirror
+    # replaced each server's config with the staged one and the post-deploy
+    # verify still passed, because the mirror had made the target match the
+    # manifest. /XF also protects from deletion, not just overwrite.
+    [string[]]$PreserveFiles = @('*.config'),
+    # Directories under the target the mirror must leave alone, as robocopy /XD
+    # names (e.g. in-flight queue folders). Empty by default: name them per
+    # processor in the wrapper, where the runbook values live.
+    [string[]]$PreserveDirs = @(),
     # dated backup of the current target before overwrite (runbook convention:
     # <BackupRoot>\<yyyyMMdd>_<Initials>_<Processor>). Skipped if not set.
     [string]$BackupRoot,
@@ -248,8 +260,23 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
         # only mirror the staged tree in once everything is safely stopped
         if (-not $stopFailed) {
             Write-VesLog INFO "Copy $StagedRoot -> $TargetRoot" -LogFile $LogFile
-            # /MIR so stale files get removed; binary copy, nothing rewrites line endings
-            robocopy $StagedRoot $TargetRoot /MIR /NP /R:2 /W:5 | Out-Null
+            # /MIR so stale files get removed; binary copy, nothing rewrites line endings.
+            # /XF and /XD carve the server's own files out of the mirror: excluded
+            # items are neither overwritten by the staged copy nor deleted for being
+            # absent from it, which is the whole point -- per-server config, certs,
+            # and in-flight work have to survive a deploy.
+            $roboArgs = @('/MIR', '/NP', '/R:2', '/W:5')
+            $preserveF = @($PreserveFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            $preserveD = @($PreserveDirs  | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            if ($preserveF.Count) { $roboArgs += '/XF'; $roboArgs += $preserveF }
+            if ($preserveD.Count) { $roboArgs += '/XD'; $roboArgs += $preserveD }
+            if ($preserveF.Count -or $preserveD.Count) {
+                Write-VesLog INFO ("Mirror preserving: {0}" -f (($preserveF + $preserveD) -join ', ')) -LogFile $LogFile
+            }
+            else {
+                Write-VesLog WARN 'Mirror preserving nothing: every file under the target not in the staged tree will be deleted.' -LogFile $LogFile
+            }
+            robocopy $StagedRoot $TargetRoot @roboArgs | Out-Null
             # robocopy: 0-7 are success variants, 8+ is failure
             if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "robocopy failed ($LASTEXITCODE)" -LogFile $LogFile; $copyFailed = $true }
             $global:LASTEXITCODE = 0   # clear the 1-7 success codes so Step doesn't trip on them

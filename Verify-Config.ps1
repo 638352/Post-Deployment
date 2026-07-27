@@ -227,3 +227,10 @@ Write-VesLog ($(if ($pass) {'OK'} else {'DRIFT'})) `
     machineKeysIgnored = $machineKeys
     ignoredKeys        = $ignoredKeys
 }
+
+# Exit on the contract so a direct run is readable by a tester or scheduler.
+# Without this the script fell off the end at 0 even on a FAIL, and anyone
+# following the exit-code contract read a failed config check as a pass.
+# Invoke-Verification consumes the object above (not $LASTEXITCODE), so the
+# delegated call it makes is unaffected.
+exit $(if ($pass) { $VES_EXIT_OK } else { $VES_EXIT_DRIFT })

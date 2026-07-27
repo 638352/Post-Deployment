@@ -9,6 +9,9 @@
                      region all exercised by a --with-decryption get-parameter)
       manifest       baseline manifest exists, is self-consistent, and its hash
                      matches the SSM-pinned trusted hash (tamper anchor intact)
+      manifest-pattern  baseline holds no entries the current exclude pattern
+                     would drop (WARN = captured under older rules, re-capture
+                     and re-pin; readiness is not affected)
       config         config contract file parses and declares a known format
 
     Two ways to invoke:
@@ -43,6 +46,23 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+# Evidence first: New-VesLogFile is what keeps an interactive run from leaving no
+# record at all, and every other entry script bootstraps the same way. Without
+# this, Write-VesLog gets a null -LogFile and writes console text only, so a
+# preflight that declared a box READY left nothing to audit afterwards.
+if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("preflight-{0}" -f $Processor) }
+$runId = [guid]::NewGuid().ToString()
+Write-VesLog INFO 'RUN START: preflight' `
+    -Data @{runId = $runId; script = 'Invoke-Preflight.ps1'; processor = $Processor } -LogFile $LogFile
+
+# single exit point for the run-boundary record, so every path leaves a RUN END
+function Exit-Preflight([int]$Code) {
+    $outcome = Get-VesOutcome -ExitCode $Code
+    Write-VesLog ($(if ($outcome -eq 'PASS') { 'OK' } else { 'ERROR' })) `
+        "RUN END: preflight outcome=$outcome exit=$Code" `
+        -Data @{runId = $runId; outcome = $outcome; exitCode = $Code; processor = $Processor } -LogFile $LogFile
+    exit $Code
+}
 
 # every check appends one row here; the final exit code is derived from their statuses
 $checks = New-Object System.Collections.Generic.List[object]
@@ -148,6 +168,16 @@ function Test-Manifest([string]$Path, [string]$Trust) {
     }
     # intact, so it is worth asking whether it was captured under current rules
     Test-ManifestPatternStale $m
+    # Report the count we counted, not the one the document claims. The trust
+    # hash covers files[] only, so fileCount (like commitSha and capturedBy) can
+    # be edited without breaking the anchor -- and a preflight that echoed it
+    # would present a forged number as trust-anchored fact. Disagreement is not
+    # a trust failure, but it does mean someone edited the record by hand.
+    $counted = @($m.Doc.files).Count
+    $claimed = if ($m.Doc.PSObject.Properties['fileCount']) { [int]$m.Doc.fileCount } else { $counted }
+    if ($claimed -ne $counted) {
+        Add-Check 'manifest-metadata' 'WARN' ("fileCount says {0}, files[] holds {1}; metadata sits outside the trust hash and was edited" -f $claimed, $counted)
+    }
     # if a trust param is given, the manifest hash must match the SSM-pinned value
     if (-not [string]::IsNullOrWhiteSpace($Trust)) {
         $pinned = Test-SsmParam $Trust
@@ -158,11 +188,11 @@ function Test-Manifest([string]$Path, [string]$Trust) {
             Add-Check 'manifest' 'FAIL' "trust mismatch: SSM=$pinned manifest=$($m.RecomputedHash)"
         }
         else {
-            Add-Check 'manifest' 'PASS' "intact and trust-anchored ($($m.Doc.fileCount) files)"
+            Add-Check 'manifest' 'PASS' "intact and trust-anchored ($counted files)"
         }
     }
     else {
-        Add-Check 'manifest' 'PASS' "self-consistent ($($m.Doc.fileCount) files); no -TrustParam to anchor against"
+        Add-Check 'manifest' 'PASS' "self-consistent ($counted files); no -TrustParam to anchor against"
     }
 }
 
@@ -191,7 +221,7 @@ try {
         if (-not (Test-Path -LiteralPath $TargetsFile)) {
             Write-VesLog ERROR "Targets file not found: $TargetsFile" -LogFile $LogFile
             if ($Json) { @{ status = 'usage' } | ConvertTo-Json -Compress }
-            exit $VES_EXIT_USAGE
+            Exit-Preflight $VES_EXIT_USAGE
         }
         Test-AwsCli
         # Validate the coverage assertion before checking individual baselines.
@@ -222,9 +252,7 @@ try {
         if (-not $ApprovedCommitParam -and -not $TrustParam -and -not $ManifestPath -and -not $ConfigContract) {
             Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ApprovedCommitParam / -TrustParam / -ManifestPath / -ConfigContract.' -LogFile $LogFile
             if ($Json) { @{ status='usage' } | ConvertTo-Json -Compress }
-            Write-VesLog ERROR 'RUN END: preflight outcome=ERROR exit=10' `
-                -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_USAGE} -LogFile $LogFile
-            exit $VES_EXIT_USAGE
+            Exit-Preflight $VES_EXIT_USAGE
         }
         # $null = : these probe for their PASS/FAIL side effect; discard the
         # returned parameter value so a (possibly sensitive) SSM value never leaks
@@ -247,11 +275,11 @@ try {
     if ($Json) {
         [PSCustomObject]@{ processor = $Processor; ready = $ready; checks = $checks.ToArray() } | ConvertTo-Json -Depth 5 -Compress
     }
-    exit ($(if ($ready) { $VES_EXIT_OK } else { $VES_EXIT_NOBASE }))
+    Exit-Preflight ($(if ($ready) { $VES_EXIT_OK } else { $VES_EXIT_NOBASE }))
 }
 # unexpected failure (bad targets JSON, module error, etc.): treat as not-ready
 catch {
     Write-VesLog ERROR "Preflight error: $($_.Exception.Message)" -LogFile $LogFile
     if ($Json) { @{ status = 'error'; error = $_.Exception.Message } | ConvertTo-Json -Compress }
-    exit $VES_EXIT_NOBASE
+    Exit-Preflight $VES_EXIT_NOBASE
 }

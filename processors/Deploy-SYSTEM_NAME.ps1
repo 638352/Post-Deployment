@@ -55,6 +55,15 @@ param(
 $ErrorActionPreference = 'Stop'
 $core = Split-Path -Parent $PSScriptRoot
 
+# This file is the template, not a deployable wrapper. Run unedited it would
+# aim real deploy machinery at placeholder paths; refuse before touching
+# anything, and refuse with the contract's usage code (10) rather than dying on
+# whichever placeholder happens to fail first.
+if ($PSCommandPath -and (Split-Path -Leaf $PSCommandPath) -eq 'Deploy-SYSTEM_NAME.ps1') {
+    Write-Host 'Refusing to run: this is the per-processor template. Copy it to Deploy-<System>.ps1 and replace every SYSTEM_NAME placeholder first.' -ForegroundColor Red
+    exit 10   # $VES_EXIT_USAGE; the module is not imported this early
+}
+
 $logDir = if ($AuditLogDir) { $AuditLogDir } elseif ($env:VES_AUDIT_LOG_DIR) { $env:VES_AUDIT_LOG_DIR } else { 'D:\ves-verify\logs' }
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 $log = Join-Path $logDir ('deploy_SYSTEM_NAME_{0}.jsonl' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))

@@ -1,7 +1,8 @@
 #Requires -Version 5.1
-# Verify-Config.ps1 across the three contract formats. It returns an object
-# instead of calling exit, so we run it in-process and check .pass. Fixtures have
-# no ssmExpectedValues, so no SSM. Failing contracts are built per-test.
+# Verify-Config.ps1 across the three contract formats. It returns an object AND
+# exits on the contract, so most cases run it in-process and check .pass, while
+# the exit-code block runs it as a child process. Fixtures have no
+# ssmExpectedValues, so no SSM. Failing contracts are built per-test.
 
 BeforeAll {
     . (Join-Path $PSScriptRoot '_helpers.ps1')
@@ -156,5 +157,39 @@ Describe 'Verify-Config errors' {
     It 'throws on a missing config file' {
         { & $script:VerifyConfig -ContractPath (Join-Path $script:Fx 'json\contract.json') `
               -ConfigPath (Join-Path $TestDrive 'no-config.json') } | Should -Throw
+    }
+}
+
+Describe 'Verify-Config exit codes' {
+    # Regression: the script used to fall off the end at 0 even on a FAIL, so a
+    # tester or scheduler following the exit-code contract read a failed config
+    # check as a pass. Exit codes only come back from a child process.
+    It 'exits 0 when the config meets the contract' {
+        $r = Invoke-VesScript 'Verify-Config.ps1' @(
+            '-ContractPath', (Join-Path $script:Fx 'json\contract.json'),
+            '-ConfigPath', (Join-Path $script:Fx 'json\config.json'))
+        $r.ExitCode | Should -Be 0
+    }
+
+    It 'exits 1 when a required key is missing' {
+        $cfg = Get-Content -LiteralPath (Join-Path $script:Fx 'json\config.json') -Raw | ConvertFrom-Json
+        $first = ($cfg.PSObject.Properties | Select-Object -First 1).Name
+        $cfg.PSObject.Properties.Remove($first)
+        $broken = Join-Path $TestDrive 'exit-broken.json'
+        ($cfg | ConvertTo-Json -Depth 8) | Out-File -FilePath $broken -Encoding utf8
+
+        $r = Invoke-VesScript 'Verify-Config.ps1' @(
+            '-ContractPath', (Join-Path $script:Fx 'json\contract.json'),
+            '-ConfigPath', $broken)
+        $r.ExitCode | Should -Be 1
+        $r.Output   | Should -Match 'Config verify FAIL'
+    }
+
+    It 'still hands the result object back to an in-process caller' {
+        # Invoke-Verification reads $cfg.pass, not $LASTEXITCODE; the exit must
+        # not swallow the object on its way out.
+        $r = & $script:VerifyConfig -ContractPath (Join-Path $script:Fx 'json\contract.json') `
+            -ConfigPath (Join-Path $script:Fx 'json\config.json')
+        $r.pass | Should -BeTrue
     }
 }

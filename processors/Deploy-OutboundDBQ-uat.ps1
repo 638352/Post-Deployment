@@ -37,7 +37,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $core = Split-Path -Parent $PSScriptRoot
 if (-not $ConfirmedRunbookValues) {
-    throw 'Refusing to run: confirm the scheduled-task name and fresh-log directory, then pass -ConfirmedRunbookValues.'
+    # exit 10, not throw: a throw surfaces as exit 1, which the exit-code
+    # contract reads as file/config drift (FAIL) rather than unsafe
+    # configuration (ERROR). Nothing has been touched at this point.
+    Write-Host 'Refusing to run: confirm the scheduled-task name and fresh-log directory, then pass -ConfirmedRunbookValues.' -ForegroundColor Red
+    exit 10   # $VES_EXIT_USAGE; the module is not imported this early
 }
 
 $logDir = if ($AuditLogDir) { $AuditLogDir } elseif ($env:VES_AUDIT_LOG_DIR) { $env:VES_AUDIT_LOG_DIR } else { 'D:\ves-verify\logs' }
