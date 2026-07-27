@@ -40,10 +40,10 @@ param(
     [string]$TargetsFile,
     [string]$Region = 'us-gov-west-1',
     [string]$LogFile,
-    # Optional: probe whether the Datadog agent/API key are in place. WARN-only --
-    # monitoring is best-effort, so it never flips readiness. Off by default so
-    # boxes not yet wired for Datadog don't emit confusing warnings.
-    [switch]$CheckDatadog,
+    # # Optional: probe whether the Datadog agent/API key are in place. WARN-only --
+    # # monitoring is best-effort, so it never flips readiness. Off by default so
+    # # boxes not yet wired for Datadog don't emit confusing warnings.
+    # [switch]$CheckDatadog,
     [switch]$Json
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
@@ -51,15 +51,15 @@ $ErrorActionPreference = 'Stop'
 if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("preflight-{0}" -f $Processor) }
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: preflight' `
-    -Data @{runId=$runId; script='Invoke-Preflight.ps1'; processor=$Processor} -LogFile $LogFile
+    -Data @{runId = $runId; script = 'Invoke-Preflight.ps1'; processor = $Processor } -LogFile $LogFile
 
 # every check appends one row here; the final exit code is derived from their statuses
 $checks = New-Object System.Collections.Generic.List[object]
 function Add-Check([string]$Name, [string]$Status, [string]$Detail) {
     # Status is PASS, WARN, or FAIL. Only FAIL flips the exit code.
-    $lvl = @{ PASS='OK'; WARN='WARN'; FAIL='ERROR' }[$Status]
+    $lvl = @{ PASS = 'OK'; WARN = 'WARN'; FAIL = 'ERROR' }[$Status]
     Write-VesLog $lvl ("{0,-22} {1}" -f $Name, $Detail) -LogFile $LogFile
-    $checks.Add([PSCustomObject]@{ check=$Name; status=$Status; detail=$Detail })
+    $checks.Add([PSCustomObject]@{ check = $Name; status = $Status; detail = $Detail })
 }
 
 # --- SSM probe: distinguish "no CLI" / "not found" / "denied" for a real diagnosis ---
@@ -69,7 +69,8 @@ function Test-AwsCli {
     $script:awsChecked = $true
     if (Get-Command aws -ErrorAction SilentlyContinue) {
         Add-Check 'aws-cli' 'PASS' 'AWS CLI found on PATH'
-    } else {
+    }
+    else {
         Add-Check 'aws-cli' 'FAIL' 'AWS CLI not on PATH; SSM reads will fail'
     }
 }
@@ -82,8 +83,8 @@ function Test-SsmParam([string]$ParamName) {
     # on exactly the failures it exists to explain, and (in -TargetsFile mode)
     # aborted on the first bad target instead of reporting every one.
     $r = Invoke-VesAwsCli -Arguments @(
-        'ssm','get-parameter','--name',$ParamName,'--with-decryption',
-        '--region',$Region,'--query','Parameter.Value','--output','text')
+        'ssm', 'get-parameter', '--name', $ParamName, '--with-decryption',
+        '--region', $Region, '--query', 'Parameter.Value', '--output', 'text')
     # success: report readability by length only (the value may be a secret)
     if ($r.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($r.StdOut)) {
         # don't echo the value; it may be a secret. show length only.
@@ -94,9 +95,9 @@ function Test-SsmParam([string]$ParamName) {
     # failure: translate the CLI's error text into an actionable reason
     $msg = $r.StdErr.Trim()
     if ($msg -match 'ParameterNotFound') { $why = 'parameter does not exist (check path/region)' }
-    elseif ($msg -match 'AccessDenied')   { $why = 'access denied (IAM ssm:GetParameter / kms:Decrypt)' }
+    elseif ($msg -match 'AccessDenied') { $why = 'access denied (IAM ssm:GetParameter / kms:Decrypt)' }
     elseif ($msg -match 'ExpiredToken|Unable to locate credentials') { $why = 'no/expired credentials on host' }
-    elseif ($msg) { $why = ($msg -replace '\s+',' ') }
+    elseif ($msg) { $why = ($msg -replace '\s+', ' ') }
     else { $why = "unreadable (aws exit $($r.ExitCode), no output)" }
     Add-Check "ssm:$ParamName" 'FAIL' $why
     return $null
@@ -112,12 +113,13 @@ function Test-SsmParam([string]$ParamName) {
 function Test-ManifestPatternStale($Manifest) {
     $rels = @($Manifest.Doc.files | ForEach-Object { $_.RelPath })
     # manifest RelPaths are '/'-normalized; test them the way capture would see them
-    $stale = @($rels | Where-Object { ($_ -replace '/','\') -match $Global:VES_DEFAULT_EXCLUDE })
+    $stale = @($rels | Where-Object { ($_ -replace '/', '\') -match $Global:VES_DEFAULT_EXCLUDE })
     if ($stale.Count) {
         $sample = ($stale | Select-Object -First 3) -join ', '
         Add-Check 'manifest-pattern' 'WARN' ("{0} entr{1} the current exclude pattern would drop (e.g. {2}); re-capture to re-pin" -f `
-            $stale.Count, $(if ($stale.Count -eq 1) {'y'} else {'ies'}), $sample)
-    } else {
+                $stale.Count, $(if ($stale.Count -eq 1) { 'y' } else { 'ies' }), $sample)
+    }
+    else {
         Add-Check 'manifest-pattern' 'PASS' 'captured under the current exclude pattern'
     }
 }
@@ -143,35 +145,38 @@ function Test-Manifest([string]$Path, [string]$Trust) {
         $pinned = Test-SsmParam $Trust
         if ($null -eq $pinned) {
             Add-Check 'manifest' 'WARN' 'self-consistent, but trust hash unreadable (see ssm check above)'
-        } elseif ($pinned -ne $m.RecomputedHash) {
+        }
+        elseif ($pinned -ne $m.RecomputedHash) {
             Add-Check 'manifest' 'FAIL' "trust mismatch: SSM=$pinned manifest=$($m.RecomputedHash)"
-        } else {
+        }
+        else {
             Add-Check 'manifest' 'PASS' "intact and trust-anchored ($($m.Doc.fileCount) files)"
         }
-    } else {
+    }
+    else {
         Add-Check 'manifest' 'PASS' "self-consistent ($($m.Doc.fileCount) files); no -TrustParam to anchor against"
     }
 }
 
 # --- Datadog reachability (optional; WARN only, never blocks readiness) ---------
-function Test-DatadogAgent {
-    # A missing or stopped agent is a WARN, not a FAIL: verification works without
-    # it, monitoring just won't page anyone until it's up.
-    $svc = Get-Service -Name 'datadogagent' -ErrorAction SilentlyContinue
-    if (-not $svc) {
-        Add-Check 'datadog-agent' 'WARN' "service 'datadogagent' not found; drift/health metrics will be dropped"
-    } elseif ($svc.Status -ne 'Running') {
-        Add-Check 'datadog-agent' 'WARN' "service present but $($svc.Status); metrics dropped until it runs"
-    } else {
-        Add-Check 'datadog-agent' 'PASS' 'agent running (DogStatsD 127.0.0.1:8125)'
-    }
-    # Deploy/gate events use the API key (not the local agent), so flag its absence too.
-    if ([string]::IsNullOrWhiteSpace($env:DD_API_KEY)) {
-        Add-Check 'datadog-apikey' 'WARN' 'DD_API_KEY not set; deploy/gate events will be skipped'
-    } else {
-        Add-Check 'datadog-apikey' 'PASS' 'DD_API_KEY present in environment'
-    }
-}
+# function Test-DatadogAgent {
+#     # A missing or stopped agent is a WARN, not a FAIL: verification works without
+#     # it, monitoring just won't page anyone until it's up.
+#     $svc = Get-Service -Name 'datadogagent' -ErrorAction SilentlyContinue
+#     if (-not $svc) {
+#         Add-Check 'datadog-agent' 'WARN' "service 'datadogagent' not found; drift/health metrics will be dropped"
+#     } elseif ($svc.Status -ne 'Running') {
+#         Add-Check 'datadog-agent' 'WARN' "service present but $($svc.Status); metrics dropped until it runs"
+#     } else {
+#         Add-Check 'datadog-agent' 'PASS' 'agent running (DogStatsD 127.0.0.1:8125)'
+#     }
+#     # Deploy/gate events use the API key (not the local agent), so flag its absence too.
+#     if ([string]::IsNullOrWhiteSpace($env:DD_API_KEY)) {
+#         Add-Check 'datadog-apikey' 'WARN' 'DD_API_KEY not set; deploy/gate events will be skipped'
+#     } else {
+#         Add-Check 'datadog-apikey' 'PASS' 'DD_API_KEY present in environment'
+#     }
+# }
 
 function Test-ConfigContract([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return }
@@ -180,7 +185,7 @@ function Test-ConfigContract([string]$Path) {
     try { $c = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json }
     catch { Add-Check 'config' 'FAIL' "contract not valid JSON: $($_.Exception.Message)"; return }
     $fmt = if ($c.PSObject.Properties['format']) { $c.format } else { $null }
-    if ($fmt -notin 'appconfig','json','keyvalue') {
+    if ($fmt -notin 'appconfig', 'json', 'keyvalue') {
         Add-Check 'config' 'FAIL' "contract format missing/unknown: '$fmt' (want appconfig|json|keyvalue)"
         return
     }
@@ -194,22 +199,23 @@ function Test-ConfigContract([string]$Path) {
     }
     if ($unsafe.Count) {
         Add-Check 'config' 'FAIL' "sensitive key(s) stored under expectedValues: $($unsafe -join ', '); use requiredKeys or ssmExpectedValues"
-    } else {
+    }
+    else {
         Add-Check 'config' 'PASS' "contract parses, format=$fmt, secret values not embedded"
     }
 }
 
 try {
     # Optional agent reachability check runs in either mode when requested.
-    if ($CheckDatadog) { Test-DatadogAgent }
+    # if ($CheckDatadog) { Test-DatadogAgent }
 
     # Mode A: -TargetsFile validates SSM + manifest + contract for every drift target at once
     if ($TargetsFile) {
         if (-not (Test-Path -LiteralPath $TargetsFile)) {
             Write-VesLog ERROR "Targets file not found: $TargetsFile" -LogFile $LogFile
-            if ($Json) { @{ status='usage' } | ConvertTo-Json -Compress }
+            if ($Json) { @{ status = 'usage' } | ConvertTo-Json -Compress }
             Write-VesLog ERROR 'RUN END: preflight outcome=ERROR exit=10' `
-                -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_USAGE} -LogFile $LogFile
+                -Data @{runId = $runId; outcome = 'ERROR'; exitCode = $VES_EXIT_USAGE } -LogFile $LogFile
             exit $VES_EXIT_USAGE
         }
         Test-AwsCli
@@ -226,8 +232,8 @@ try {
         foreach ($t in $targets) {
             $p = if ($t.PSObject.Properties['processor']) { $t.processor } else { '?' }
             Write-VesLog INFO "--- target: $p ---" -LogFile $LogFile
-            $tp = if ($t.PSObject.Properties['trustParam'])     { $t.trustParam }     else { $null }
-            $mp = if ($t.PSObject.Properties['manifestPath'])   { $t.manifestPath }   else { $null }
+            $tp = if ($t.PSObject.Properties['trustParam']) { $t.trustParam }     else { $null }
+            $mp = if ($t.PSObject.Properties['manifestPath']) { $t.manifestPath }   else { $null }
             $cc = if ($t.PSObject.Properties['configContract']) { $t.configContract } else { $null }
             Test-Manifest $mp $tp          # also reads trustParam from SSM
             Test-ConfigContract $cc
@@ -235,11 +241,14 @@ try {
     }
     # Mode B: per-processor invocation validates whichever of the params were supplied
     else {
-        if (-not $ApprovedCommitParam -and -not $TrustParam -and -not $ManifestPath -and -not $ConfigContract -and -not $CheckDatadog) {
-            Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ApprovedCommitParam / -TrustParam / -ManifestPath / -ConfigContract / -CheckDatadog.' -LogFile $LogFile
-            if ($Json) { @{ status='usage' } | ConvertTo-Json -Compress }
+        # -CheckDatadog dropped from this list with the Datadog code: an undeclared
+        # variable here would always read as $null, letting a bare invocation pass
+        # the guard and report READY with zero checks run.
+        if (-not $ApprovedCommitParam -and -not $TrustParam -and -not $ManifestPath -and -not $ConfigContract) {
+            Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ApprovedCommitParam / -TrustParam / -ManifestPath / -ConfigContract.' -LogFile $LogFile
+            if ($Json) { @{ status = 'usage' } | ConvertTo-Json -Compress }
             Write-VesLog ERROR 'RUN END: preflight outcome=ERROR exit=10' `
-                -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_USAGE} -LogFile $LogFile
+                -Data @{runId = $runId; outcome = 'ERROR'; exitCode = $VES_EXIT_USAGE } -LogFile $LogFile
             exit $VES_EXIT_USAGE
         }
         # $null = : these probe for their PASS/FAIL side effect; discard the
@@ -256,24 +265,24 @@ try {
     $warns = @($checks | Where-Object { $_.status -eq 'WARN' })
     $ready = ($fails.Count -eq 0)
     $summary = "Preflight {0}: {1} pass, {2} warn, {3} fail" -f `
-        ($(if ($ready) {'READY'} else {'NOT READY'})), `
-        (@($checks | Where-Object { $_.status -eq 'PASS' }).Count), $warns.Count, $fails.Count
-    Write-VesLog ($(if ($ready) {'OK'} else {'ERROR'})) $summary -LogFile $LogFile
+    ($(if ($ready) { 'READY' } else { 'NOT READY' })), `
+    (@($checks | Where-Object { $_.status -eq 'PASS' }).Count), $warns.Count, $fails.Count
+    Write-VesLog ($(if ($ready) { 'OK' } else { 'ERROR' })) $summary -LogFile $LogFile
 
     if ($Json) {
-        [PSCustomObject]@{ processor=$Processor; ready=$ready; checks=$checks.ToArray() } | ConvertTo-Json -Depth 5 -Compress
+        [PSCustomObject]@{ processor = $Processor; ready = $ready; checks = $checks.ToArray() } | ConvertTo-Json -Depth 5 -Compress
     }
     $exitCode = $(if ($ready) { $VES_EXIT_OK } else { $VES_EXIT_NOBASE })
-    Write-VesLog ($(if ($ready) {'OK'} else {'ERROR'})) `
-        ("RUN END: preflight outcome={0} exit={1}" -f $(if ($ready) {'PASS'} else {'ERROR'}), $exitCode) `
-        -Data @{runId=$runId; outcome=$(if ($ready) {'PASS'} else {'ERROR'}); exitCode=$exitCode} -LogFile $LogFile
+    Write-VesLog ($(if ($ready) { 'OK' } else { 'ERROR' })) `
+    ("RUN END: preflight outcome={0} exit={1}" -f $(if ($ready) { 'PASS' } else { 'ERROR' }), $exitCode) `
+        -Data @{runId = $runId; outcome = $(if ($ready) { 'PASS' } else { 'ERROR' }); exitCode = $exitCode } -LogFile $LogFile
     exit $exitCode
 }
 # unexpected failure (bad targets JSON, module error, etc.): treat as not-ready
 catch {
     Write-VesLog ERROR "Preflight error: $($_.Exception.Message)" -LogFile $LogFile
-    if ($Json) { @{ status='error'; error=$_.Exception.Message } | ConvertTo-Json -Compress }
+    if ($Json) { @{ status = 'error'; error = $_.Exception.Message } | ConvertTo-Json -Compress }
     Write-VesLog ERROR 'RUN END: preflight outcome=ERROR exit=2' `
-        -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_NOBASE} -LogFile $LogFile
+        -Data @{runId = $runId; outcome = 'ERROR'; exitCode = $VES_EXIT_NOBASE } -LogFile $LogFile
     exit $VES_EXIT_NOBASE
 }

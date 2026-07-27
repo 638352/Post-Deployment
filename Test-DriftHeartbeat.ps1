@@ -24,12 +24,12 @@ $ErrorActionPreference = 'Stop'
 if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix 'drift-heartbeat-watchdog' }
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: drift heartbeat watchdog' `
-    -Data @{runId=$runId; script='Test-DriftHeartbeat.ps1'; environment=$Environment; heartbeat=$HeartbeatPath} `
+    -Data @{runId = $runId; script = 'Test-DriftHeartbeat.ps1'; environment = $Environment; heartbeat = $HeartbeatPath } `
     -LogFile $LogFile
 
 if ($MaxAgeMinutes -le 0) {
     Write-VesLog ERROR '-MaxAgeMinutes must be greater than zero.' `
-        -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_USAGE} -LogFile $LogFile
+        -Data @{runId = $runId; outcome = 'ERROR'; exitCode = $VES_EXIT_USAGE } -LogFile $LogFile
     exit $VES_EXIT_USAGE
 }
 
@@ -66,32 +66,32 @@ catch {
     $detail = $_.Exception.Message
 }
 
-$tags = @((Get-VesDatadogEnvTag -Environment $Environment), 'check:drift-heartbeat')
-Send-VesDatadogMetric -Metric 'deployment.drift.heartbeat.status' -Value ([int]$fresh) -Tags $tags
-if ($null -ne $ageMinutes) {
-    Send-VesDatadogMetric -Metric 'deployment.drift.heartbeat.age_minutes' -Value $ageMinutes -Tags $tags
-}
+# $tags = @((Get-VesDatadogEnvTag -Environment $Environment), 'check:drift-heartbeat')
+# Send-VesDatadogMetric -Metric 'deployment.drift.heartbeat.status' -Value ([int]$fresh) -Tags $tags
+# if ($null -ne $ageMinutes) {
+#     Send-VesDatadogMetric -Metric 'deployment.drift.heartbeat.age_minutes' -Value $ageMinutes -Tags $tags
+# }
 
 if ($fresh) {
-    Write-VesLog OK $detail -Data @{runId=$runId; outcome='PASS'; exitCode=0; ageMinutes=$ageMinutes} -LogFile $LogFile
+    Write-VesLog OK $detail -Data @{runId = $runId; outcome = 'PASS'; exitCode = 0; ageMinutes = $ageMinutes } -LogFile $LogFile
     if ($Json) {
-        [PSCustomObject]@{runId=$runId; fresh=$true; ageMinutes=$ageMinutes; heartbeat=$heartbeat} |
-            ConvertTo-Json -Depth 6 -Compress
+        [PSCustomObject]@{runId = $runId; fresh = $true; ageMinutes = $ageMinutes; heartbeat = $heartbeat } |
+        ConvertTo-Json -Depth 6 -Compress
     }
     Write-VesLog OK 'RUN END: drift heartbeat watchdog outcome=PASS exit=0' `
-        -Data @{runId=$runId; outcome='PASS'; exitCode=0} -LogFile $LogFile
+        -Data @{runId = $runId; outcome = 'PASS'; exitCode = 0 } -LogFile $LogFile
     exit $VES_EXIT_OK
 }
 
 Write-VesLog ERROR "MISSED DRIFT RUN: $detail" `
-    -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_NOBASE; ageMinutes=$ageMinutes} -LogFile $LogFile
-Send-VesDatadogEvent -Title "Missed scheduled drift verification on $env:COMPUTERNAME" `
-    -Text "$detail Heartbeat path: $HeartbeatPath" `
-    -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($tags + 'event:missed-run')
+    -Data @{runId = $runId; outcome = 'ERROR'; exitCode = $VES_EXIT_NOBASE; ageMinutes = $ageMinutes } -LogFile $LogFile
+# Send-VesDatadogEvent -Title "Missed scheduled drift verification on $env:COMPUTERNAME" `
+#     -Text "$detail Heartbeat path: $HeartbeatPath" `
+#     -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($tags + 'event:missed-run')
 if ($Json) {
-    [PSCustomObject]@{runId=$runId; fresh=$false; ageMinutes=$ageMinutes; error=$detail} |
-        ConvertTo-Json -Compress
+    [PSCustomObject]@{runId = $runId; fresh = $false; ageMinutes = $ageMinutes; error = $detail } |
+    ConvertTo-Json -Compress
 }
 Write-VesLog ERROR 'RUN END: drift heartbeat watchdog outcome=ERROR exit=2' `
-    -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_NOBASE} -LogFile $LogFile
+    -Data @{runId = $runId; outcome = 'ERROR'; exitCode = $VES_EXIT_NOBASE } -LogFile $LogFile
 exit $VES_EXIT_NOBASE

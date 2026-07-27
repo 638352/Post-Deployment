@@ -80,17 +80,17 @@ $here = $PSScriptRoot
 if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("deploy-{0}-{1}" -f $Processor, $StagedCommit) }
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: deployment' `
-    -Data @{runId=$runId; script='Deploy-Processor.ps1'; processor=$Processor; environment=$Environment; release=$StagedCommit; target=$TargetRoot} `
+    -Data @{runId = $runId; script = 'Deploy-Processor.ps1'; processor = $Processor; environment = $Environment; release = $StagedCommit; target = $TargetRoot } `
     -LogFile $LogFile
 
-# Low-cardinality tags shared by every deploy event emitted to Datadog.
-$ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment))
+# # Low-cardinality tags shared by every deploy event emitted to Datadog.
+# $ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment))
 
 function Stop-Deploy([int]$code) {
     $outcome = Get-VesOutcome -ExitCode $code
-    Write-VesLog ($(if ($outcome -eq 'PASS') {'OK'} elseif ($outcome -eq 'FAIL') {'ERROR'} else {'ERROR'})) `
+    Write-VesLog ($(if ($outcome -eq 'PASS') { 'OK' } elseif ($outcome -eq 'FAIL') { 'ERROR' } else { 'ERROR' })) `
         "RUN END: deployment outcome=$outcome exit=$code" `
-        -Data @{runId=$runId; outcome=$outcome; exitCode=$code; processor=$Processor; release=$StagedCommit} -LogFile $LogFile
+        -Data @{runId = $runId; outcome = $outcome; exitCode = $code; processor = $Processor; release = $StagedCommit } -LogFile $LogFile
     exit $code
 }
 
@@ -113,7 +113,8 @@ if ($ConfigContract) {
     if ($configFull.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         $relativeConfig = $configFull.Substring($targetPrefix.Length)
         if (-not $gateRequired.Contains($relativeConfig)) { $gateRequired.Add($relativeConfig) }
-    } elseif ($gateRequired.Count -eq 0) {
+    }
+    elseif ($gateRequired.Count -eq 0) {
         Write-VesLog ERROR 'ConfigPath is outside TargetRoot; supply -RequiredArtifactPaths with its staged relative path.' -LogFile $LogFile
         Stop-Deploy $VES_EXIT_USAGE
     }
@@ -129,9 +130,9 @@ function Step($name, $code) {
         # Timeline event on stage failure. The gate self-reports its own block/override
         # events, so skip it here to avoid double-marking the same failure.
         if ($name -ne 'pre-deploy gate') {
-            Send-VesDatadogEvent -Title "Deploy FAILED at '$name': $Processor" `
-                -Text "Stage '$name' failed for $Processor $StagedCommit (exit $stageCode)." `
-                -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:deploy-failed')
+            # Send-VesDatadogEvent -Title "Deploy FAILED at '$name': $Processor" `
+            #     -Text "Stage '$name' failed for $Processor $StagedCommit (exit $stageCode)." `
+            #     -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:deploy-failed')
         }
         Stop-Deploy $stageCode
     }
@@ -207,20 +208,21 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 $targetPrefix = $targetItem.FullName.TrimEnd('\') + '\'
                 $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                     Where-Object { $_.ExecutablePath -and
-                                   $_.ExecutablePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) })
+                        $_.ExecutablePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) })
                 foreach ($p in $running) {
                     if ($KillProcesses) {
                         # audit line BEFORE the kill: which instance (mode arg visible in CommandLine)
                         Write-VesLog WARN ("Killing running instance PID {0}: {1}" -f $p.ProcessId, $p.CommandLine) `
-                            -Data @{processor=$Processor; pid=$p.ProcessId; commandLine=$p.CommandLine} -LogFile $LogFile
+                            -Data @{processor = $Processor; pid = $p.ProcessId; commandLine = $p.CommandLine } -LogFile $LogFile
                         try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop }
                         catch {
                             Write-VesLog ERROR "Could not kill PID $($p.ProcessId) -> $($_.Exception.Message)" -LogFile $LogFile
                             $stopFailed = $true
                         }
-                    } else {
+                    }
+                    else {
                         Write-VesLog ERROR ("Running instance holds {0}: PID {1} {2}. Re-run with -KillProcesses to stop it." -f `
-                            $TargetRoot, $p.ProcessId, $p.CommandLine) -LogFile $LogFile
+                                $TargetRoot, $p.ProcessId, $p.CommandLine) -LogFile $LogFile
                         $stopFailed = $true
                     }
                 }
@@ -354,7 +356,7 @@ if ($BackupRoot -and $KeepBackups -gt 0 -and (Test-Path -LiteralPath $BackupRoot
 Write-VesLog OK "DEPLOY COMPLETE: $Processor @ $StagedCommit verified+healthy" -LogFile $LogFile
 # Timeline event: the "authorized deploy" marker. Drift after this point is expected;
 # drift with no marker is the unauthorized-change picture the drift runner surfaces.
-Send-VesDatadogEvent -Title "Deploy COMPLETE: $Processor" `
-    -Text "Deploy of $Processor $StagedCommit completed: gate + copy + verify + health all green." `
-    -AlertType 'success' -Tags ($ddTags + 'event:deploy-complete')
+# Send-VesDatadogEvent -Title "Deploy COMPLETE: $Processor" `
+#     -Text "Deploy of $Processor $StagedCommit completed: gate + copy + verify + health all green." `
+#     -AlertType 'success' -Tags ($ddTags + 'event:deploy-complete')
 Stop-Deploy $VES_EXIT_OK

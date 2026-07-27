@@ -89,4 +89,4 @@ Register-ScheduledTask -TaskName $WatchdogTaskName -Action $watchdogAction -Trig
 Write-Host ("Registered '{0}': every {1} min as SYSTEM, targets={2}" -f $TaskName, $IntervalMinutes, $TargetsFile)
 Write-Host ("Registered '{0}': alerts when heartbeat exceeds {1} min, heartbeat={2}" -f `
     $WatchdogTaskName, $HeartbeatMaxAgeMinutes, $heartbeatPath)
-Write-Host "Point monitoring/log shipping at $LogDir; production watchdog failures emit Datadog error events and exit 2."
+Write-Host "Point monitoring/log shipping at $LogDir; production watchdog failures exit 2 (Datadog events are disabled this release)."
