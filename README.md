@@ -399,6 +399,17 @@ and fresh-log health probes; do not pass their binaries to
   with -StartTasksAfter after a clean copy. Without -KillProcesses a detected
   instance aborts the deploy before robocopy can fight a file lock. Pilot on
   the UAT egress box (VESMSEGRESSUAT) before any PROD use.
+- Per-server config is overwritten by the copy. `Deploy-Processor.ps1:252`
+  mirrors with `robocopy /MIR` and no `/XF`, so a config file living under
+  TargetRoot is replaced by the staged one, and files that exist only on that
+  server are deleted outright. On a server whose config legitimately differs
+  (endpoints, thumbprints), the deploy flattens it. Worse, the post-deploy check
+  still reports PASS: `.config` is excluded from the hash compare by design, and
+  the mirror makes everything else match the manifest, so nothing surfaces the
+  loss. The dated backup taken at `Deploy-Processor.ps1:171` is the only
+  recovery. Decide the fix before PROD: exclude configs from the mirror
+  (`/XF *.config`), or stage the per-server config alongside the artifact so the
+  mirrored copy is already correct.
 - SSM region. Examples default to us-gov-west-1, but the OMS SSM convention
   (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1. Set -Region per
   the confirmed parameter path before running config-verify/preflight for real.
@@ -406,6 +417,21 @@ and fresh-log health probes; do not pass their binaries to
   metrics, timeline events, and on-call alert routing are planned for the next
   release; until then set a durable central `VES_AUDIT_LOG_DIR` before
   production and review the drift log folder on a schedule.
+- `Verify-Config.ps1` has no exit code. It returns a result object (consumed by
+  `Invoke-Verification` as `$cfg.pass`) and never calls `exit`, so running it
+  **directly** returns 0 even when the check fails — a tester reading `$LASTEXITCODE`
+  sees a false pass. Verified: a config violating two `expectedValues` prints
+  `pass : False` and still exits 0, while the same inputs through
+  `Invoke-Verification -Mode VerifyConfig` correctly exit 1. Until this is
+  resolved, always route config checks through `Invoke-Verification`, and note
+  that the parameters are `-ConfigContract`/`-ConfigPath` there (not
+  `-ContractPath`). Fixing it means adding an exit without breaking the object
+  return the caller depends on — decide before the testing guide ships.
+- `Manifest written: <n> files` logs a blank count under Windows PowerShell 5.1
+  when the manifest holds a single file. `$manifest.Count` on an unrolled
+  `PSCustomObject` is empty on 5.1 (the production engine) but returns 1 on
+  PS7, so the audit log silently loses the count. Fix is `@($manifest).Count`
+  at `Invoke-Verification.ps1:122`.
 - Break-glass: the gate supports -AllowOverride with a mandatory reason and an
   audit line, but Deploy-Processor doesn't pass it. Decide hard-block vs
   audited override before prod.
