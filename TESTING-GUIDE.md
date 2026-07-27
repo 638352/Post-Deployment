@@ -13,12 +13,12 @@ workstation, CI runner, or test VM, not on a production application server.
 
 ## Safety levels
 
-| Level | Meaning | Examples |
-|---|---|---|
-| Read-only | Reads repository files or local system state | Syntax check, preflight, health check |
-| Local-write | Writes temporary files or test logs | Pester suite, local baseline smoke test |
-| Environment-write | Changes shared or host-level state | Baseline capture, scheduled-task installation |
-| Deployment | Stops workloads and changes deployed files | A real deploy or processor-wrapper run |
+| Level             | Meaning                                      | Examples                                      |
+| ----------------- | -------------------------------------------- | --------------------------------------------- |
+| Read-only         | Reads repository files or local system state | Syntax check, preflight, health check         |
+| Local-write       | Writes temporary files or test logs          | Pester suite, local baseline smoke test       |
+| Environment-write | Changes shared or host-level state           | Baseline capture, scheduled-task installation |
+| Deployment        | Stops workloads and changes deployed files   | A real deploy or processor-wrapper run        |
 
 The commands below launch entry scripts through a child `powershell.exe`
 process. Several scripts intentionally call `exit`; using a child process keeps
@@ -94,10 +94,14 @@ repository access. Follow local installation policy.
 ### Step 2. Run the complete test suite
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1
+powershell.exe -NoProfile -File .\Invoke-Tests.ps1
 $testExit = $LASTEXITCODE
 "TEST_EXIT=$testExit"
 ```
+
+Exception note: only add `-ExecutionPolicy Bypass` when your organization has
+explicitly approved a temporary unsigned-script execution-policy exception for
+this test host.
 
 Wait for the final Pester summary.
 
@@ -193,7 +197,7 @@ compatibility decision; the production contract is Windows PowerShell 5.1.
 ## Layer 3. Run the full regression suite
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1
+powershell.exe -NoProfile -File .\Invoke-Tests.ps1
 $fullSuiteExit = $LASTEXITCODE
 "FULL_SUITE_EXIT=$fullSuiteExit"
 ```
@@ -210,24 +214,24 @@ Use the repository runner so Pester selection and temporary audit-log handling
 remain consistent:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1 `
+powershell.exe -NoProfile -File .\Invoke-Tests.ps1 `
     -Path .\tests\Invoke-Verification.Tests.ps1
 "TARGET_EXIT=$LASTEXITCODE"
 ```
 
 Replace the path using this map:
 
-| Script or behavior | Targeted test file |
-|---|---|
-| `module\VesVerify.psm1` | `tests\VesVerify.Module.Tests.ps1` |
-| `Invoke-Verification.ps1` | `tests\Invoke-Verification.Tests.ps1` |
-| `Verify-Config.ps1` | `tests\Verify-Config.Tests.ps1` |
-| `Invoke-Preflight.ps1` | `tests\Invoke-Preflight.Tests.ps1` |
+| Script or behavior         | Targeted test file                     |
+| -------------------------- | -------------------------------------- |
+| `module\VesVerify.psm1`    | `tests\VesVerify.Module.Tests.ps1`     |
+| `Invoke-Verification.ps1`  | `tests\Invoke-Verification.Tests.ps1`  |
+| `Verify-Config.ps1`        | `tests\Verify-Config.Tests.ps1`        |
+| `Invoke-Preflight.ps1`     | `tests\Invoke-Preflight.Tests.ps1`     |
 | `Invoke-PreDeployGate.ps1` | `tests\Invoke-PreDeployGate.Tests.ps1` |
-| `Invoke-HealthCheck.ps1` | `tests\Invoke-HealthCheck.Tests.ps1` |
-| `Deploy-Processor.ps1` | `tests\Deploy-Processor.Tests.ps1` |
-| `Start-DriftRunner.ps1` | `tests\Start-DriftRunner.Tests.ps1` |
-| `Test-DriftHeartbeat.ps1` | `tests\Test-DriftHeartbeat.Tests.ps1` |
+| `Invoke-HealthCheck.ps1`   | `tests\Invoke-HealthCheck.Tests.ps1`   |
+| `Deploy-Processor.ps1`     | `tests\Deploy-Processor.Tests.ps1`     |
+| `Start-DriftRunner.ps1`    | `tests\Start-DriftRunner.Tests.ps1`    |
+| `Test-DriftHeartbeat.ps1`  | `tests\Test-DriftHeartbeat.Tests.ps1`  |
 
 After investigating a targeted failure, rerun Layer 3.
 
@@ -256,7 +260,7 @@ Set-Content -LiteralPath (Join-Path $release 'app.txt') `
 ### Step 2. Capture a local-only baseline
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Invoke-Verification.ps1 `
     -Mode Capture `
     -ReleaseRoot $release `
@@ -276,7 +280,7 @@ exceptions. Never use them for an approved release.
 ### Step 3. Verify an unchanged tree
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Invoke-Verification.ps1 `
     -Mode VerifyFiles `
     -ReleaseRoot $release `
@@ -296,7 +300,7 @@ Expected: `MATCH_EXIT=0`.
 Set-Content -LiteralPath (Join-Path $release 'app.txt') `
     -Value 'changed-content' -NoNewline
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Invoke-Verification.ps1 `
     -Mode VerifyFiles `
     -ReleaseRoot $release `
@@ -318,7 +322,7 @@ Set-Content -LiteralPath (Join-Path $release 'app.txt') `
 ### Step 5. Test config verification with repository fixtures
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Invoke-Verification.ps1 `
     -Mode VerifyConfig `
     -ConfigContract .\tests\fixtures\appconfig\contract.json `
@@ -336,7 +340,7 @@ the wrapper is used here because it also applies the exit-code contract.
 ### Step 6. Test a local preflight
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Invoke-Preflight.ps1 `
     -Processor smoke `
     -ManifestPath $manifest `
@@ -356,7 +360,7 @@ not SSM authorization.
 Set-Content -LiteralPath (Join-Path $healthLogs 'processor.log') `
     -Value 'processor started'
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Invoke-HealthCheck.ps1 `
     -FreshLogDir $healthLogs `
     -FreshLogMaxAgeMinutes 5 `
@@ -370,7 +374,7 @@ $healthExit = $LASTEXITCODE
 Expected: `HEALTH_EXIT=0`. Also prove a no-probe check fails closed:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Invoke-HealthCheck.ps1 -Processor smoke -Json
 "NO_PROBE_EXIT=$LASTEXITCODE"
 ```
@@ -389,7 +393,7 @@ $heartbeat = Join-Path $smokeRoot 'ves-verify-drift.heartbeat.json'
     exitCode     = 0
 } | ConvertTo-Json | Set-Content -LiteralPath $heartbeat -Encoding UTF8
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Test-DriftHeartbeat.ps1 `
     -HeartbeatPath $heartbeat `
     -MaxAgeMinutes 5 `
@@ -405,7 +409,7 @@ Expected: `WATCHDOG_EXIT=0`.
 The checked-in `targets.json` is intentionally incomplete:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Start-DriftRunner.ps1 `
     -TargetsFile .\targets.json `
     -LogDir $runLogs `
@@ -433,21 +437,21 @@ Remove-Item -LiteralPath $smokeRoot -Recurse -Force
 
 ## Layer 6. Confirm every entry script was covered
 
-| File | Minimum check | Live integration needed? |
-|---|---|---|
-| `Invoke-Tests.ps1` | Full suite reaches summary and returns failed count | No |
-| `module\VesVerify.psm1` | Module Pester suite | Yes, for real AWS trust operations |
-| `Invoke-Verification.ps1` | Pester plus local capture/match/drift/config | Yes, for SSM pinning and Git archival |
-| `Verify-Config.ps1` | Config tests for all three formats | Yes, for SSM-backed values |
-| `Invoke-Preflight.ps1` | Pester plus local manifest/contract check | Yes, for AWS/KMS/path/region |
-| `Invoke-PreDeployGate.ps1` | Gate Pester suite | Yes, for real SSM parameters |
-| `Invoke-HealthCheck.ps1` | Pester plus local fresh-log check | Yes, for host probes |
-| `Deploy-Processor.ps1` | Deploy Pester suite, including `-WhatIf` and locks | Yes, first in QA/UAT |
-| `processors\Deploy-SYSTEM_NAME.ps1` | Parse and manual placeholder review | Never execute; it is a template |
-| `processors\Deploy-OutboundDBQ-uat.ps1` | Parse and runbook review | Yes, UAT after guarded values are confirmed |
-| `Start-DriftRunner.ps1` | Pester plus incomplete-inventory negative test | Yes, with reviewed inventory |
-| `Test-DriftHeartbeat.ps1` | Pester plus fresh-heartbeat check | Yes, after a real run |
-| `Install-DriftTask.ps1` | Windows PowerShell 5.1 parse | Yes, on elevated test VM |
+| File                                    | Minimum check                                       | Live integration needed?                    |
+| --------------------------------------- | --------------------------------------------------- | ------------------------------------------- |
+| `Invoke-Tests.ps1`                      | Full suite reaches summary and returns failed count | No                                          |
+| `module\VesVerify.psm1`                 | Module Pester suite                                 | Yes, for real AWS trust operations          |
+| `Invoke-Verification.ps1`               | Pester plus local capture/match/drift/config        | Yes, for SSM pinning and Git archival       |
+| `Verify-Config.ps1`                     | Config tests for all three formats                  | Yes, for SSM-backed values                  |
+| `Invoke-Preflight.ps1`                  | Pester plus local manifest/contract check           | Yes, for AWS/KMS/path/region                |
+| `Invoke-PreDeployGate.ps1`              | Gate Pester suite                                   | Yes, for real SSM parameters                |
+| `Invoke-HealthCheck.ps1`                | Pester plus local fresh-log check                   | Yes, for host probes                        |
+| `Deploy-Processor.ps1`                  | Deploy Pester suite, including `-WhatIf` and locks  | Yes, first in QA/UAT                        |
+| `processors\Deploy-SYSTEM_NAME.ps1`     | Parse and manual placeholder review                 | Never execute; it is a template             |
+| `processors\Deploy-OutboundDBQ-uat.ps1` | Parse and runbook review                            | Yes, UAT after guarded values are confirmed |
+| `Start-DriftRunner.ps1`                 | Pester plus incomplete-inventory negative test      | Yes, with reviewed inventory                |
+| `Test-DriftHeartbeat.ps1`               | Pester plus fresh-heartbeat check                   | Yes, after a real run                       |
+| `Install-DriftTask.ps1`                 | Windows PowerShell 5.1 parse                        | Yes, on elevated test VM                    |
 
 `Install-DriftTask.ps1` has no dedicated Pester test. Do not describe task
 registration as validated until the controlled host test below is complete.
@@ -503,7 +507,7 @@ $env:VES_AUDIT_LOG_DIR = 'D:\approved-test-log-location'
 Preflight is read-only apart from its log:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Invoke-Preflight.ps1 `
     -Processor '<processor>' `
     -ApprovedCommitParam '/ves/<processor>/approved-commit' `
@@ -525,7 +529,7 @@ continue to deployment.
 This reads SSM and staged files and writes an audit log. It does not copy:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Invoke-PreDeployGate.ps1 `
     -StagedRoot 'D:\stage\<processor>' `
     -StagedCommit '<approved-release-id>' `
@@ -555,7 +559,7 @@ Prefer a reviewed wrapper over a long direct `Deploy-Processor.ps1` command.
 For the checked-in UAT DBQ wrapper:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\processors\Deploy-OutboundDBQ-uat.ps1 `
     -StagedRoot 'D:\stage\OutboundDBQ' `
     -StagedCommit '<approved-release-id>' `
@@ -581,7 +585,7 @@ A health run with no configured probe must return exit `10`. For an outbound
 scheduled-task processor, use its exact target folder and mode:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Invoke-HealthCheck.ps1 `
     -ScheduledTasks '<confirmed-task-name>' `
     -ProcessPathRoot 'C:\confirmed\processor\folder' `
@@ -626,7 +630,7 @@ the missing server/Citrix details. Use a separately reviewed QA/UAT inventory.
 For the first integration run, disable pruning:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Start-DriftRunner.ps1 `
     -TargetsFile 'D:\ves-verify\targets.qa.json' `
     -LogDir $env:VES_AUDIT_LOG_DIR `
@@ -644,7 +648,7 @@ established.
 Test the resulting heartbeat:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Test-DriftHeartbeat.ps1 `
     -HeartbeatPath (Join-Path $env:VES_AUDIT_LOG_DIR 'ves-verify-drift.heartbeat.json') `
     -MaxAgeMinutes 75 `
@@ -661,7 +665,7 @@ not perform the first test on a shared or production host.
 From an elevated Windows PowerShell window:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Install-DriftTask.ps1 `
     -TargetsFile 'D:\ves-verify\targets.qa.json' `
     -IntervalMinutes 30 `
@@ -686,7 +690,7 @@ the tasks run, verify last-run results, JSONL logs, and heartbeat.
 To remove only the test tasks after the test-VM exercise:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile `
     -File .\Install-DriftTask.ps1 `
     -TaskName 'ves-verify-drift-test' `
     -WatchdogTaskName 'ves-verify-drift-watchdog-test' `
@@ -700,13 +704,13 @@ cleanup command unless removal is explicitly authorized.
 
 ## Exit-code reference
 
-| Exit | Meaning |
-|---:|---|
-| `0` | Pass |
-| `1` | File/config drift or deployment gate block |
-| `2` | Missing/untrusted baseline, incomplete inventory, SSM/trust failure, or runtime error |
-| `3` | Health failure |
-| `10` | Usage error or unsafe configuration |
+| Exit | Meaning                                                                               |
+| ---: | ------------------------------------------------------------------------------------- |
+|  `0` | Pass                                                                                  |
+|  `1` | File/config drift or deployment gate block                                            |
+|  `2` | Missing/untrusted baseline, incomplete inventory, SSM/trust failure, or runtime error |
+|  `3` | Health failure                                                                        |
+| `10` | Usage error or unsafe configuration                                                   |
 
 Special cases:
 
