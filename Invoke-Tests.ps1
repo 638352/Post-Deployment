@@ -1,7 +1,8 @@
 #Requires -Version 5.1
 <#
 .DESCRIPTION
-    Needs Pester 5.x; the in-box Pester 3.4 won't parse the tests. Install once:
+    Needs Pester 5.0 or later (5.x and 6.x both work); the in-box Pester 3.4
+    won't parse the tests. Install once:
         Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
     Run under Windows PowerShell 5.1 so the tests use the same engine as prod:
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1
@@ -24,7 +25,7 @@ $p5 = Get-Module -ListAvailable Pester |
     Sort-Object Version -Descending | Select-Object -First 1
 
 if (-not $p5) {
-    Write-Host 'Pester 5.x not found. Install it with:' -ForegroundColor Red
+    Write-Host 'Pester 5.0+ not found. Install it with:' -ForegroundColor Red
     Write-Host '  Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck'
     exit 2
 }

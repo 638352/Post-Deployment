@@ -11,6 +11,24 @@ two paths:
 The scripts target Windows PowerShell 5.1. Run development tests on a
 workstation, CI runner, or test VM, not on a production application server.
 
+## Last verified
+
+A point-in-time record of the last full local validation. It does not replace
+running the layers yourself; re-verify for the commit you are testing.
+
+| Item                  | Result                                              |
+| --------------------- | --------------------------------------------------- |
+| Commit                | `abec439`                                           |
+| Windows PowerShell    | 5.1.26100.8894                                      |
+| Pester                | 6.0.1                                               |
+| Layer 1-2 parse       | 23 files, `PARSE_ERRORS=0`                          |
+| Layer 3 full suite    | 100 passed, 0 failed, exit `0`                      |
+| Layer 5 smoke tests   | all 10 steps returned their expected exit codes     |
+| PSScriptAnalyzer      | not installed; static analysis not run              |
+
+Live AWS, service, task, and deployment dependencies were not exercised. See
+"Known limits of local automation".
+
 ## Safety levels
 
 | Level             | Meaning                                      | Examples                                      |
@@ -80,8 +98,9 @@ Get-Module -ListAvailable Pester |
     Select-Object -First 1 Name, Version
 ```
 
-If a Pester version is displayed, continue. If nothing is displayed, ask a
-technical administrator to install it. If authorized, use the documented
+If a Pester version is displayed, continue. Both Pester 5.x and 6.x are
+supported; do not downgrade a working 6.x installation. If nothing is displayed,
+ask a technical administrator to install it. If authorized, use the documented
 one-time command:
 
 ```powershell
@@ -737,7 +756,7 @@ only toolkit signals, so an operator or external log monitor must observe them.
 
 ## Troubleshooting
 
-### `Pester 5.x not found`
+### `Pester 5.0+ not found`
 
 Install an approved Pester version of at least 5.0, or use the maintained test
 workstation/CI runner. The repository installation example uses 5.5.0.

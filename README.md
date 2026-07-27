@@ -381,8 +381,8 @@ For step-by-step instructions by audience, see [TESTING-GUIDE.md](TESTING-GUIDE.
 
 There is a Pester test suite under `tests/`. It is **dev-time only** — run it on
 the workstation/CI where this suite is maintained, NOT on the legacy PS 5.1
-production boxes. It needs Pester 5.x (the in-box Pester 3.4 will not parse the
-tests); install it once:
+production boxes. It needs Pester 5.0 or later — 5.x and 6.x are both supported
+(the in-box Pester 3.4 will not parse the tests); install it once:
 
 ```powershell
 Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
@@ -440,7 +440,7 @@ workflow you are about to run.
 
 ### Testing and review
 
-- [ ] Install Pester 5.x if you plan to run `Invoke-Tests.ps1`.
+- [ ] Install Pester 5.0 or later if you plan to run `Invoke-Tests.ps1`.
 - [ ] Use `Invoke-Tests.ps1` from the repository root so the Pester suite matches the repo layout.
 
 ### Capture and preflight
