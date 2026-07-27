@@ -27,7 +27,7 @@ sample.config.json           example config contract
 SERVERS.md                   authoritative server + processor path map
 Invoke-Tests.ps1             dev-time Pester runner (see Testing)
 tests/                       Pester test suite + fixtures
-TESTING.md                   step-by-step testing guide (non-technical + technical)
+TESTING-GUIDE.md             step-by-step testing guide (non-technical + technical)
 ```
 
 ## Where this runs (OMS)
