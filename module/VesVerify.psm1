@@ -3,8 +3,8 @@
 .SYNOPSIS
     Shared functions for VES Post-Deployment Verification.
 .DESCRIPTION
-    Manifest capture/compare, manifest trust (SSM-anchored hash), Datadog emit
-    (ddog-gov), and structured logging. Imported by all entry-point scripts.
+    Manifest capture/compare, manifest trust (SSM-anchored hash), and
+    structured logging. Imported by all entry-point scripts.
     Target: Windows PowerShell 5.1. No PowerShell 7+ syntax.
 #>
 
@@ -19,11 +19,11 @@ Set-StrictMode -Version 2.0
 # 10 USAGE / parameter error
 
 # Global scope so entry scripts that import this module can reference the constants directly.
-$Global:VES_EXIT_OK        = 0      # Success / production matches baseline.
-$Global:VES_EXIT_DRIFT     = 1      # Divergence detected between prod and baseline.
-$Global:VES_EXIT_NOBASE    = 2      # Baseline missing, unreadable, or failed trust check.
-$Global:VES_EXIT_HEALTH    = 3      # Functional health failure (independent of baseline).
-$Global:VES_EXIT_USAGE     = 10     # Caller passed bad/missing parameters.
+$Global:VES_EXIT_OK = 0      # Success / production matches baseline.
+$Global:VES_EXIT_DRIFT = 1      # Divergence detected between prod and baseline.
+$Global:VES_EXIT_NOBASE = 2      # Baseline missing, unreadable, or failed trust check.
+$Global:VES_EXIT_HEALTH = 3      # Functional health failure (independent of baseline).
+$Global:VES_EXIT_USAGE = 10     # Caller passed bad/missing parameters.
 
 # --- Default manifest exclude pattern (single source of truth) ---------------
 # Capture and compare MUST use the same rules: if they disagree, files excluded at
@@ -42,7 +42,7 @@ $Global:VES_EXIT_USAGE     = 10     # Caller passed bad/missing parameters.
 #                                     Verify-Config.ps1, not by byte-hash.
 $Global:VES_DEFAULT_EXCLUDE = '(?i)(^|\\)(logs|temp|cache|\.git)\\|\.(log|tmp|config)$'
 
-# PowerShell 5.1 defaults to SSL3/TLS1.0, which ddog-gov and AWS endpoints reject.
+# PowerShell 5.1 defaults to SSL3/TLS1.0, which AWS endpoints reject.
 # OR the existing protocol set with Tls12 (rather than replacing) so we add, not remove, protocols.
 [Net.ServicePointManager]::SecurityProtocol = `
     [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -54,7 +54,7 @@ function Write-VesLog {
     [CmdletBinding()]
     param(
         # Severity level; constrained set keeps downstream log parsing predictable.
-        [Parameter(Mandatory)][ValidateSet('INFO','WARN','ERROR','OK','DRIFT')][string]$Level,
+        [Parameter(Mandatory)][ValidateSet('INFO', 'WARN', 'ERROR', 'OK', 'DRIFT')][string]$Level,
         # Human-readable message for both console and JSON record.
         [Parameter(Mandatory)][string]$Message,
         # Optional structured fields merged into the JSON record (e.g. processor, commit).
@@ -70,7 +70,7 @@ function Write-VesLog {
     if ($Data) { foreach ($k in $Data.Keys) { $record[$k] = $Data[$k] } }
 
     # Map each level to a console color so operators can scan output visually.
-    $color = @{ INFO='Gray'; OK='Green'; WARN='Yellow'; ERROR='Red'; DRIFT='Magenta' }[$Level]
+    $color = @{ INFO = 'Gray'; OK = 'Green'; WARN = 'Yellow'; ERROR = 'Red'; DRIFT = 'Magenta' }[$Level]
     # Console line: fixed-width level column keeps multi-line output aligned.
     Write-Host ("[{0}] {1,-5} {2}" -f $ts, $Level, $Message) -ForegroundColor $color
 
@@ -123,7 +123,7 @@ function Get-VesManifest {
         # Skip anything matching the exclude regex (checked before hashing to save I/O).
         if ($rel -match $ExcludePattern) { continue }
         # Normalize separators to '/' so manifests hash identically regardless of tooling.
-        $relNorm = $rel -replace '\\','/'
+        $relNorm = $rel -replace '\\', '/'
         # SHA-256 of file contents -- the core drift-detection primitive.
         $hash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
         # Record path, hash, and size; size is a cheap secondary sanity signal.
@@ -131,7 +131,7 @@ function Get-VesManifest {
     }
     # Sort for deterministic order (required for a stable manifest hash); leading comma
     # prevents PowerShell from unrolling a single-element result into a scalar.
-    return ,($out | Sort-Object RelPath)
+    return , ($out | Sort-Object RelPath)
 }
 
 function Get-VesManifestHash {
@@ -159,7 +159,7 @@ function Get-VesManifestHash {
     # Create the SHA-256 provider (disposed below -- it holds native crypto handles).
     $sha = [Security.Cryptography.SHA256]::Create()
     # Hash the canonical bytes and render each byte as lowercase hex, joined into one string.
-    try   { return -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) }
+    try { return -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) }
     # Always release the crypto provider even if hashing throws.
     finally { $sha.Dispose() }
 }
@@ -244,11 +244,11 @@ function Compare-VesFiles {
     # Index baseline by relative path for O(1) lookups.
     $baseMap = @{}; foreach ($b in $Baseline) { $baseMap[$b.RelPath] = $b }
     # Index live tree the same way.
-    $liveMap = @{}; foreach ($l in $live)     { $liveMap[$l.RelPath] = $l }
+    $liveMap = @{}; foreach ($l in $live) { $liveMap[$l.RelPath] = $l }
 
     $missing = New-Object System.Collections.Generic.List[string]  # In baseline, absent in prod (the Storage.Net case).
     $changed = New-Object System.Collections.Generic.List[object]  # Present in both but hash differs.
-    $extra   = New-Object System.Collections.Generic.List[string]  # In prod, not in baseline (unauthorized addition).
+    $extra = New-Object System.Collections.Generic.List[string]  # In prod, not in baseline (unauthorized addition).
 
     # Pass 1: everything the baseline says must exist.
     foreach ($rel in $baseMap.Keys) {
@@ -257,7 +257,7 @@ function Compare-VesFiles {
         # File exists in both -> compare content hashes.
         if ($liveMap[$rel].Sha256 -ne $baseMap[$rel].Sha256) {
             # Record both hashes so the operator can see expected vs actual.
-            $changed.Add([PSCustomObject]@{ RelPath=$rel; Expected=$baseMap[$rel].Sha256; Actual=$liveMap[$rel].Sha256 })
+            $changed.Add([PSCustomObject]@{ RelPath = $rel; Expected = $baseMap[$rel].Sha256; Actual = $liveMap[$rel].Sha256 })
         }
     }
     # Pass 2: anything in prod the baseline never declared -> extra.
@@ -306,22 +306,23 @@ function Invoke-VesAwsCli {
     # Missing CLI is a clean non-zero result, not a CommandNotFoundException that
     # would blow past the caller's error handling.
     if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
-        return [PSCustomObject]@{ StdOut=''; StdErr='AWS CLI not found on PATH'; ExitCode=127 }
+        return [PSCustomObject]@{ StdOut = ''; StdErr = 'AWS CLI not found on PATH'; ExitCode = 127 }
     }
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $out  = & aws @Arguments 2>&1
+        $out = & aws @Arguments 2>&1
         $code = $LASTEXITCODE
-    } finally {
+    }
+    finally {
         # Restore even if the call blows up, so we never leak 'Continue' to the caller.
         $ErrorActionPreference = $prev
     }
     # Split the merged stream: ErrorRecords came from stderr, everything else is stdout.
     $stdout = @($out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
-    $stderr = @($out | Where-Object { $_ -is  [System.Management.Automation.ErrorRecord] } |
-                       ForEach-Object { $_.ToString() }) -join ' '
-    return [PSCustomObject]@{ StdOut=$stdout; StdErr=$stderr; ExitCode=$code }
+    $stderr = @($out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
+        ForEach-Object { $_.ToString() }) -join ' '
+    return [PSCustomObject]@{ StdOut = $stdout; StdErr = $stderr; ExitCode = $code }
 }
 
 function Get-VesTrustedHash {
@@ -335,8 +336,8 @@ function Get-VesTrustedHash {
     # Call the AWS CLI directly (no AWSPowerShell module dependency on legacy hosts).
     # --with-decryption handles SecureString; failure detected via exit code.
     $r = Invoke-VesAwsCli -Arguments @(
-        'ssm','get-parameter','--name',$ParameterName,'--with-decryption',
-        '--region',$Region,'--query','Parameter.Value','--output','text')
+        'ssm', 'get-parameter', '--name', $ParameterName, '--with-decryption',
+        '--region', $Region, '--query', 'Parameter.Value', '--output', 'text')
     # Treat CLI failure OR empty value as a trust failure -- never proceed on a blank anchor.
     if ($r.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($r.StdOut)) {
         throw ("SSM read failed for $ParameterName (region $Region). aws exit=$($r.ExitCode). $($r.StdErr)").Trim()
@@ -357,113 +358,19 @@ function Set-VesTrustedHash {
     )
     # SecureString type gates reads behind kms:Decrypt; --overwrite allows re-pinning on each release.
     $r = Invoke-VesAwsCli -Arguments @(
-        'ssm','put-parameter','--name',$ParameterName,'--value',$Value,
-        '--type','SecureString','--overwrite','--region',$Region)
+        'ssm', 'put-parameter', '--name', $ParameterName, '--value', $Value,
+        '--type', 'SecureString', '--overwrite', '--region', $Region)
     # Surface CLI failure as a hard error -- an unpinned baseline must not look like success.
     if ($r.ExitCode -ne 0) {
         throw ("SSM write failed for $ParameterName. aws exit=$($r.ExitCode). $($r.StdErr)").Trim()
     }
 }
 
-# --- Datadog (ddog-gov) -------------------------------------------------------
-function Send-VesDatadogMetric {
-    <#
-    .SYNOPSIS DogStatsD gauge via local agent UDP:8125. Non-fatal on failure.
-    .NOTES Emit counts per host/processor -- never per-file tags (cardinality).
-    #>
-    [CmdletBinding()]
-    param(
-        # Metric name, e.g. deployment.verify.mismatch.
-        [Parameter(Mandatory)][string]$Metric,
-        # Gauge value to report.
-        [Parameter(Mandatory)][double]$Value,
-        # Tags such as processor:/env:/version: -- keep cardinality low.
-        [string[]]$Tags = @(),
-        # Local Datadog agent address (DogStatsD listener).
-        [string]$AgentHost = '127.0.0.1',
-        # DogStatsD UDP port.
-        [int]$Port = 8125
-    )
-    # Monitoring must never break verification -- all failures here are warnings only.
-    $udp = $null
-    try {
-        # Drop blank tags so the wire payload never contains empty tag values.
-        $cleanTags = @($Tags | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
-        # Build the tag suffix only when tags exist ('|#tag1,tag2' per DogStatsD wire format).
-        $tagStr = if ($cleanTags.Count) { '|#' + ($cleanTags -join ',') } else { '' }
-        # Format numeric values with invariant culture so decimal separators stay DogStatsD-safe.
-        $valueText = [System.Convert]::ToString($Value, [System.Globalization.CultureInfo]::InvariantCulture)
-        # DogStatsD gauge wire format: name:value|g|#tags.
-        $payload = "{0}:{1}|g{2}" -f $Metric, $valueText, $tagStr
-        # Open a UDP client aimed at the local agent.
-        $udp = New-Object System.Net.Sockets.UdpClient
-        $udp.Connect($AgentHost, $Port)
-        # DogStatsD is ASCII on the wire.
-        $bytes = [Text.Encoding]::ASCII.GetBytes($payload)
-        # Fire-and-forget send; [void] discards the byte count return value.
-        [void]$udp.Send($bytes, $bytes.Length)
-    } catch {
-        # Log and continue -- a down agent must not fail the verify run.
-        Write-Warning "Datadog metric emit failed (non-fatal): $($_.Exception.Message)"
-    } finally {
-        # Always release the UDP socket, including exception paths.
-        if ($udp) { $udp.Close() }
-    }
-}
-
-function Get-VesDatadogEnvTag {
-    <#
-    .SYNOPSIS Returns the Datadog env tag, defaulting to env:prod.
-    #>
-    [CmdletBinding()]
-    param()
-    # Prefer DD_ENV (Datadog standard). Fall back to prod for stable dashboards.
-    $envTagValue = if ([string]::IsNullOrWhiteSpace($env:DD_ENV)) { 'prod' } else { $env:DD_ENV.Trim().ToLowerInvariant() }
-    return "env:$envTagValue"
-}
-
-function Send-VesDatadogEvent {
-    <#
-    .SYNOPSIS Post a deploy/verify event to the ddog-gov Events API. Non-fatal.
-    #>
-    [CmdletBinding()]
-    param(
-        # Event title shown in the Datadog event stream.
-        [Parameter(Mandatory)][string]$Title,
-        # Event body text.
-        [Parameter(Mandatory)][string]$Text,
-        # Tags for filtering/overlaying on dashboards.
-        [string[]]$Tags = @(),
-        # Datadog alert type controls event color/severity.
-        [ValidateSet('info','success','warning','error')][string]$AlertType = 'info',
-        # API key from environment by default -- never hardcoded, never committed.
-        [string]$ApiKey = $env:DD_API_KEY,
-        # GovCloud Datadog site.
-        [string]$Site = 'ddog-gov.com'
-    )
-    # No key -> skip quietly with a warning; events are best-effort telemetry.
-    if ([string]::IsNullOrWhiteSpace($ApiKey)) {
-        Write-Warning 'DD_API_KEY not set; skipping Datadog event.'
-        return
-    }
-    # Same non-fatal posture as metrics.
-    try {
-        # Drop blank tags so event metadata is deterministic and easy to filter.
-        $cleanTags = @($Tags | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
-        # Assemble the Events API payload.
-        $body = @{ title=$Title; text=$Text; tags=$cleanTags; alert_type=$AlertType } | ConvertTo-Json -Depth 4
-        # Events API v1 endpoint on the GovCloud site; key passed as query param per API contract.
-        $uri  = "https://api.$Site/api/v1/events?api_key=$([Uri]::EscapeDataString($ApiKey))"
-        # POST and discard the response body -- only success/failure matters here.
-        Invoke-RestMethod -Uri $uri -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 10 | Out-Null
-    } catch {
-        # Log and continue -- Datadog outage must not block a deploy or verify.
-        Write-Warning "Datadog event emit failed (non-fatal): $($_.Exception.Message)"
-    }
-}
+# Datadog capability is retired for this release.
+# Datadog emit helpers were removed from this module intentionally.
 
 # Export only the public surface; anything not listed stays module-private.
 Export-ModuleMember -Function `
     Write-VesLog, Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
     Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash, `
-    Invoke-VesAwsCli, Send-VesDatadogMetric, Send-VesDatadogEvent, Get-VesDatadogEnvTag
+    Invoke-VesAwsCli

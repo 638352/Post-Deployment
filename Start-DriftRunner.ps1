@@ -81,25 +81,20 @@ foreach ($t in $targets) {
     }
 }
 
-# --- Datadog: scheduled drift-run summary (non-fatal) -----------------------
-# Per-target verify gauges already come from Invoke-Verification; here we emit
-# the run-level rollup so a scheduled drift sweep is visible/alertable on its own.
-# Tags stay low-cardinality: no per-target tags on the run rollup.
-$ddTags = @((Get-VesDatadogEnvTag), 'check:drift')
-Send-VesDatadogMetric -Metric 'deployment.drift.run.targets'   -Value $targetCount            -Tags $ddTags
-Send-VesDatadogMetric -Metric 'deployment.drift.run.drift'     -Value $driftedNames.Count     -Tags $ddTags
-Send-VesDatadogMetric -Metric 'deployment.drift.run.trustfail' -Value $trustFailNames.Count   -Tags $ddTags
-
-# Only raise an event when something needs attention -- a clean scheduled sweep
-# runs often and shouldn't spam the event stream. Trust failure outranks drift.
-if ($trustFailNames.Count -or $driftedNames.Count) {
-    $alertType = if ($trustFailNames.Count) { 'error' } else { 'warning' }
-    $lines = @()
-    if ($trustFailNames.Count) { $lines += "Trust failures: $($trustFailNames -join ', ')" }
-    if ($driftedNames.Count)   { $lines += "Drift: $($driftedNames -join ', ')" }
-    Send-VesDatadogEvent -Title "Drift sweep flagged $($trustFailNames.Count + $driftedNames.Count)/$targetCount target(s)" `
-        -Text ($lines -join "`n") -AlertType $alertType -Tags $ddTags
-}
+# --- Datadog emit disabled in this snapshot copy -----------------------------
+# The original run-summary metrics and event block are intentionally commented out.
+# $ddTags = @((Get-VesDatadogEnvTag), 'check:drift')
+# Send-VesDatadogMetric -Metric 'deployment.drift.run.targets'   -Value $targetCount            -Tags $ddTags
+# Send-VesDatadogMetric -Metric 'deployment.drift.run.drift'     -Value $driftedNames.Count     -Tags $ddTags
+# Send-VesDatadogMetric -Metric 'deployment.drift.run.trustfail' -Value $trustFailNames.Count   -Tags $ddTags
+# if ($trustFailNames.Count -or $driftedNames.Count) {
+#     $alertType = if ($trustFailNames.Count) { 'error' } else { 'warning' }
+#     $lines = @()
+#     if ($trustFailNames.Count) { $lines += "Trust failures: $($trustFailNames -join ', ')" }
+#     if ($driftedNames.Count)   { $lines += "Drift: $($driftedNames -join ', ')" }
+#     Send-VesDatadogEvent -Title "Drift sweep flagged $($trustFailNames.Count + $driftedNames.Count)/$targetCount target(s)" `
+#         -Text ($lines -join "`n") -AlertType $alertType -Tags $ddTags
+# }
 
 # log cleanup: this pass just wrote fresh logs, now drop the stale ones.
 #

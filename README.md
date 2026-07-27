@@ -95,8 +95,9 @@ point. An archive failure fails the capture — re-run it.
 
 Preflight before a deploy (read-only; touches no prod or staged files). Confirms
 the AWS CLI is present, the SSM parameters actually read back (auth + KMS decrypt
-+ correct path/region), and the baseline manifest is intact and trust-anchored.
-Exit 0 = ready, 2 = not ready:
+
+- correct path/region), and the baseline manifest is intact and trust-anchored.
+  Exit 0 = ready, 2 = not ready:
 
 ```powershell
 .\Invoke-Preflight.ps1 -Processor <system> `
@@ -157,7 +158,7 @@ application.properties file is keyvalue). Keys listed under `sensitiveKeys`
 reported as `(masked)` on mismatch, so a secret never lands in a log or
 report — list any secret-bearing key there rather than relying on convention.
 
-Config files (*.config) are excluded from the file-hash compare on purpose: the
+Config files (\*.config) are excluded from the file-hash compare on purpose: the
 legacy App.config carries server-specific log4net paths that differ every
 UAT->PROD, so config is checked by contract (Verify-Config), not by hash. The
 runtime dirs `logs\`, `temp\`, `cache\` and `.git\` are excluded too, at the root
@@ -197,18 +198,6 @@ per target per run under its -LogDir. Point whatever monitoring you run at those
 logs (a `"level":"DRIFT"` or `"ERROR"` line = drift/trust failure) and at the
 scheduled task's Last Run Result; a missing/stale run log means the task died.
 
-Datadog hooks in the gate/deploy/health paths are best-effort and never block
-deploy/verify outcomes. Two independent transports with different prerequisites:
-- **Events** (deploy/gate markers) POST to the ddog-gov Events API and need
-  `DD_API_KEY` set; without it they are skipped with a warning.
-- **Metrics** (verify/health gauges) are DogStatsD packets to a *local* Datadog
-  Agent on `127.0.0.1:8125`. On any box without a running agent they are silently
-  dropped — the primary check still runs, but nothing reaches the dashboard.
-  `Invoke-Preflight -CheckDatadog` reports whether the `datadogagent` service and
-  `DD_API_KEY` are in place.
-
-`DD_ENV` (defaults to `prod`) controls the `env:` tag on both metrics and events.
-
 ## Brief conformance
 
 Deltas between this suite and the leadership brief (Post-Deployment
@@ -220,19 +209,15 @@ statement of what is already running:
   wrappers pass it automatically), e.g. "Deployment blocked:
   bin/Storage.Net.dll is missing from the artifact".
 - **Console-EXE stop mechanism** (closed, pilot pending): `Deploy-Processor
-  -KillProcesses` stops the running instance whose exe lives under TargetRoot
+-KillProcesses` stops the running instance whose exe lives under TargetRoot
   (audited by PID + command line), and `-StartTasksAfter` relaunches it via
   its scheduled task after a clean copy. Pilot on the UAT egress box before
   any PROD use.
 - **Release record under a Git tag** (closed): `Invoke-Verification -Mode
-  Capture -ArchiveRepo <checkout> -ReleaseTag <system>/vX.Y.Z` commits the
+Capture -ArchiveRepo <checkout> -ReleaseTag <system>/vX.Y.Z` commits the
   manifest + sanitized contract under `baselines/<processor>/` and tags the
-  commit. What still needs a decision is the *upstream* system of record —
+  commit. What still needs a decision is the _upstream_ system of record —
   see "Baseline system of record" below.
-- **Paging is not built in**: the brief's "prod mismatch pages on call" and
-  "missed runs raise their own alert" require monitors on the Datadog metrics
-  (or another sink) that are NOT defined in this repo. Until those exist, the
-  signal is exit codes + JSONL logs + Task Scheduler Last Run Result only.
 - **Log retention**: drift-runner logs are host-local, pruned after
   `-LogRetentionDays` (365 default, sized for the ATO audit-trail claim;
   deploy audit logs are never pruned). Central shipping is still a
@@ -259,7 +244,7 @@ PowerBuilder or native, that check needs a LoadLibrary variant.
   works: the gate compares strings, it does not require a real Git SHA).
 - In-scope system list is unconfirmed. Documented outbound processors:
   VES.OutboundDBQProcessor.exe / VES.OutboundProcessor.exe, Task Scheduler jobs
-  VLER_EM_Outbound_Request_Handler / _Processor (and _2 / _12 variants) and
+  VLER_EM_Outbound_Request_Handler / \_Processor (and \_2 / \_12 variants) and
   VLER_EM_Real_Time_Outbound_Processor. processors/ holds only the template;
   copy it per confirmed system and server (3-5 person-days each incl. pilot).
 - Server split (VEMS-5346): PROD spreads the outbound processors across
@@ -276,12 +261,9 @@ PowerBuilder or native, that check needs a LoadLibrary variant.
 - SSM region. Examples default to us-gov-west-1, but the OMS SSM convention
   (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1. Set -Region per
   the confirmed parameter path before running config-verify/preflight for real.
-- Monitoring sink. Primary signal is still exit codes + JSONL logs. A best-effort
-  Datadog push (metrics via the local agent, events via the ddog-gov API) is now
-  wired into the gate/deploy/health/drift paths — see the Monitoring section — but
-  it never blocks an outcome and is silently dropped on boxes without an agent /
-  `DD_API_KEY`. If you need alerting that must not miss, still wire a durable sink
-  (log shipper, Windows Event Log, etc.) off the JSONL logs.
+- Monitoring sink. Primary signal is still exit codes + JSONL logs. If you need
+  alerting that must not miss, wire a durable sink (log shipper, Windows Event
+  Log, etc.) off the JSONL logs.
 - Break-glass: the gate supports -AllowOverride with a mandatory reason and an
   audit line, but Deploy-Processor doesn't pass it. Decide hard-block vs
   audited override before prod.

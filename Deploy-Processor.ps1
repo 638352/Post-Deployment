@@ -72,8 +72,9 @@ Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 
-# Low-cardinality tags shared by every deploy event emitted to Datadog.
-$ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag))
+# Datadog emit disabled in this snapshot copy.
+# Low-cardinality Datadog tags retained only as a commented reference.
+# $ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag))
 
 # run a named stage; if it exits non-zero, abort the whole deploy with that stage's code
 function Step($name, $code) {
@@ -81,13 +82,13 @@ function Step($name, $code) {
     & $code
     if ($LASTEXITCODE -ne 0) {
         Write-VesLog ERROR "STAGE FAILED: $name (exit $LASTEXITCODE)" -LogFile $LogFile
-        # Timeline event on stage failure. The gate self-reports its own block/override
-        # events, so skip it here to avoid double-marking the same failure.
-        if ($name -ne 'pre-deploy gate') {
-            Send-VesDatadogEvent -Title "Deploy FAILED at '$name': $Processor" `
-                -Text "Stage '$name' failed for $Processor $StagedCommit (exit $LASTEXITCODE)." `
-                -AlertType 'error' -Tags ($ddTags + 'event:deploy-failed')
-        }
+        # Datadog event emit disabled in this snapshot copy.
+        # Timeline event on stage failure retained as commented reference.
+        # if ($name -ne 'pre-deploy gate') {
+        #     Send-VesDatadogEvent -Title "Deploy FAILED at '$name': $Processor" `
+        #         -Text "Stage '$name' failed for $Processor $StagedCommit (exit $LASTEXITCODE)." `
+        #         -AlertType 'error' -Tags ($ddTags + 'event:deploy-failed')
+        # }
         exit $LASTEXITCODE
     }
 }
@@ -160,20 +161,21 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 $targetPrefix = $targetItem.FullName.TrimEnd('\') + '\'
                 $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                     Where-Object { $_.ExecutablePath -and
-                                   $_.ExecutablePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) })
+                        $_.ExecutablePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) })
                 foreach ($p in $running) {
                     if ($KillProcesses) {
                         # audit line BEFORE the kill: which instance (mode arg visible in CommandLine)
                         Write-VesLog WARN ("Killing running instance PID {0}: {1}" -f $p.ProcessId, $p.CommandLine) `
-                            -Data @{processor=$Processor; pid=$p.ProcessId; commandLine=$p.CommandLine} -LogFile $LogFile
+                            -Data @{processor = $Processor; pid = $p.ProcessId; commandLine = $p.CommandLine } -LogFile $LogFile
                         try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop }
                         catch {
                             Write-VesLog ERROR "Could not kill PID $($p.ProcessId) -> $($_.Exception.Message)" -LogFile $LogFile
                             $stopFailed = $true
                         }
-                    } else {
+                    }
+                    else {
                         Write-VesLog ERROR ("Running instance holds {0}: PID {1} {2}. Re-run with -KillProcesses to stop it." -f `
-                            $TargetRoot, $p.ProcessId, $p.CommandLine) -LogFile $LogFile
+                                $TargetRoot, $p.ProcessId, $p.CommandLine) -LogFile $LogFile
                         $stopFailed = $true
                     }
                 }
@@ -299,9 +301,9 @@ if ($BackupRoot -and $KeepBackups -gt 0 -and (Test-Path -LiteralPath $BackupRoot
 }
 
 Write-VesLog OK "DEPLOY COMPLETE: $Processor @ $StagedCommit verified+healthy" -LogFile $LogFile
-# Timeline event: the "authorized deploy" marker. Drift after this point is expected;
-# drift with no marker is the unauthorized-change picture the drift runner surfaces.
-Send-VesDatadogEvent -Title "Deploy COMPLETE: $Processor" `
-    -Text "Deploy of $Processor $StagedCommit completed: gate + copy + verify + health all green." `
-    -AlertType 'success' -Tags ($ddTags + 'event:deploy-complete')
+# Datadog event emit disabled in this snapshot copy.
+# Timeline event retained as commented reference.
+# Send-VesDatadogEvent -Title "Deploy COMPLETE: $Processor" `
+#     -Text "Deploy of $Processor $StagedCommit completed: gate + copy + verify + health all green." `
+#     -AlertType 'success' -Tags ($ddTags + 'event:deploy-complete')
 exit $VES_EXIT_OK

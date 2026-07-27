@@ -84,12 +84,11 @@ function Invoke-VesGit([string[]]$GitArgs) {
     return (@($out) | ForEach-Object { "$_" }) -join "`n"
 }
 
-# Emit the verify outcome to Datadog as gauges (non-fatal), mirroring Invoke-HealthCheck.
-# $ok = prod matches baseline; $mismatch = count of drifted items. Never blocks a verify.
+# Datadog emit disabled in this snapshot copy.
+# Keep helper/call sites so control flow and tests remain stable.
 function Send-VerifyMetric([bool]$ok, [int]$mismatch) {
-    $ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag), 'check:verify', "mode:$Mode")
-    Send-VesDatadogMetric -Metric 'deployment.verify.status'   -Value ([int]$ok) -Tags $ddTags
-    Send-VesDatadogMetric -Metric 'deployment.verify.mismatch' -Value $mismatch  -Tags $ddTags
+    # Datadog metrics intentionally disabled.
+    return
 }
 
 try {
