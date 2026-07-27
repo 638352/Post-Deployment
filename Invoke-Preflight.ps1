@@ -194,8 +194,19 @@ try {
             exit $VES_EXIT_USAGE
         }
         Test-AwsCli
+        # Validate the coverage assertion before checking individual baselines.
+        # An incomplete inventory must never produce a READY summary. Reading the
+        # file with a bare ConvertFrom-Json instead skips that gate AND iterates
+        # the root object rather than .targets, so every per-target check below
+        # silently receives $null and passes on nothing.
+        $inventory = Import-VesTargetInventory -Path $TargetsFile
+        foreach ($e in $inventory.Errors) { Add-Check 'inventory' 'FAIL' $e }
+        foreach ($w in $inventory.Warnings) { Add-Check 'inventory' 'WARN' $w }
+        if ($inventory.Valid) {
+            Add-Check 'inventory' 'PASS' ("confirmed: {0} target(s), {1} required server(s)" -f $inventory.Targets.Count, $inventory.RequiredServers.Count)
+        }
         # run the manifest + config checks per target, reading each target's own params
-        $targets = Get-Content -LiteralPath $TargetsFile -Raw | ConvertFrom-Json
+        $targets = $inventory.Targets
         foreach ($t in $targets) {
             $p = if ($t.PSObject.Properties['processor']) { $t.processor } else { '?' }
             Write-VesLog INFO "--- target: $p ---" -LogFile $LogFile

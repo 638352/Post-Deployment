@@ -49,6 +49,48 @@ Describe 'usage' {
     }
 }
 
+Describe 'targets inventory gate' {
+    # Regression cover for the -TargetsFile path. Reading the inventory with a bare
+    # ConvertFrom-Json instead of Import-VesTargetInventory skips the coverage gate
+    # AND iterates the root object rather than .targets, so preflight silently
+    # validates nothing and still exits 2 on unrelated grounds. The module tests
+    # exercise Import-VesTargetInventory directly, so only these catch that.
+    BeforeAll {
+        $script:V1Targets = Join-Path $TestDrive 'v1-incomplete.json'
+        [PSCustomObject]@{
+            schema            = 'ves.targets.v1'
+            inventoryComplete = $false
+            requiredServers   = @('SERVER-A','SERVER-B')
+            targets           = @(
+                [PSCustomObject]@{ processor = 'alpha'; inventoryStatus = 'needs-confirmation'
+                                   manifestPath = $script:GoodManifest }
+            )
+        } | ConvertTo-Json -Depth 6 | Out-File -FilePath $script:V1Targets -Encoding utf8
+    }
+
+    It 'fails closed when inventoryComplete is not true' {
+        $r = Invoke-VesScript 'Invoke-Preflight.ps1' @('-TargetsFile',$script:V1Targets,'-Json')
+        $r.ExitCode | Should -Be 2
+        $inventory = @($r.Json.checks | Where-Object { $_.check -eq 'inventory' -and $_.status -eq 'FAIL' })
+        $inventory.Count | Should -BeGreaterThan 0
+        ($inventory.detail -join ' ') | Should -Match 'inventoryComplete'
+    }
+
+    It 'names every required server that has no confirmed target' {
+        $r = Invoke-VesScript 'Invoke-Preflight.ps1' @('-TargetsFile',$script:V1Targets,'-Json')
+        $detail = (@($r.Json.checks | Where-Object { $_.check -eq 'inventory' }).detail -join ' ')
+        $detail | Should -Match 'SERVER-A'
+        $detail | Should -Match 'SERVER-B'
+    }
+
+    It 'still runs the per-target checks from .targets, not the root object' {
+        # the regressed build logged "--- target: ? ---" and never reached the
+        # manifest check, because the root object has no manifestPath
+        $r = Invoke-VesScript 'Invoke-Preflight.ps1' @('-TargetsFile',$script:V1Targets,'-Json')
+        @($r.Json.checks | Where-Object { $_.check -eq 'manifest' }).Count | Should -BeGreaterThan 0
+    }
+}
+
 Describe 'manifest self-check' {
     It 'is ready for an intact manifest' {
         $r = Invoke-VesScript 'Invoke-Preflight.ps1' @(
