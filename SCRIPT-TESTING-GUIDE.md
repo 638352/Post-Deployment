@@ -1,10 +1,16 @@
 # Post-Deployment Script Testing Guide
 
-This guide is for somebody who can open Windows PowerShell and copy a command,
-but does not need to understand the code. It explains what to test, where it is
-safe to test it, and what a good result looks like.
+This document replaces the earlier testing instructions. It is a start-to-finish
+runbook for a tester who is not expected to read PowerShell code. If the tester
+can open Windows PowerShell, copy a complete command block, and compare the
+screen with the stated expected result, they can perform the safe portions of
+this guide.
 
-Last reviewed: 27 July 2026
+Follow the sections in order. Do not skip a failed step. A local test pass does
+not authorize a deployment, and a non-technical tester must not make up missing
+server names, paths, AWS regions, task names, release tags, or SSM parameters.
+
+Last fully recreated and source-checked: 27 July 2026
 
 ## What this guide covers
 
@@ -41,6 +47,37 @@ The labels used in this guide mean:
 | **CHANGES TEST HOST** | Adds or removes test scheduled tasks. Use an approved DEV/UAT host and an Administrator window. |
 | **DEPLOYMENT** | Can stop a process, copy files, or restart a task or service. A change owner must control this test. |
 
+### How to copy and run the command blocks
+
+1. Copy the entire PowerShell block, including every line between the opening
+   and closing fences. Do not copy the word `powershell` above the block.
+2. Do not copy a prompt such as `PS C:\>` from the screen.
+3. A backtick at the far right of a line means the command continues on the
+   next line. Copy all continued lines together.
+4. If PowerShell shows only `>>` and waits, press **Ctrl+C** once. Then copy the
+   complete block again; part of the command was missing.
+5. Text such as `REPLACE_WITH_CONFIRMED_REGION` is a stop marker. Do not run the
+   command until the release owner supplies that value and the marker is gone.
+6. Keep the same Windows PowerShell window open. Variables beginning with `$`
+   exist only in that window and are reused by later steps.
+7. Immediately after a script finishes, enter `$LASTEXITCODE`, record the
+   number, and save the visible output. Running another program first can replace
+   the exit code.
+
+### Who must approve the higher-risk steps
+
+| Activity | Person who must approve or be present |
+|---|---|
+| SAFE workstation tests | Tester or repository maintainer |
+| Read-only DEV/UAT server or AWS checks | Application owner and system owner |
+| Test scheduled-task installation | Windows administrator on an approved DEV/UAT host |
+| UAT `-WhatIf` gate-only test | Release owner with confirmed runbook values |
+| Any command without `-WhatIf` that calls a deployment script | Change owner, application owner, and rollback owner |
+| Any PROD activity | Formal change authorization; this guide alone is not authorization |
+
+Never paste a password, token, connection string, decrypted SSM value, or API
+key into this document or the evidence record.
+
 ### Current stop signs
 
 These are expected conditions in the repository, not test surprises:
@@ -57,6 +94,38 @@ These are expected conditions in the repository, not test surprises:
   or stage the correct per-server configuration.
 - Confirm whether the required SSM parameters are in `us-gov-east-1` or
   `us-gov-west-1`. Do not guess the region.
+
+### Information that must be collected before any DEV or UAT check
+
+The SAFE workstation tests do not need production values. Before starting a
+server, AWS, gate, health, drift, or scheduler check, the tester must obtain the
+following from the current runbook or the named owner. Put the answers in the
+change ticket or test record, not in this repository.
+
+| Required item | Example shape only | Source or approver |
+|---|---|---|
+| Environment and server | `uat`, `VESMSEGRESSUAT` | Application/server owner |
+| Processor name | `OutboundDBQ` | `SERVERS.md` plus current runbook |
+| Staged release folder | `D:\stage\<processor>` | Release owner |
+| Target installation folder | `C:\...\Processors\...` | Server runbook |
+| Approved commit/release identifier | Git commit SHA | Release owner |
+| Release tag | `<processor>/vMAJOR.MINOR.PATCH` | Approved Git release record |
+| Baseline manifest or baseline repository | `D:\baselines\<name>.json` or approved Git checkout | Release owner |
+| Approved-commit SSM parameter | `/ves/<name>/approved-commit` | AWS/operations owner |
+| Baseline-hash SSM parameter | `/ves/<name>/baseline-hash` | AWS/operations owner |
+| GovCloud region | `us-gov-east-1` or `us-gov-west-1` | AWS owner; never infer it from an example |
+| Configuration contract and live config | Two confirmed file paths | Application owner |
+| Required staged config/artifact paths | Paths relative to the staged root | Application owner |
+| Task or service name | Exact Task Scheduler or Windows service name | Server runbook |
+| Process identity | Executable folder plus RTP/RTPDP argument pattern | Server owner |
+| Fresh-log folder or health URL | Exact local path or endpoint | Application owner |
+| Backup folder and rollback owner | Approved writable location and named owner | Change owner |
+| Audit-log folder | Durable test or central audit location | Operations owner |
+| Change ticket and test window | Approved reference and time | Change owner |
+
+Stop if any value required by the selected test is blank, still contains
+`REPLACE`, or conflicts with `SERVERS.md`. The release owner must resolve the
+conflict before the tester continues.
 
 ### Test coverage at a glance
 
@@ -99,6 +168,24 @@ the final result; record the exit code and the named failure in the output.
 
 The entry scripts also write JSONL audit logs. A normal completed run contains
 a `RUN START` line and a `RUN END` line with an outcome and exit code.
+Important exceptions:
+
+- `Invoke-Tests.ps1` returns the number of failed Pester tests. Zero is green.
+- `Verify-Config.ps1` is a helper that returns an object with a `.pass` field.
+  For an ordinary script exit code, test configuration through
+  `Invoke-Verification.ps1 -Mode VerifyConfig` as shown later.
+- Several safety tests intentionally trigger an error. The test passes when the
+  script refuses unsafe input with the expected non-zero result.
+- Red text is not enough by itself to classify a result. Record the exact exit
+  code, the named error, and the audit-log path.
+
+When a command is important, save the exit code before doing anything else:
+
+```powershell
+$RecordedExitCode = $LASTEXITCODE
+$RecordedExitCode
+```
+
 
 ## One-time workstation setup
 
@@ -117,9 +204,22 @@ they are not.
 
 ```powershell
 Set-Location 'C:\Users\howardr01\Post-Deployment'
+$RepoRoot = git rev-parse --show-toplevel
+$RepoRoot
+git status --short
 ```
 
-Keep this PowerShell window open while following the guide.
+Expected result:
+
+- `$RepoRoot` prints `C:/Users/howardr01/Post-Deployment` or the same path with
+  backslashes.
+- `git status --short` normally prints nothing. If it lists files, save the
+  output and ask the maintainer whether those changes are expected before
+  testing. Do not delete or reset them.
+- If `git` is not recognized, stop. Git is required for the canonical file list,
+  release records, and tagged baselines.
+
+Keep this Windows PowerShell window open while following the guide.
 
 ### 3. Confirm Pester is available
 
@@ -137,6 +237,105 @@ Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPubli
 ```
 
 Do not install modules on a production server.
+
+### 4. Confirm the computer and account
+
+```powershell
+$env:COMPUTERNAME
+whoami
+```
+
+Write both values in the test record. If the computer is a production server,
+close the window and move to the approved workstation unless the change owner
+has explicitly authorized the exact production check.
+
+### 5. Check the execution policy without changing it
+
+```powershell
+Get-ExecutionPolicy -List
+```
+
+Record the output. Do not run `Set-ExecutionPolicy` and do not weaken a machine
+or domain policy. The test commands use `-ExecutionPolicy Bypass` only for the
+new child process they start. If policy or a `Zone.Identifier` still blocks a
+script, stop and ask the maintainer for an approved unblocked copy.
+
+### 6. Check AWS CLI only if live SSM checks are planned
+
+SAFE local tests do not require AWS. For a read-only DEV/UAT preflight or gate
+check, enter:
+
+```powershell
+Get-Command aws -ErrorAction SilentlyContinue
+aws --version
+```
+
+Expected result: both commands identify the AWS CLI. This does not prove that
+the account, KMS permission, parameter path, or region is correct; the live
+preflight tests those separately. If AWS is not required for the selected test,
+record `AWS CLI: not required for local test` instead of treating it as a pass.
+
+### 7. Create a separate evidence folder
+
+Copy this once in the same PowerShell window:
+
+```powershell
+$PreviousAuditLogDir = $env:VES_AUDIT_LOG_DIR
+$EvidenceRoot = Join-Path $env:TEMP (
+    'ves-testing-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+)
+New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+$env:VES_AUDIT_LOG_DIR = $EvidenceRoot
+
+$SessionRecord = [ordered]@{
+    startedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    tester = whoami
+    computer = $env:COMPUTERNAME
+    repository = (Get-Location).Path
+    commit = (git rev-parse HEAD)
+    powershell = $PSVersionTable.PSVersion.ToString()
+}
+$SessionRecord | ConvertTo-Json |
+    Set-Content -LiteralPath (Join-Path $EvidenceRoot 'test-session.json')
+
+$EvidenceRoot
+Get-ChildItem -LiteralPath $EvidenceRoot
+```
+
+Expected result: PowerShell prints a folder below the tester's temporary
+folder and lists `test-session.json`. All local audit logs in this guide will be
+written there. Do not use a production audit share for workstation tests.
+
+Confirm the tester can write there:
+
+```powershell
+$WriteTest = Join-Path $EvidenceRoot 'write-test.txt'
+Set-Content -LiteralPath $WriteTest -Value 'test'
+Test-Path -LiteralPath $WriteTest
+Remove-Item -LiteralPath $WriteTest -Force
+```
+
+Expected result: `True`.
+
+### 8. Confirm the bundled test data is present
+
+```powershell
+@(
+    '.\tests\fixtures\appconfig\contract.json'
+    '.\tests\fixtures\json\contract.json'
+    '.\tests\fixtures\json\config.json'
+    '.\tests\fixtures\keyvalue\contract.json'
+    '.\sample.config.json'
+    '.\targets.json'
+) | ForEach-Object {
+    [PSCustomObject]@{
+        Path = $_
+        Present = Test-Path -LiteralPath $_
+    }
+} | Format-Table -AutoSize
+```
+
+Expected result: every `Present` value is `True`. Stop if any file is missing.
 
 ## Test 1: Check the syntax of every canonical script
 
@@ -299,7 +498,7 @@ This example uses a test JSON file and contract already in the repository:
 $configResult = & .\Verify-Config.ps1 `
     -ContractPath .\tests\fixtures\json\contract.json `
     -ConfigPath .\tests\fixtures\json\config.json `
-    -LogFile (Join-Path $env:TEMP 'ves-guide-config.jsonl')
+    -LogFile (Join-Path $EvidenceRoot 'verify-config.jsonl')
 
 $configResult | Format-List
 ```
@@ -340,7 +539,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -Processor GuideTest `
     -Environment dev `
     -Json `
-    -LogFile (Join-Path $env:TEMP 'ves-guide-verification-config.jsonl')
+    -LogFile (Join-Path $EvidenceRoot 'verification-config.jsonl')
 $LASTEXITCODE
 ```
 
@@ -355,9 +554,7 @@ The two `Allow` switches below are permitted only because this is a temporary
 local lab. Never use them to approve a real release.
 
 ```powershell
-$LabRoot = Join-Path $env:TEMP (
-    'ves-guide-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
-)
+$LabRoot = Join-Path $EvidenceRoot 'verification-lab'
 $LabRelease = Join-Path $LabRoot 'release'
 $LabManifest = Join-Path $LabRoot 'GuideTest.json'
 New-Item -ItemType Directory -Path $LabRelease -Force | Out-Null
@@ -403,6 +600,49 @@ trust parameter is expected in this isolated local check.
 The automated suite also proves that a changed, missing, or extra file returns
 exit code `1`, and that a corrupt or untrusted manifest returns exit code `2`.
 
+### Hands-on drift detection and recovery
+
+This changes only the temporary lab file created above.
+
+```powershell
+Set-Content -LiteralPath (Join-Path $LabRelease 'sample.txt') `
+    -Value 'deliberately changed test content'
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File .\Invoke-Verification.ps1 `
+    -Mode VerifyFiles `
+    -ReleaseRoot $LabRelease `
+    -ManifestPath $LabManifest `
+    -Processor GuideTest `
+    -Environment dev `
+    -Json `
+    -LogFile (Join-Path $LabRoot 'verify-drift.jsonl')
+$LASTEXITCODE
+```
+
+Expected result: the JSON status is `drift`, the changed file is named, and the
+exit code is `1`. That non-zero result means drift detection worked.
+
+Restore the temporary file and prove the result returns to green:
+
+```powershell
+Set-Content -LiteralPath (Join-Path $LabRelease 'sample.txt') `
+    -Value 'approved test content'
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File .\Invoke-Verification.ps1 `
+    -Mode VerifyFiles `
+    -ReleaseRoot $LabRelease `
+    -ManifestPath $LabManifest `
+    -Processor GuideTest `
+    -Environment dev `
+    -Json `
+    -LogFile (Join-Path $LabRoot 'verify-recovered.jsonl')
+$LASTEXITCODE
+```
+
+Expected result: the JSON status is `match` and the exit code is `0`.
+
 ## Test 6: Test the preflight check
 
 **Script:** `Invoke-Preflight.ps1`  
@@ -427,7 +667,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -Processor GuideTest `
     -ConfigContract .\sample.config.json `
     -Json `
-    -LogFile (Join-Path $env:TEMP 'ves-guide-preflight.jsonl')
+    -LogFile (Join-Path $EvidenceRoot 'preflight-local.jsonl')
 $LASTEXITCODE
 ```
 
@@ -442,11 +682,17 @@ Pass:
 Run this only on a workstation approved to perform read-only AWS checks:
 
 ```powershell
+$ConfirmedRegion = 'REPLACE_WITH_CONFIRMED_REGION'
+if ($ConfirmedRegion -like 'REPLACE_*') {
+    throw 'Stop: the AWS owner must supply the confirmed GovCloud region.'
+}
+
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\Invoke-Preflight.ps1 `
     -TargetsFile .\targets.json `
-    -Region 'REPLACE_WITH_CONFIRMED_REGION' `
-    -Json
+    -Region $ConfirmedRegion `
+    -Json `
+    -LogFile (Join-Path $EvidenceRoot 'preflight-inventory.jsonl')
 $LASTEXITCODE
 ```
 
@@ -479,17 +725,44 @@ the rule that a commit string alone is not enough.
 Have the release owner replace and verify every value before running:
 
 ```powershell
+$GateValues = [ordered]@{
+    StagedRoot = 'REPLACE_WITH_UAT_STAGED_FOLDER'
+    StagedCommit = 'REPLACE_WITH_APPROVED_RELEASE_ID'
+    ApprovedCommitParam = '/ves/REPLACE/approved-commit'
+    TrustParam = '/ves/REPLACE/baseline-hash'
+    ManifestPath = 'D:\baselines\REPLACE.json'
+    RequiredArtifactPath = 'REPLACE_WITH_CONFIG_FILE_NAME'
+    Processor = 'REPLACE_WITH_PROCESSOR'
+    Region = 'REPLACE_WITH_CONFIRMED_REGION'
+}
+
+$Unfinished = @(
+    $GateValues.GetEnumerator() |
+        Where-Object { [string]::IsNullOrWhiteSpace("$($_.Value)") -or $_.Value -match 'REPLACE' }
+)
+if ($Unfinished.Count -gt 0) {
+    $Unfinished | Format-Table Name,Value -AutoSize
+    throw 'Stop: the release owner must replace and approve every listed value.'
+}
+if (-not (Test-Path -LiteralPath $GateValues.StagedRoot)) {
+    throw "Stop: staged folder not found: $($GateValues.StagedRoot)"
+}
+if (-not (Test-Path -LiteralPath $GateValues.ManifestPath)) {
+    throw "Stop: manifest not found: $($GateValues.ManifestPath)"
+}
+
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\Invoke-PreDeployGate.ps1 `
-    -StagedRoot 'REPLACE_WITH_UAT_STAGED_FOLDER' `
-    -StagedCommit 'REPLACE_WITH_APPROVED_RELEASE_ID' `
-    -ApprovedCommitParam '/ves/REPLACE/approved-commit' `
-    -TrustParam '/ves/REPLACE/baseline-hash' `
-    -ManifestPath 'D:\baselines\REPLACE.json' `
-    -RequiredArtifactPaths 'REPLACE_WITH_CONFIG_FILE_NAME' `
-    -Processor 'REPLACE_WITH_PROCESSOR' `
+    -StagedRoot $GateValues.StagedRoot `
+    -StagedCommit $GateValues.StagedCommit `
+    -ApprovedCommitParam $GateValues.ApprovedCommitParam `
+    -TrustParam $GateValues.TrustParam `
+    -ManifestPath $GateValues.ManifestPath `
+    -RequiredArtifactPaths $GateValues.RequiredArtifactPath `
+    -Processor $GateValues.Processor `
     -Environment uat `
-    -Region 'REPLACE_WITH_CONFIRMED_REGION'
+    -Region $GateValues.Region `
+    -LogFile (Join-Path $EvidenceRoot 'predeploy-gate-uat.jsonl')
 $LASTEXITCODE
 ```
 
@@ -518,9 +791,7 @@ Pass: `Failed: 0` and exit code `0`.
 ### Safe fresh-log check
 
 ```powershell
-$HealthTestDir = Join-Path $env:TEMP (
-    'ves-health-guide-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
-)
+$HealthTestDir = Join-Path $EvidenceRoot 'health-lab'
 New-Item -ItemType Directory -Path $HealthTestDir -Force | Out-Null
 Set-Content -LiteralPath (Join-Path $HealthTestDir 'processor.log') `
     -Value 'test heartbeat'
@@ -543,16 +814,42 @@ Pass: the JSON contains `"healthy":true` and the exit code is `0`.
 Use the exact executable folder and mode from the approved runbook:
 
 ```powershell
+$HealthValues = [ordered]@{
+    Processor = 'REPLACE_WITH_PROCESSOR'
+    ProcessPathRoot = 'REPLACE_WITH_EXACT_PROCESSOR_FOLDER'
+    ProcessArgumentPattern = 'REPLACE_WITH_RTP_OR_RTPDP_PATTERN'
+    ScheduledTask = 'REPLACE_WITH_EXACT_TASK_NAME'
+    FreshLogDir = 'REPLACE_WITH_EXACT_LOG_FOLDER'
+}
+
+$Unfinished = @(
+    $HealthValues.GetEnumerator() |
+        Where-Object { [string]::IsNullOrWhiteSpace("$($_.Value)") -or $_.Value -match 'REPLACE' }
+)
+if ($Unfinished.Count -gt 0) {
+    $Unfinished | Format-Table Name,Value -AutoSize
+    throw 'Stop: the server owner must replace and approve every listed value.'
+}
+if (-not (Test-Path -LiteralPath $HealthValues.ProcessPathRoot)) {
+    throw "Stop: process folder not found: $($HealthValues.ProcessPathRoot)"
+}
+if (-not (Test-Path -LiteralPath $HealthValues.FreshLogDir)) {
+    throw "Stop: fresh-log folder not found: $($HealthValues.FreshLogDir)"
+}
+Get-ScheduledTask -TaskName $HealthValues.ScheduledTask -ErrorAction Stop |
+    Select-Object TaskName,State
+
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\Invoke-HealthCheck.ps1 `
-    -Processor 'REPLACE_WITH_PROCESSOR' `
-    -ProcessPathRoot 'REPLACE_WITH_EXACT_PROCESSOR_FOLDER' `
-    -ProcessArgumentPattern 'REPLACE_WITH_RTP_OR_RTPDP_PATTERN' `
-    -ScheduledTasks 'REPLACE_WITH_EXACT_TASK_NAME' `
-    -FreshLogDir 'REPLACE_WITH_EXACT_LOG_FOLDER' `
+    -Processor $HealthValues.Processor `
+    -ProcessPathRoot $HealthValues.ProcessPathRoot `
+    -ProcessArgumentPattern $HealthValues.ProcessArgumentPattern `
+    -ScheduledTasks $HealthValues.ScheduledTask `
+    -FreshLogDir $HealthValues.FreshLogDir `
     -FreshLogMaxAgeMinutes 60 `
     -Environment uat `
-    -Json
+    -Json `
+    -LogFile (Join-Path $EvidenceRoot 'health-uat.jsonl')
 $LASTEXITCODE
 ```
 
@@ -594,33 +891,72 @@ This is the only beginner-safe way to call the deployment engine against a real
 environment. `-WhatIf` runs the gate and stops before backup, process/task
 changes, copy, verification, or health.
 
-First take a read-only fingerprint of the UAT target:
+Have the release owner fill in this block. The guard stops on every placeholder:
 
 ```powershell
-$TargetRoot = 'REPLACE_WITH_UAT_TARGET_FOLDER'
+$DeployValues = [ordered]@{
+    Processor = 'REPLACE_WITH_PROCESSOR'
+    StagedRoot = 'REPLACE_WITH_UAT_STAGED_FOLDER'
+    TargetRoot = 'REPLACE_WITH_UAT_TARGET_FOLDER'
+    StagedCommit = 'REPLACE_WITH_APPROVED_RELEASE_ID'
+    ManifestPath = 'D:\baselines\REPLACE.json'
+    TrustParam = '/ves/REPLACE/baseline-hash'
+    ApprovedCommitParam = '/ves/REPLACE/approved-commit'
+    ReleaseTag = 'REPLACE_WITH_PROCESSOR/v0.0.0'
+    BaselineRepo = 'REPLACE_WITH_BASELINE_REPOSITORY'
+    ConfigContract = 'D:\baselines\REPLACE.config.json'
+    ConfigPath = 'REPLACE_WITH_TARGET_CONFIG_PATH'
+    RequiredArtifactPath = 'REPLACE_WITH_STAGED_CONFIG_FILE_NAME'
+    Region = 'REPLACE_WITH_CONFIRMED_REGION'
+}
+
+$Unfinished = @(
+    $DeployValues.GetEnumerator() |
+        Where-Object { [string]::IsNullOrWhiteSpace("$($_.Value)") -or $_.Value -match 'REPLACE' }
+)
+if ($Unfinished.Count -gt 0) {
+    $Unfinished | Format-Table Name,Value -AutoSize
+    throw 'Stop: the release owner must replace and approve every listed value.'
+}
+if ($DeployValues.ReleaseTag -notmatch '(^|/)v\d+\.\d+\.\d+$') {
+    throw 'Stop: ReleaseTag must end in /vMAJOR.MINOR.PATCH.'
+}
+foreach ($PathToCheck in @(
+    $DeployValues.StagedRoot
+    $DeployValues.TargetRoot
+    $DeployValues.ManifestPath
+    $DeployValues.BaselineRepo
+    $DeployValues.ConfigContract
+    $DeployValues.ConfigPath
+)) {
+    if (-not (Test-Path -LiteralPath $PathToCheck)) {
+        throw "Stop: required path not found: $PathToCheck"
+    }
+}
+
+$TargetRoot = $DeployValues.TargetRoot
 $before = Get-ChildItem -LiteralPath $TargetRoot -File -Recurse |
     Get-FileHash -Algorithm SHA256 |
     Sort-Object Path |
     Select-Object Path,Hash
-```
 
-Then run the gate-only check:
-
-```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\Deploy-Processor.ps1 `
-    -Processor 'REPLACE_WITH_PROCESSOR' `
-    -StagedRoot 'REPLACE_WITH_UAT_STAGED_FOLDER' `
-    -TargetRoot $TargetRoot `
-    -StagedCommit 'REPLACE_WITH_APPROVED_RELEASE_ID' `
-    -ManifestPath 'D:\baselines\REPLACE.json' `
-    -TrustParam '/ves/REPLACE/baseline-hash' `
-    -ApprovedCommitParam '/ves/REPLACE/approved-commit' `
-    -ConfigContract 'D:\baselines\REPLACE.config.json' `
-    -ConfigPath 'REPLACE_WITH_TARGET_CONFIG_PATH' `
-    -RequiredArtifactPaths 'REPLACE_WITH_CONFIG_FILE_NAME' `
+    -Processor $DeployValues.Processor `
+    -StagedRoot $DeployValues.StagedRoot `
+    -TargetRoot $DeployValues.TargetRoot `
+    -StagedCommit $DeployValues.StagedCommit `
+    -ManifestPath $DeployValues.ManifestPath `
+    -TrustParam $DeployValues.TrustParam `
+    -ApprovedCommitParam $DeployValues.ApprovedCommitParam `
+    -ReleaseTag $DeployValues.ReleaseTag `
+    -BaselineRepo $DeployValues.BaselineRepo `
+    -ConfigContract $DeployValues.ConfigContract `
+    -ConfigPath $DeployValues.ConfigPath `
+    -RequiredArtifactPaths $DeployValues.RequiredArtifactPath `
     -Environment uat `
-    -Region 'REPLACE_WITH_CONFIRMED_REGION' `
+    -Region $DeployValues.Region `
+    -LogFile (Join-Path $EvidenceRoot 'deploy-whatif-uat.jsonl') `
     -WhatIf
 $LASTEXITCODE
 ```
@@ -654,6 +990,19 @@ decision, confirmed task/process details, and the application owner present.
 **Safety:** SAFE for inspection; do not execute the template
 
 This file is a template, not a real deployment script.
+Confirm the repository still identifies it as a template:
+
+```powershell
+$TemplatePath = '.\processors\Deploy-SYSTEM_NAME.ps1'
+Test-Path -LiteralPath $TemplatePath
+Select-String -LiteralPath $TemplatePath -Pattern 'TEMPLATE|SYSTEM_NAME' |
+    Select-Object LineNumber,Line
+```
+
+Expected result: `True` and several matching lines. Those placeholders are
+correct in the template. Never supply staged or target values to this file and
+never try to make the template itself deployable.
+
 
 1. Run the syntax check at the start of this guide.
 2. Open the file in a text editor.
@@ -666,8 +1015,22 @@ This file is a template, not a real deployment script.
 7. Search the new wrapper for anything left unfinished:
 
 ```powershell
-Select-String -Path .\processors\Deploy-REPLACE.ps1 `
-    -Pattern 'SYSTEM_NAME|REPLACE|TBD|CONFIRM'
+$NewWrapper = '.\processors\Deploy-REPLACE.ps1'
+if ($NewWrapper -match 'REPLACE') {
+    throw 'Stop: replace the filename with the approved new wrapper name.'
+}
+if (-not (Test-Path -LiteralPath $NewWrapper)) {
+    throw "Stop: wrapper not found: $NewWrapper"
+}
+$PlaceholderResults = @(
+    Select-String -LiteralPath $NewWrapper `
+        -Pattern 'SYSTEM_NAME|REPLACE|TBD|CONFIRM'
+)
+if ($PlaceholderResults.Count -gt 0) {
+    $PlaceholderResults | Select-Object LineNumber,Line
+    throw 'Stop: unresolved placeholders remain in the wrapper.'
+}
+'WRAPPER PLACEHOLDER CHECK PASS'
 ```
 
 Pass: the completed wrapper has no placeholder results, and a second person has
@@ -703,13 +1066,39 @@ Do not perform this step until two people have confirmed the values marked
 `CONFIRM` in the script and the correct SSM region.
 
 ```powershell
+$DbqValues = [ordered]@{
+    StagedRoot = 'REPLACE_WITH_UAT_STAGED_FOLDER'
+    StagedCommit = 'REPLACE_WITH_APPROVED_RELEASE_ID'
+    ReleaseTag = 'OutboundDBQ/v0.0.0'
+    BaselineRepo = 'REPLACE_WITH_BASELINE_REPOSITORY'
+    Region = 'REPLACE_WITH_CONFIRMED_REGION'
+}
+
+$Unfinished = @(
+    $DbqValues.GetEnumerator() |
+        Where-Object { [string]::IsNullOrWhiteSpace("$($_.Value)") -or $_.Value -match 'REPLACE' }
+)
+if ($Unfinished.Count -gt 0) {
+    $Unfinished | Format-Table Name,Value -AutoSize
+    throw 'Stop: the release owner must replace and approve every listed value.'
+}
+if ($DbqValues.ReleaseTag -notmatch '^OutboundDBQ/v\d+\.\d+\.\d+$') {
+    throw 'Stop: ReleaseTag must be OutboundDBQ/vMAJOR.MINOR.PATCH.'
+}
+foreach ($PathToCheck in @($DbqValues.StagedRoot,$DbqValues.BaselineRepo)) {
+    if (-not (Test-Path -LiteralPath $PathToCheck)) {
+        throw "Stop: required path not found: $PathToCheck"
+    }
+}
+
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\processors\Deploy-OutboundDBQ-uat.ps1 `
-    -StagedRoot 'D:\stage\OutboundDBQ' `
-    -StagedCommit 'REPLACE_WITH_APPROVED_RELEASE_ID' `
-    -ReleaseTag 'OutboundDBQ/vREPLACE_WITH_VERSION' `
-    -BaselineRepo 'REPLACE_WITH_BASELINE_REPOSITORY' `
-    -Region 'REPLACE_WITH_CONFIRMED_REGION' `
+    -StagedRoot $DbqValues.StagedRoot `
+    -StagedCommit $DbqValues.StagedCommit `
+    -ReleaseTag $DbqValues.ReleaseTag `
+    -BaselineRepo $DbqValues.BaselineRepo `
+    -Region $DbqValues.Region `
+    -AuditLogDir $EvidenceRoot `
     -ConfirmedRunbookValues `
     -WhatIf
 $LASTEXITCODE
@@ -746,9 +1135,7 @@ heartbeat writing, and safe pruning of only the runner's own old target logs.
 Run this on a development workstation without production Datadog credentials:
 
 ```powershell
-$DriftTestLog = Join-Path $env:TEMP (
-    'ves-drift-guide-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
-)
+$DriftTestLog = Join-Path $EvidenceRoot 'drift-lab'
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\Start-DriftRunner.ps1 `
@@ -847,10 +1234,28 @@ replaced.
 ### Install two test tasks
 
 ```powershell
-$TestRunnerTask = 'ves-verify-drift-GUIDE-TEST'
-$TestWatchdogTask = 'ves-verify-drift-watchdog-GUIDE-TEST'
+$IsAdmin = ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+if (-not $IsAdmin) {
+    throw 'Stop: reopen Windows PowerShell by using Run as administrator.'
+}
+
+$TaskSuffix = [guid]::NewGuid().ToString('N').Substring(0,8)
+$TestRunnerTask = "ves-verify-drift-GUIDE-$TaskSuffix"
+$TestWatchdogTask = "ves-verify-drift-watchdog-GUIDE-$TaskSuffix"
 $TestTargets = (Resolve-Path .\targets.json).Path
-$TestTaskLog = 'C:\Temp\ves-verify-guide-task-logs'
+$TestTaskLog = "C:\Temp\ves-verify-guide-task-logs-$TaskSuffix"
+
+$ExistingTasks = @(
+    Get-ScheduledTask -TaskName $TestRunnerTask,$TestWatchdogTask `
+        -ErrorAction SilentlyContinue
+)
+if ($ExistingTasks.Count -gt 0) {
+    $ExistingTasks | Select-Object TaskName,State
+    throw 'Stop: one of the unique test task names already exists.'
+}
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\Install-DriftTask.ps1 `
@@ -878,17 +1283,33 @@ Get-ScheduledTask -TaskName $TestRunnerTask,$TestWatchdogTask |
 
 ```powershell
 Start-ScheduledTask -TaskName $TestRunnerTask
-```
+$Deadline = (Get-Date).AddMinutes(2)
+do {
+    Start-Sleep -Seconds 5
+    $TaskState = (Get-ScheduledTask -TaskName $TestRunnerTask).State
+    "Task state: $TaskState"
+} while ($TaskState -eq 'Running' -and (Get-Date) -lt $Deadline)
 
-Wait for the task to finish, then enter:
+if ($TaskState -eq 'Running') {
+    Write-Warning 'The test task is still running after two minutes. Record this and continue to cleanup.'
+}
 
-```powershell
-Get-ScheduledTaskInfo -TaskName $TestRunnerTask |
-    Select-Object LastRunTime,LastTaskResult
+$TaskInfo = Get-ScheduledTaskInfo -TaskName $TestRunnerTask
+$TaskInfo | Select-Object LastRunTime,LastTaskResult
 
-Get-Content -LiteralPath (
-    Join-Path $TestTaskLog 'ves-verify-drift.heartbeat.json'
-) -Raw
+$TaskHeartbeat = Join-Path $TestTaskLog 'ves-verify-drift.heartbeat.json'
+if (Test-Path -LiteralPath $TaskHeartbeat) {
+    Get-Content -LiteralPath $TaskHeartbeat -Raw
+} else {
+    Write-Warning "Heartbeat not found: $TaskHeartbeat"
+}
+
+$TaskEvidence = Join-Path $EvidenceRoot "scheduled-task-$TaskSuffix"
+New-Item -ItemType Directory -Path $TaskEvidence -Force | Out-Null
+if (Test-Path -LiteralPath $TestTaskLog) {
+    Get-ChildItem -LiteralPath $TestTaskLog -File |
+        Copy-Item -Destination $TaskEvidence -Force
+}
 ```
 
 With the current incomplete `targets.json`, `LastTaskResult` should settle on
@@ -962,6 +1383,41 @@ For a failure, attach:
 Do not copy SSM values, passwords, tokens, connection strings, or other secrets
 into the test record.
 
+## Finish the test session and package the evidence
+
+1. List the files that were created:
+
+```powershell
+Get-ChildItem -LiteralPath $EvidenceRoot -Recurse |
+    Select-Object FullName,Length,LastWriteTime
+```
+
+2. Save the final repository status without changing it:
+
+```powershell
+$FinalRepositoryStatus = @(git status --short)
+$FinalRepositoryStatus |
+    Set-Content -LiteralPath (Join-Path $EvidenceRoot 'git-status-final.txt')
+$FinalRepositoryStatus
+```
+
+Unexpected new or changed script files must be reviewed. Do not use `git reset`,
+`git checkout`, or deletion to make the result look clean.
+
+3. Restore the audit-log environment variable for this PowerShell window:
+
+```powershell
+$env:VES_AUDIT_LOG_DIR = $PreviousAuditLogDir
+```
+
+4. Attach the evidence folder to the approved test record. Keep it until the
+   release owner accepts the result. The local verification, health, and drift
+   lab folders are inside it, so no separate cleanup is needed on the
+   workstation.
+5. If the scheduled-task integration test was run, confirm both unique test
+   tasks are gone and the copied task evidence exists before the administrator
+   removes the temporary `C:\Temp\ves-verify-guide-task-logs-<suffix>` folder.
+
 ## Final acceptance checklist
 
 A script set is ready for a controlled UAT pilot only when:
@@ -977,3 +1433,68 @@ A script set is ready for a controlled UAT pilot only when:
 - any host changes made for testing have been removed.
 
 A passing workstation test does not authorize a production deployment.
+
+## Gaps and issues to expect during initial testing
+
+This section is intentionally last so the tester reviews it immediately before
+requesting a UAT pilot. A green workstation suite does not close these items.
+
+### Known repository and operational gaps
+
+| Gap or unresolved decision | Effect on testing | Required action before relying on the result |
+|---|---|---|
+| `targets.json` is intentionally incomplete and has `inventoryComplete=false`. Citrix server names and several production paths are missing. | Full inventory preflight and drift runs must return exit code `2`; they cannot prove estate-wide coverage. | Operations must add every manual-copy server and processor, mark each entry confirmed, and set completeness only after independent review. |
+| Processor coverage is incomplete. The repository has a template and one UAT DBQ wrapper, not a confirmed wrapper for every in-scope system/server copy. | Shared code can pass while an actual system still has no safe operator entry point. | Create and review one wrapper per confirmed processor/server combination, then run syntax, targeted Pester, placeholder, and `-WhatIf` checks. |
+| `Deploy-OutboundDBQ-uat.ps1` still marks the scheduled-task name and fresh-log directory `CONFIRM`. | `-ConfirmedRunbookValues` would be an unsupported assertion until those values are checked. | Two people must compare both values with the current Outbound Deployment Steps runbook. |
+| GovCloud examples disagree: defaults use `us-gov-west-1`, while OMS conventions in the documentation may require `us-gov-east-1`. | SSM checks can report missing or denied parameters even when credentials are otherwise valid. | The AWS owner must confirm the parameter path and region as a pair for each environment. |
+| `Deploy-Processor.ps1` uses `robocopy /MIR`. A configuration file under the target root is replaced by the staged copy. | A technically successful copy could place the wrong server-specific configuration on the host. | Before any real deployment, approve either config exclusion or a staged per-server config and prove rollback. |
+| Console-process stop/restart logic exists, but the real outbound-processor UAT pilot is still pending. | Automated tests prove the mechanism with test processes, not the actual RTP/RTPDP workload. | Pilot on the approved UAT egress server with the application owner watching process identity, task restart, logs, and rollback. |
+| Real SSM read/write and KMS behavior is not exercised by the normal automated suite. | Fake AWS commands prove error handling but not the live account, role, parameter, encryption, network, or region. | Run the read-only preflight first; allow capture/write testing only under an approved UAT release procedure. |
+| Service, real scheduled-task, and HTTP health branches are not fully automated against live hosts. | The workstation suite cannot prove a particular service name, task history, endpoint, firewall, or application response. | Run the matching read-only health probe on DEV/UAT with confirmed values. |
+| `Install-DriftTask.Tests.ps1` mocks Task Scheduler. | Unit coverage cannot prove SYSTEM permissions, legacy-host trigger serialization, task history, or monitor pickup. | Complete the unique-name administrator integration test on an approved DEV/UAT host and remove the tasks afterward. |
+| Central audit-log destination, Datadog agent/API key, monitor, and on-call routing remain operations-owned. | Primary exit codes and JSONL logs work, but alerts may not reach a dashboard or person. | Confirm `VES_AUDIT_LOG_DIR`, log shipping, agent/API key, monitors, and routing before production activation. |
+| Break-glass policy is not finalized. The gate supports audited `-AllowOverride`, but `Deploy-Processor.ps1` does not pass it through. | Operators may not know whether a failed gate is an absolute block or who can authorize an exception. | Change governance must decide the policy; testers must not use `-AllowOverride` or `-AllowCommitOnly` to obtain a pass. |
+| `Verify-Config.ps1` returns a `.pass` object rather than enforcing the repository exit-code contract by itself. | A tester who looks only at `$LASTEXITCODE` after calling the helper can misclassify drift. | Use `.pass` for the direct helper test and `Invoke-Verification.ps1 -Mode VerifyConfig` for operational exit codes. |
+| PSScriptAnalyzer is optional and may not be installed on the workstation. | Parser and Pester can pass without a lint result. | Report `LINT NOT RUN` when unavailable; never report an unavailable lint check as passed. |
+| Continuous-integration execution is not confirmed in this repository. | The test suite may depend on a person running it before a release. | Add an approved Windows PowerShell 5.1 CI job or retain a signed manual test record for every change. |
+| Tagged rollback history starts with the first captured and archived verified release. | Older deployments may not have a trustworthy Git-tagged rollback point. | The release owner must identify a safe manual baseline for pre-adoption releases. |
+
+### Common first-run issues and what the tester should do
+
+| What the tester sees | Likely meaning | Correct response |
+|---|---|---|
+| `Pester 5.x not found` | No supported Pester module is available. | Stop. Obtain approval to install Pester 5.5 or newer on the development workstation, then rerun Test 2. |
+| `Requested registry access is not allowed` before tests start | The restricted test environment blocked Pester setup. | Rerun in an approved normal Windows PowerShell session. Do not classify it as a script defect unless it repeats there. |
+| `script is not digitally signed`, `RemoteSigned`, or `Zone.Identifier` errors | Host policy blocked downloaded files. | Do not weaken policy. Ask for an approved unblocked repository copy. |
+| `aws` is not recognized | AWS CLI is missing or not on `PATH`. | Local tests may continue; live SSM tests must stop until the workstation owner installs/configures the approved CLI. |
+| `AccessDenied`, KMS decrypt error, `ParameterNotFound`, or SSM trust failure | Wrong role, path, region, encryption permission, or baseline hash. | Record the full named error without secret values and send it to the AWS and release owners. Do not try random regions or parameters. |
+| Current inventory preflight or drift run exits `2` | Expected fail-closed behavior while `targets.json` is incomplete. | Record as an expected safety result. It becomes a defect only if the incomplete inventory reports ready/clean. |
+| Gate exits `1` and names missing, changed, or extra files | The staged artifact does not match the approved release. | Stop. Give the named file list to the release owner; do not use an override. |
+| Gate exits `10` with no content source | Commit-only validation was refused. | Supply the approved trust parameter or tagged baseline. Do not add `-AllowCommitOnly` for acceptance. |
+| Health check exits `3` | At least one configured probe failed. | Record the exact assembly, service, process, task, log, or endpoint failure and stop the deployment decision. |
+| Health check exits `10` | No meaningful probe was configured or input was unsafe. | Obtain the exact probe values from the server/application owner. |
+| `-WhatIf` gate passes but an audit log or Datadog event appears | Expected: gate-only mode avoids target changes but still records evidence. | Verify the before/after hashes are identical and retain the log. |
+| Drift heartbeat is fresh but its stored runner outcome is `ERROR`/`2` | The runner completed recently but could not verify the inventory or trust. | Treat freshness and verification outcome as separate results; investigate the runner error. |
+| Scheduled task `LastTaskResult` is `2` with the checked-in inventory | Expected because the inventory is incomplete. | Confirm the heartbeat records the same error, save evidence, then remove the unique test tasks. |
+| Scheduled task remains `Running` past two minutes | The runner may be blocked, hung, or waiting on a host dependency. | Record task state/history and logs, then have the Windows administrator stop and remove only the unique test tasks. |
+| Audit log cannot be created | Folder is missing or the account/SYSTEM identity lacks permission. | Stop and have the owner provide an approved writable test/audit directory. |
+| PSScriptAnalyzer is unavailable | Lint was not executed. | Record `LINT NOT RUN`; parser and Pester results remain separate. |
+| `git status --short` lists unexpected files after testing | A test, tool, or another user changed the checkout. | Preserve the output and ask the maintainer to review. Do not delete, reset, or hide the files. |
+
+### Minimum escalation packet for an unresolved failure
+
+Send the maintainer or owning team all of the following:
+
+- test number and script name;
+- date/time, tester, computer, and environment;
+- sanitized command with all secrets removed;
+- immediate `$LASTEXITCODE`;
+- complete named error and relevant console output;
+- JSONL audit-log path and the log itself;
+- Git commit and release tag used;
+- whether the action was SAFE, READ-ONLY, CHANGES TEST HOST, or DEPLOYMENT;
+- before/after hash comparison for a `-WhatIf` deployment check; and
+- confirmation that no unauthorized deployment or policy change was attempted.
+
+Do not request a production pilot until every blocking gap that applies to the
+selected system has an owner, an approved resolution, and recorded evidence.
