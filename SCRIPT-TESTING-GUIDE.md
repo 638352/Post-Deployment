@@ -27,6 +27,13 @@ Only Git-tracked scripts in the live tree are considered canonical. Files with
 copies, not release scripts. `Post-Deployment-datadog-558667ed\` is a frozen
 reference snapshot and is also excluded.
 
+> **Telemetry push is disabled.** The Datadog integration is commented out in
+> place throughout the module, the entry scripts, the preflight probe, and the
+> module test suite. No metrics or events are emitted, `-CheckDatadog` no longer
+> binds on `Invoke-Preflight.ps1`, and `DD_API_KEY` / `DD_ENV` are unused. Exit
+> codes and JSONL logs are the only signal a tester should look for. Search the
+> tree for `DATADOG DISABLED` to see every disabled block.
+
 ## Read this before testing
 
 Do not begin with a production server. Use this order:
@@ -43,7 +50,7 @@ The labels used in this guide mean:
 | Label | Meaning |
 |---|---|
 | **SAFE** | Uses test files on a workstation. It does not need a server, AWS, or the network. |
-| **READ-ONLY** | Reads files, AWS parameters, services, tasks, or logs. It does not deploy files, but it may write an audit log or a best-effort Datadog signal. |
+| **READ-ONLY** | Reads files, AWS parameters, services, tasks, or logs. It does not deploy files, but it may write an audit log. |
 | **CHANGES TEST HOST** | Adds or removes test scheduled tasks. Use an approved DEV/UAT host and an Administrator window. |
 | **DEPLOYMENT** | Can stop a process, copy files, or restart a task or service. A change owner must control this test. |
 
@@ -471,8 +478,9 @@ Pass:
 - The exit code is `0`.
 
 This checks manifest creation, hashing, tamper detection, file comparison,
-target inventory rules, logging, release-tag validation, AWS command error
-handling, and Datadog environment labels.
+target inventory rules, logging, release-tag validation, and AWS command error
+handling. <!-- The Datadog environment-label tests are commented out alongside
+the function they cover. -->
 
 ## Test 4: Test configuration checking
 
@@ -1132,7 +1140,7 @@ heartbeat writing, and safe pruning of only the runner's own old target logs.
 
 ### Confirm the current inventory fails closed
 
-Run this on a development workstation without production Datadog credentials:
+Run this on a development workstation:
 
 ```powershell
 $DriftTestLog = Join-Path $EvidenceRoot 'drift-lab'
@@ -1359,7 +1367,7 @@ loads them through Pester.
 | `tests\Start-DriftRunner.Tests.ps1` | Clean/drift exits, inventory refusal, retention, and heartbeat writing. |
 | `tests\Test-DriftHeartbeat.Tests.ps1` | Fresh, stale, and missing heartbeats. |
 | `tests\Verify-Config.Tests.ps1` | All three formats, required/extra/wrong settings, and secret masking. |
-| `tests\VesVerify.Module.Tests.ps1` | Shared manifest, trust, inventory, logging, AWS, and Datadog functions. |
+| `tests\VesVerify.Module.Tests.ps1` | Shared manifest, trust, inventory, logging, and AWS functions. |
 
 The full-suite command in Test 2 is the simplest way to test all of them.
 
@@ -1452,7 +1460,7 @@ requesting a UAT pilot. A green workstation suite does not close these items.
 | Real SSM read/write and KMS behavior is not exercised by the normal automated suite. | Fake AWS commands prove error handling but not the live account, role, parameter, encryption, network, or region. | Run the read-only preflight first; allow capture/write testing only under an approved UAT release procedure. |
 | Service, real scheduled-task, and HTTP health branches are not fully automated against live hosts. | The workstation suite cannot prove a particular service name, task history, endpoint, firewall, or application response. | Run the matching read-only health probe on DEV/UAT with confirmed values. |
 | `Install-DriftTask.Tests.ps1` mocks Task Scheduler. | Unit coverage cannot prove SYSTEM permissions, legacy-host trigger serialization, task history, or monitor pickup. | Complete the unique-name administrator integration test on an approved DEV/UAT host and remove the tasks afterward. |
-| Central audit-log destination, Datadog agent/API key, monitor, and on-call routing remain operations-owned. | Primary exit codes and JSONL logs work, but alerts may not reach a dashboard or person. | Confirm `VES_AUDIT_LOG_DIR`, log shipping, agent/API key, monitors, and routing before production activation. |
+| Central audit-log destination remains operations-owned, and the telemetry push is commented out in code. | Primary exit codes and JSONL logs work, but **no** alert reaches a dashboard or person. | Confirm `VES_AUDIT_LOG_DIR` and log shipping, and decide whether to restore the disabled telemetry push, before production activation. |
 | Break-glass policy is not finalized. The gate supports audited `-AllowOverride`, but `Deploy-Processor.ps1` does not pass it through. | Operators may not know whether a failed gate is an absolute block or who can authorize an exception. | Change governance must decide the policy; testers must not use `-AllowOverride` or `-AllowCommitOnly` to obtain a pass. |
 | `Verify-Config.ps1` returns a `.pass` object rather than enforcing the repository exit-code contract by itself. | A tester who looks only at `$LASTEXITCODE` after calling the helper can misclassify drift. | Use `.pass` for the direct helper test and `Invoke-Verification.ps1 -Mode VerifyConfig` for operational exit codes. |
 | PSScriptAnalyzer is optional and may not be installed on the workstation. | Parser and Pester can pass without a lint result. | Report `LINT NOT RUN` when unavailable; never report an unavailable lint check as passed. |
@@ -1473,7 +1481,7 @@ requesting a UAT pilot. A green workstation suite does not close these items.
 | Gate exits `10` with no content source | Commit-only validation was refused. | Supply the approved trust parameter or tagged baseline. Do not add `-AllowCommitOnly` for acceptance. |
 | Health check exits `3` | At least one configured probe failed. | Record the exact assembly, service, process, task, log, or endpoint failure and stop the deployment decision. |
 | Health check exits `10` | No meaningful probe was configured or input was unsafe. | Obtain the exact probe values from the server/application owner. |
-| `-WhatIf` gate passes but an audit log or Datadog event appears | Expected: gate-only mode avoids target changes but still records evidence. | Verify the before/after hashes are identical and retain the log. |
+| `-WhatIf` gate passes but an audit log appears | Expected: gate-only mode avoids target changes but still records evidence. | Verify the before/after hashes are identical and retain the log. |
 | Drift heartbeat is fresh but its stored runner outcome is `ERROR`/`2` | The runner completed recently but could not verify the inventory or trust. | Treat freshness and verification outcome as separate results; investigate the runner error. |
 | Scheduled task `LastTaskResult` is `2` with the checked-in inventory | Expected because the inventory is incomplete. | Confirm the heartbeat records the same error, save evidence, then remove the unique test tasks. |
 | Scheduled task remains `Running` past two minutes | The runner may be blocked, hung, or waiting on a host dependency. | Record task state/history and logs, then have the Windows administrator stop and remove only the unique test tasks. |

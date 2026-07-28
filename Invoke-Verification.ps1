@@ -96,13 +96,15 @@ function Out-Result([int]$code) {
 }
 # Git plumbing (Invoke-VesGit) comes from the module, shared with the readback path.
 
+# --- DATADOG DISABLED ---------------------------------------------------------
 # Emit the verify outcome to Datadog as gauges (non-fatal), mirroring Invoke-HealthCheck.
 # $ok = prod matches baseline; $mismatch = count of drifted items. Never blocks a verify.
-function Send-VerifyMetric([bool]$ok, [int]$mismatch) {
-    $ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment), 'check:verify', "mode:$Mode")
-    Send-VesDatadogMetric -Metric 'deployment.verify.status'   -Value ([int]$ok) -Tags $ddTags
-    Send-VesDatadogMetric -Metric 'deployment.verify.mismatch' -Value $mismatch  -Tags $ddTags
-}
+# function Send-VerifyMetric([bool]$ok, [int]$mismatch) {
+#     $ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment), 'check:verify', "mode:$Mode")
+#     Send-VesDatadogMetric -Metric 'deployment.verify.status'   -Value ([int]$ok) -Tags $ddTags
+#     Send-VesDatadogMetric -Metric 'deployment.verify.mismatch' -Value $mismatch  -Tags $ddTags
+# }
+# ------------------------------------------------------------------------------
 
 try {
     switch ($Mode) {
@@ -259,7 +261,7 @@ try {
             $fileMismatch = $cmp.Missing.Count + $cmp.Changed.Count + $cmp.Extra.Count
             if ($Mode -eq 'VerifyFiles') {
                 $result.status = if ($filesOk) {'match'} else {'drift'}
-                Send-VerifyMetric $filesOk $fileMismatch
+                # DATADOG DISABLED: Send-VerifyMetric $filesOk $fileMismatch
                 Out-Result ($(if ($filesOk) { $VES_EXIT_OK } else { $VES_EXIT_DRIFT }))
             }
             $script:filesOk = $filesOk               # All mode picks these up below
@@ -282,12 +284,12 @@ try {
         # config-only mode returns on config alone; All mode requires BOTH files and config to pass
         if ($Mode -eq 'VerifyConfig') {
             $result.status = if ($configOk) {'match'} else {'drift'}
-            Send-VerifyMetric $configOk $cfgMismatch
+            # DATADOG DISABLED: Send-VerifyMetric $configOk $cfgMismatch
             Out-Result ($(if ($configOk) { $VES_EXIT_OK } else { $VES_EXIT_DRIFT }))
         }
         $allOk = ($script:filesOk -and $configOk)
         $result.status = if ($allOk) {'match'} else {'drift'}
-        Send-VerifyMetric $allOk ($script:fileMismatch + $cfgMismatch)
+        # DATADOG DISABLED: Send-VerifyMetric $allOk ($script:fileMismatch + $cfgMismatch)
         Out-Result ($(if ($allOk) { $VES_EXIT_OK } else { $VES_EXIT_DRIFT }))
     }
 }

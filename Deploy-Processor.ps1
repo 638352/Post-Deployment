@@ -97,8 +97,10 @@ if ($BaselineRepo -and [string]::IsNullOrWhiteSpace($ReleaseTag)) {
     exit $VES_EXIT_USAGE
 }
 
+# --- DATADOG DISABLED ---------------------------------------------------------
 # Low-cardinality tags shared by every deploy event emitted to Datadog.
-$ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment))
+# $ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment))
+# ------------------------------------------------------------------------------
 
 function Stop-Deploy([int]$code) {
     $outcome = Get-VesOutcome -ExitCode $code
@@ -140,20 +142,22 @@ function Step($name, $code) {
     if ($LASTEXITCODE -ne 0) {
         $stageCode = $LASTEXITCODE
         Write-VesLog ERROR "STAGE FAILED: $name (exit $stageCode)" -LogFile $LogFile
+        # --- DATADOG DISABLED -------------------------------------------------
         # Timeline event on stage failure. The gate self-reports its own block/override
         # events, so skip it here to avoid double-marking the same failure.
-        if ($name -ne 'pre-deploy gate') {
-            Send-VesDatadogEvent -Title "Deploy FAILED at '$name': $Processor" `
-                -Text "Stage '$name' failed for $Processor $StagedCommit (exit $stageCode)." `
-                -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:deploy-failed')
-        }
+        # if ($name -ne 'pre-deploy gate') {
+        #     Send-VesDatadogEvent -Title "Deploy FAILED at '$name': $Processor" `
+        #         -Text "Stage '$name' failed for $Processor $StagedCommit (exit $stageCode)." `
+        #         -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:deploy-failed')
+        # }
+        # ----------------------------------------------------------------------
         Stop-Deploy $stageCode
     }
 }
 
 # Stage 1: block the deploy unless the staged commit/content matches the approved baseline
 # Invoked via powershell.exe child process so that `exit N` inside the script terminates only
-# the child -- not this process -- allowing Step's error logging and Datadog event to fire.
+# the child -- not this process -- allowing Step's error logging to fire.
 Step 'pre-deploy gate' {
     # -LogFile appended only when set: PS 5.1 drops empty-string args to native
     # commands, which would leave a bare -LogFile expecting a value in the child.
@@ -371,9 +375,11 @@ if ($BackupRoot -and $KeepBackups -gt 0 -and (Test-Path -LiteralPath $BackupRoot
 }
 
 Write-VesLog OK "DEPLOY COMPLETE: $Processor @ $StagedCommit verified+healthy" -LogFile $LogFile
+# --- DATADOG DISABLED ---------------------------------------------------------
 # Timeline event: the "authorized deploy" marker. Drift after this point is expected;
 # drift with no marker is the unauthorized-change picture the drift runner surfaces.
-Send-VesDatadogEvent -Title "Deploy COMPLETE: $Processor" `
-    -Text "Deploy of $Processor $StagedCommit completed: gate + copy + verify + health all green." `
-    -AlertType 'success' -Tags ($ddTags + 'event:deploy-complete')
+# Send-VesDatadogEvent -Title "Deploy COMPLETE: $Processor" `
+#     -Text "Deploy of $Processor $StagedCommit completed: gate + copy + verify + health all green." `
+#     -AlertType 'success' -Tags ($ddTags + 'event:deploy-complete')
+# ------------------------------------------------------------------------------
 Stop-Deploy $VES_EXIT_OK

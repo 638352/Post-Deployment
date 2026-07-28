@@ -312,25 +312,30 @@ Describe 'Write-VesLog' {
     }
 }
 
-Describe 'Get-VesDatadogEnvTag' {
-    BeforeEach { $script:OldDdEnv = $env:DD_ENV }
-    AfterEach { $env:DD_ENV = $script:OldDdEnv }
-
-    It 'defaults to env:prod when DD_ENV is not set' {
-        $env:DD_ENV = $null
-        (Get-VesDatadogEnvTag) | Should -Be 'env:prod'
-    }
-
-    It 'uses normalized DD_ENV when provided' {
-        $env:DD_ENV = '  UAT  '
-        (Get-VesDatadogEnvTag) | Should -Be 'env:uat'
-    }
-
-    It 'lets an explicit target environment override DD_ENV' {
-        $env:DD_ENV = 'prod'
-        (Get-VesDatadogEnvTag -Environment 'qa') | Should -Be 'env:qa'
-    }
-}
+# --- DATADOG DISABLED ---------------------------------------------------------
+# Get-VesDatadogEnvTag is commented out in module\VesVerify.psm1; restore both
+# together.
+#
+# Describe 'Get-VesDatadogEnvTag' {
+#     BeforeEach { $script:OldDdEnv = $env:DD_ENV }
+#     AfterEach { $env:DD_ENV = $script:OldDdEnv }
+#
+#     It 'defaults to env:prod when DD_ENV is not set' {
+#         $env:DD_ENV = $null
+#         (Get-VesDatadogEnvTag) | Should -Be 'env:prod'
+#     }
+#
+#     It 'uses normalized DD_ENV when provided' {
+#         $env:DD_ENV = '  UAT  '
+#         (Get-VesDatadogEnvTag) | Should -Be 'env:uat'
+#     }
+#
+#     It 'lets an explicit target environment override DD_ENV' {
+#         $env:DD_ENV = 'prod'
+#         (Get-VesDatadogEnvTag -Environment 'qa') | Should -Be 'env:qa'
+#     }
+# }
+# ------------------------------------------------------------------------------
 
 Describe 'Test-VesReleaseTag' {
     It 'accepts prefixed and bare vMAJOR.MINOR.PATCH tags' {
