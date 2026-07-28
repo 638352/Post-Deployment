@@ -152,6 +152,58 @@ conflict before the tester continues.
 | `Test-DriftHeartbeat.ps1` | `Test-DriftHeartbeat.Tests.ps1` | Read the local runner heartbeat | READ-ONLY |
 | `Install-DriftTask.ps1` | `Install-DriftTask.Tests.ps1` | Optional DEV/UAT Task Scheduler integration | CHANGES TEST HOST |
 
+## Script run order and how to run each one
+
+This section is a quick map for both audiences. It does not replace the detailed
+test sections below; it tells you the order and the exact script to use first.
+After **every** script run, enter `$LASTEXITCODE` and record the value.
+
+### Non-technical path (recommended order)
+
+1. Complete **One-time workstation setup** first.
+2. Run `Invoke-Tests.ps1` for **syntax safety** using **Test 1**.
+3. Run `Invoke-Tests.ps1` for the **full automated suite** using **Test 2**.
+4. Test the shared module (`module\VesVerify.psm1`) through **Test 3**.
+5. Test configuration checks (`Verify-Config.ps1`) through **Test 4**.
+6. Test capture and verification (`Invoke-Verification.ps1`) through **Test 5**.
+7. Test readiness checks (`Invoke-Preflight.ps1`) through **Test 6**.
+8. Test deploy blocking (`Invoke-PreDeployGate.ps1`) through **Test 7**.
+9. Test health checks (`Invoke-HealthCheck.ps1`) through **Test 8**.
+10. Run deployment engine checks (`Deploy-Processor.ps1`) with `-WhatIf` in **Test 9**.
+11. Check the processor wrappers (`processors\*.ps1`) in **Test 10** and **Test 11**.
+12. Test drift and scheduling scripts (`Start-DriftRunner.ps1`, `Test-DriftHeartbeat.ps1`, `Install-DriftTask.ps1`) in **Test 12-14**.
+
+Stop at the first unexpected failure. Do not skip ahead and do not switch order.
+
+### Technical path (script-by-script quick commands)
+
+Use these as entry commands, then follow the linked test section for full
+parameters, guards, and expected outcomes.
+
+| Script | Run order | Quick command | Detailed section |
+|---|---:|---|---|
+| `Invoke-Tests.ps1` (full suite) | 1 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1` | Test 2 |
+| `Invoke-Tests.ps1` (targeted suite) | 2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1 -Path .\tests\<ScriptName>.Tests.ps1` | Tests 3-14 automated checks |
+| `module\VesVerify.psm1` | 3 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1 -Path .\tests\VesVerify.Module.Tests.ps1` | Test 3 |
+| `Verify-Config.ps1` (direct object result) | 4 | `& .\Verify-Config.ps1 -ContractPath .\tests\fixtures\json\contract.json -ConfigPath .\tests\fixtures\json\config.json` | Test 4 |
+| `Invoke-Verification.ps1 -Mode VerifyConfig` | 5 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Verification.ps1 -Mode VerifyConfig -ConfigContract <path> -ConfigPath <path> -Processor <name> -Environment <env>` | Test 5 |
+| `Invoke-Verification.ps1 -Mode Capture` | 6 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Verification.ps1 -Mode Capture -ReleaseRoot <path> -ManifestPath <path> -Processor <name> -CommitSha <id> -Environment <env>` | Test 5 |
+| `Invoke-Verification.ps1 -Mode VerifyFiles` | 7 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Verification.ps1 -Mode VerifyFiles -ReleaseRoot <path> -ManifestPath <path> -Processor <name> -Environment <env>` | Test 5 |
+| `Invoke-Verification.ps1 -Mode All` | 8 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Verification.ps1 -Mode All -ReleaseRoot <path> -ManifestPath <path> -ConfigContract <path> -ConfigPath <path> -Processor <name> -Environment <env>` | Final acceptance / rollback checks |
+| `Invoke-Preflight.ps1` | 9 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Preflight.ps1 -Processor <name> -ApprovedCommitParam <ssm> -TrustParam <ssm> -ManifestPath <path> -Json` | Test 6 |
+| `Invoke-PreDeployGate.ps1` | 10 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-PreDeployGate.ps1 -StagedRoot <path> -StagedCommit <id> -ApprovedCommitParam <ssm> -TrustParam <ssm> -ManifestPath <path> -Processor <name>` | Test 7 |
+| `Invoke-HealthCheck.ps1` | 11 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-HealthCheck.ps1 -Processor <name> -FreshLogDir <path> -FreshLogMaxAgeMinutes 60 -Environment <env> -Json` | Test 8 |
+| `Deploy-Processor.ps1` | 12 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Deploy-Processor.ps1 -Processor <name> -StagedRoot <path> -TargetRoot <path> -StagedCommit <id> -ManifestPath <path> -TrustParam <ssm> -ApprovedCommitParam <ssm> -WhatIf` | Test 9 |
+| `processors\Deploy-SYSTEM_NAME.ps1` (template) | 13 | `Select-String -LiteralPath .\processors\Deploy-SYSTEM_NAME.ps1 -Pattern 'TEMPLATE\|SYSTEM_NAME'` | Test 10 |
+| `processors\Deploy-OutboundDBQ-uat.ps1` | 14 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\processors\Deploy-OutboundDBQ-uat.ps1 -StagedRoot <path> -StagedCommit <id> -ReleaseTag OutboundDBQ/v<semver> -BaselineRepo <path> -Region <region> -ConfirmedRunbookValues -WhatIf` | Test 11 |
+| `Start-DriftRunner.ps1` | 15 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-DriftRunner.ps1 -TargetsFile .\targets.json -LogDir <path>` | Test 12 |
+| `Test-DriftHeartbeat.ps1` | 16 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-DriftHeartbeat.ps1 -HeartbeatPath <path> -MaxAgeMinutes 15 -Environment <env> -Json` | Test 13 |
+| `Install-DriftTask.ps1` | 17 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-DriftTask.ps1 -TargetsFile <path> -IntervalMinutes 30 -TaskName <name> -WatchdogTaskName <name> -LogDir <path>` | Test 14 |
+
+For non-technical testers: use the numbered tests below exactly as written. For
+technical operators: this table is the fastest route to the correct script and
+baseline command shape.
+
 ## Understanding the result
 
 Most runnable scripts use these exit codes:
