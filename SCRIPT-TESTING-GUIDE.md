@@ -16,8 +16,9 @@ every canonical PowerShell script in that repository:
 - the shared `module\VesVerify.psm1` module; and
 - the test scripts under `tests\`.
 
-Files with ` - Copy` in their names are personal working copies and are not
-tested as release scripts. `Post-Deployment-datadog-558667ed\` is a frozen
+Only Git-tracked scripts in the live tree are considered canonical. Files with
+` - Copy` in their names and untracked scratch scripts are personal working
+copies, not release scripts. `Post-Deployment-datadog-558667ed\` is a frozen
 reference snapshot and is also excluded.
 
 ## Read this before testing
@@ -56,6 +57,24 @@ These are expected conditions in the repository, not test surprises:
   or stage the correct per-server configuration.
 - Confirm whether the required SSM parameters are in `us-gov-east-1` or
   `us-gov-west-1`. Do not guess the region.
+
+### Test coverage at a glance
+
+| Script or component | Automated coverage | Additional check in this guide | Highest safety level |
+|---|---|---|---|
+| `Invoke-Tests.ps1` | Runs every file under `tests\` | Full-suite result and exit code | SAFE |
+| `module\VesVerify.psm1` | `VesVerify.Module.Tests.ps1` | Do not run the module directly | SAFE |
+| `Verify-Config.ps1` | `Verify-Config.Tests.ps1` | Bundled-fixture configuration check | SAFE |
+| `Invoke-Verification.ps1` | `Invoke-Verification.Tests.ps1` | Local config, capture, and file comparison | SAFE |
+| `Invoke-Preflight.ps1` | `Invoke-Preflight.Tests.ps1` | Local contract check and read-only inventory check | READ-ONLY |
+| `Invoke-PreDeployGate.ps1` | `Invoke-PreDeployGate.Tests.ps1` | UAT gate acceptance | READ-ONLY |
+| `Invoke-HealthCheck.ps1` | `Invoke-HealthCheck.Tests.ps1` | Local fresh-log and UAT processor checks | READ-ONLY |
+| `Deploy-Processor.ps1` | `Deploy-Processor.Tests.ps1` | UAT gate-only fingerprint check | DEPLOYMENT without `-WhatIf` |
+| `processors\Deploy-SYSTEM_NAME.ps1` | Shared engine coverage | Template and placeholder inspection | SAFE |
+| `processors\Deploy-OutboundDBQ-uat.ps1` | Shared engine coverage | Safety-lock and UAT gate-only checks | DEPLOYMENT without `-WhatIf` |
+| `Start-DriftRunner.ps1` | `Start-DriftRunner.Tests.ps1` | Fail-closed starter-inventory run | READ-ONLY |
+| `Test-DriftHeartbeat.ps1` | `Test-DriftHeartbeat.Tests.ps1` | Read the local runner heartbeat | READ-ONLY |
+| `Install-DriftTask.ps1` | `Install-DriftTask.Tests.ps1` | Optional DEV/UAT Task Scheduler integration | CHANGES TEST HOST |
 
 ## Understanding the result
 
@@ -126,12 +145,15 @@ Do not install modules on a production server.
 Copy the whole block into Windows PowerShell:
 
 ```powershell
+$trackedPaths = @(git ls-files -- '*.ps1' '*.psm1')
+if ($LASTEXITCODE -ne 0) {
+    throw 'Could not read the canonical file list from Git.'
+}
+
 $files = @(
-    Get-ChildItem . -File -Filter '*.ps1' |
-        Where-Object Name -NotLike '* - Copy.ps1'
-    Get-ChildItem .\processors -File -Filter '*.ps1'
-    Get-ChildItem .\tests -File -Filter '*.ps1'
-    Get-Item .\module\VesVerify.psm1
+    $trackedPaths |
+        Where-Object { $_ -notlike 'Post-Deployment-datadog-558667ed/*' } |
+        ForEach-Object { Get-Item -LiteralPath $_ }
 )
 
 $problems = foreach ($file in $files) {
@@ -168,6 +190,33 @@ Fail:
 
 - One or more files are listed with a line number. Stop here and send the full
   table to the maintainer.
+
+### Optional supplemental lint
+
+PSScriptAnalyzer can find style, compatibility, and maintainability problems
+that the parser does not. It is supplemental: syntax and Pester results must
+still be reported separately.
+
+```powershell
+$analyzer = Get-Module -ListAvailable PSScriptAnalyzer |
+    Sort-Object Version -Descending |
+    Select-Object -First 1
+
+if (-not $analyzer) {
+    'LINT NOT RUN: PSScriptAnalyzer is not installed.'
+} else {
+    Import-Module $analyzer.Path -Force
+    $lintResults = foreach ($file in $files) {
+        Invoke-ScriptAnalyzer -Path $file.FullName
+    }
+    $lintResults | Format-Table RuleName,Severity,ScriptName,Line,Message -AutoSize
+    "LINT FINDINGS: $(@($lintResults).Count)"
+}
+```
+
+If the module is unavailable, record `LINT NOT RUN`; do not record a lint pass.
+Do not install it on a production server. Any installation on a development
+workstation should follow the workstation owner's module-approval process.
 
 ## Test 2: Run the full automated test suite
 
@@ -769,10 +818,29 @@ recorded runner outcome is `ERROR` with exit code `2`. That is expected.
 ## Test 14: Test scheduled drift-task installation
 
 **Script:** `Install-DriftTask.ps1`  
-**Safety:** CHANGES TEST HOST
+**Safety:** SAFE in the automated suite; CHANGES TEST HOST for the integration
+check
 
-This script has no dedicated Pester test because it must use Windows Task
-Scheduler. Test it only on an approved DEV/UAT host in **Windows PowerShell as
+### Automated check
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File .\Invoke-Tests.ps1 `
+    -Path .\tests\Install-DriftTask.Tests.ps1
+$LASTEXITCODE
+```
+
+Pass: `Failed: 0` and exit code `0`.
+
+This suite mocks Task Scheduler. It checks runner/watchdog registration,
+uninstallation, interval validation, missing-inventory warnings, and default or
+explicit heartbeat age without registering a real task or requiring
+Administrator rights.
+
+### DEV/UAT Task Scheduler integration check
+
+The remaining steps exercise the real Windows Task Scheduler integration. Run
+them only on an approved DEV/UAT host in **Windows PowerShell as
 Administrator**. Use unique test task names so the real drift tasks are not
 replaced.
 
@@ -862,6 +930,7 @@ loads them through Pester.
 |---|---|
 | `tests\_helpers.ps1` | Shared temporary-folder and child-process helpers. Do not run it by itself. |
 | `tests\Deploy-Processor.Tests.ps1` | Deployment order, gate-only mode, required configuration, and running-process safety. |
+| `tests\Install-DriftTask.Tests.ps1` | Mocked runner/watchdog registration, uninstallation, interval rules, and heartbeat-age arguments. |
 | `tests\Invoke-HealthCheck.Tests.ps1` | Fresh/stale logs, assemblies, missing probes, and exact process paths. |
 | `tests\Invoke-PreDeployGate.Tests.ps1` | Commit/content gates, SSM errors, required paths, and Git-tag baselines. |
 | `tests\Invoke-Preflight.Tests.ps1` | Usage, manifests, contracts, stale patterns, inventory, and SSM failure reporting. |
