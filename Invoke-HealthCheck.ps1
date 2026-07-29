@@ -58,7 +58,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("health-{0}" -f $Processor) }
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: health verification' `
-    -Data @{runId=$runId; script='Invoke-HealthCheck.ps1'; processor=$Processor; environment=$Environment; release=$CommitSha; releaseTag=$ReleaseTag} `
+    -Data @{runId = $runId; script = 'Invoke-HealthCheck.ps1'; processor = $Processor; environment = $Environment; release = $CommitSha; releaseTag = $ReleaseTag } `
     -LogFile $LogFile
 # every check appends a reason string here; a non-empty list at the end = unhealthy (exit 3)
 $fail = New-Object System.Collections.Generic.List[string]
@@ -66,15 +66,15 @@ $fail = New-Object System.Collections.Generic.List[string]
 # A health check with no requested probe is not evidence. Treat it as a usage
 # error so a misconfigured deploy cannot receive a false green result.
 $probeCount = $RequiredAssemblies.Count + $ScheduledTasks.Count
-foreach ($value in @($ServiceName,$ProcessName,$ProcessPathRoot,$FreshLogDir,$HealthUrl)) {
+foreach ($value in @($ServiceName, $ProcessName, $ProcessPathRoot, $FreshLogDir, $HealthUrl)) {
     if (-not [string]::IsNullOrWhiteSpace($value)) { $probeCount++ }
 }
 if ($probeCount -eq 0) {
     Write-VesLog ERROR 'No health probes were configured; refusing to report a pass.' `
-        -Data @{runId=$runId; outcome='ERROR'; exitCode=$VES_EXIT_USAGE} -LogFile $LogFile
+        -Data @{runId = $runId; outcome = 'ERROR'; exitCode = $VES_EXIT_USAGE } -LogFile $LogFile
     if ($Json) {
-        [PSCustomObject]@{runId=$runId; processor=$Processor; commit=$CommitSha; healthy=$false; outcome='ERROR'; failures=@('no probes configured')} |
-            ConvertTo-Json -Compress
+        [PSCustomObject]@{runId = $runId; processor = $Processor; commit = $CommitSha; healthy = $false; outcome = 'ERROR'; failures = @('no probes configured') } |
+        ConvertTo-Json -Compress
     }
     exit $VES_EXIT_USAGE
 }
@@ -88,12 +88,14 @@ foreach ($dll in $RequiredAssemblies) {
         # resolve them now, which is what surfaces a missing transitive dependency.
         [void]$asm.GetTypes()
         Write-VesLog OK "Assembly OK: $([IO.Path]::GetFileName($dll))" -LogFile $LogFile
-    } catch [System.Reflection.ReflectionTypeLoadException] {
+    }
+    catch [System.Reflection.ReflectionTypeLoadException] {
         # LoaderExceptions names the actual missing assembly
         $inner = ($_.Exception.LoaderExceptions | ForEach-Object { $_.Message }) -join '; '
         $fail.Add("assembly:$dll -> $inner")
         Write-VesLog ERROR "Assembly LOAD FAIL (missing dep): $dll -> $inner" -LogFile $LogFile
-    } catch {
+    }
+    catch {
         $fail.Add("assembly:$dll -> $($_.Exception.Message)")
         Write-VesLog ERROR "Assembly LOAD FAIL: $dll -> $($_.Exception.Message)" -LogFile $LogFile
     }
@@ -105,26 +107,29 @@ if ($ServiceName) {
     if (-not $svc -or $svc.Status -ne 'Running') {
         $fail.Add("service:$ServiceName not running")
         Write-VesLog ERROR "Service DOWN: $ServiceName" -LogFile $LogFile
-    } else { Write-VesLog OK "Service running: $ServiceName" -LogFile $LogFile }
+    }
+    else { Write-VesLog OK "Service running: $ServiceName" -LogFile $LogFile }
 }
 elseif ($ProcessPathRoot) {
     try {
         $rootItem = Get-Item -LiteralPath $ProcessPathRoot -ErrorAction Stop
         $rootPrefix = $rootItem.FullName.TrimEnd('\') + '\'
-        $matches = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
-            $_.ExecutablePath -and
-            $_.ExecutablePath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -and
-            ([string]::IsNullOrWhiteSpace($ProcessArgumentPattern) -or $_.CommandLine -match $ProcessArgumentPattern)
-        })
-        if ($matches.Count -eq 0) {
+        $runningProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+                $_.ExecutablePath -and
+                $_.ExecutablePath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+                ([string]::IsNullOrWhiteSpace($ProcessArgumentPattern) -or $_.CommandLine -match $ProcessArgumentPattern)
+            })
+        if ($runningProcesses.Count -eq 0) {
             $detail = if ($ProcessArgumentPattern) { " under $ProcessPathRoot matching /$ProcessArgumentPattern/" } else { " under $ProcessPathRoot" }
             $fail.Add("process-path:$ProcessPathRoot not found")
             Write-VesLog ERROR "Process DOWN:$detail" -LogFile $LogFile
-        } else {
-            $pids = @($matches | ForEach-Object { $_.ProcessId }) -join ','
+        }
+        else {
+            $pids = @($runningProcesses | ForEach-Object { $_.ProcessId }) -join ','
             Write-VesLog OK "Process running under $ProcessPathRoot (PID $pids)" -LogFile $LogFile
         }
-    } catch {
+    }
+    catch {
         $fail.Add("process-path:$ProcessPathRoot -> $($_.Exception.Message)")
         Write-VesLog ERROR "Process path check failed: $ProcessPathRoot -> $($_.Exception.Message)" -LogFile $LogFile
     }
@@ -133,7 +138,8 @@ elseif ($ProcessName) {
     if (-not (Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)) {
         $fail.Add("process:$ProcessName not found")
         Write-VesLog ERROR "Process DOWN: $ProcessName" -LogFile $LogFile
-    } else { Write-VesLog OK "Process running: $ProcessName" -LogFile $LogFile }
+    }
+    else { Write-VesLog OK "Process running: $ProcessName" -LogFile $LogFile }
 }
 
 # Task Scheduler jobs: the outbound processors run as scheduled tasks, so their
@@ -142,14 +148,15 @@ foreach ($tn in $ScheduledTasks) {
     try {
         $task = Get-ScheduledTask -TaskName $tn -ErrorAction Stop
         $info = Get-ScheduledTaskInfo -TaskName $tn -ErrorAction Stop
-        $lr   = $info.LastTaskResult
+        $lr = $info.LastTaskResult
         if ($task.State -eq 'Disabled') {
             $fail.Add("task:$tn disabled"); Write-VesLog ERROR "Task DISABLED: $tn" -LogFile $LogFile
         }
         elseif ($lr -eq 0) {
             Write-VesLog OK "Task OK: $tn (last result 0)" -LogFile $LogFile
         }
-        elseif ($lr -eq 267009) {   # 0x41301 = currently running
+        elseif ($lr -eq 267009) {
+            # 0x41301 = currently running
             Write-VesLog OK "Task running: $tn" -LogFile $LogFile
         }
         else {
@@ -157,7 +164,8 @@ foreach ($tn in $ScheduledTasks) {
             $fail.Add("task:$tn lastresult=$lr")
             Write-VesLog ERROR ("Task last run not OK: {0} (result 0x{1:X})" -f $tn, $lr) -LogFile $LogFile
         }
-    } catch {
+    }
+    catch {
         $fail.Add("task:$tn not found")
         Write-VesLog ERROR "Task not found: $tn -> $($_.Exception.Message)" -LogFile $LogFile
     }
@@ -169,18 +177,21 @@ if ($FreshLogDir) {
     if (-not (Test-Path -LiteralPath $FreshLogDir)) {
         $fail.Add("logdir:$FreshLogDir missing")
         Write-VesLog ERROR "Log dir missing: $FreshLogDir" -LogFile $LogFile
-    } else {
+    }
+    else {
         $newest = Get-ChildItem -LiteralPath $FreshLogDir -File -Recurse -ErrorAction SilentlyContinue |
-                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if (-not $newest) {
             $fail.Add("logdir:$FreshLogDir empty")
             Write-VesLog ERROR "No log files under: $FreshLogDir" -LogFile $LogFile
-        } else {
+        }
+        else {
             $ageMin = [int]((Get-Date) - $newest.LastWriteTime).TotalMinutes
             if ($ageMin -gt $FreshLogMaxAgeMinutes) {
                 $fail.Add("log stale: $($newest.Name) ${ageMin}min")
                 Write-VesLog ERROR "Log stale: $($newest.Name) is ${ageMin}min old (max $FreshLogMaxAgeMinutes)" -LogFile $LogFile
-            } else {
+            }
+            else {
                 Write-VesLog OK "Fresh log: $($newest.Name) (${ageMin}min old)" -LogFile $LogFile
             }
         }
@@ -195,8 +206,10 @@ if ($HealthUrl) {
         if ($resp.StatusCode -ne $ExpectedStatus) {
             $fail.Add("endpoint:$HealthUrl -> $($resp.StatusCode)")
             Write-VesLog ERROR "Endpoint bad status: $($resp.StatusCode)" -LogFile $LogFile
-        } else { Write-VesLog OK "Endpoint OK: $HealthUrl" -LogFile $LogFile }
-    } catch {
+        }
+        else { Write-VesLog OK "Endpoint OK: $HealthUrl" -LogFile $LogFile }
+    }
+    catch {
         $fail.Add("endpoint:$HealthUrl -> $($_.Exception.Message)")
         Write-VesLog ERROR "Endpoint FAIL: $($_.Exception.Message)" -LogFile $LogFile
     }
@@ -221,13 +234,13 @@ if (-not $healthy) {
 if ($Json) {
     # commit included for traceability (which build this liveness result belongs to);
     # kept out of the disabled telemetry tags above on purpose to avoid per-commit cardinality.
-    [PSCustomObject]@{ runId=$runId; processor=$Processor; commit=$CommitSha; healthy=$healthy; outcome=$(if ($healthy) {'PASS'} else {'FAIL'}); failures=@($fail) } | ConvertTo-Json -Compress
+    [PSCustomObject]@{ runId = $runId; processor = $Processor; commit = $CommitSha; healthy = $healthy; outcome = $(if ($healthy) { 'PASS' } else { 'FAIL' }); failures = @($fail) } | ConvertTo-Json -Compress
 }
-Write-VesLog ($(if ($healthy){'OK'}else{'ERROR'})) ("Health check {0}" -f $(if ($healthy){'PASS'}else{'FAIL'})) `
-    -Data @{ processor=$Processor; commit=$CommitSha } -LogFile $LogFile
+Write-VesLog ($(if ($healthy) { 'OK' }else { 'ERROR' })) ("Health check {0}" -f $(if ($healthy) { 'PASS' }else { 'FAIL' })) `
+    -Data @{ processor = $Processor; commit = $CommitSha } -LogFile $LogFile
 $exitCode = $(if ($healthy) { $VES_EXIT_OK } else { $VES_EXIT_HEALTH })
-Write-VesLog ($(if ($healthy){'OK'}else{'ERROR'})) `
-    ("RUN END: health verification outcome={0} exit={1}" -f $(if ($healthy) {'PASS'} else {'FAIL'}), $exitCode) `
-    -Data @{runId=$runId; outcome=$(if ($healthy) {'PASS'} else {'FAIL'}); exitCode=$exitCode; processor=$Processor; release=$CommitSha; releaseTag=$ReleaseTag} `
+Write-VesLog ($(if ($healthy) { 'OK' }else { 'ERROR' })) `
+("RUN END: health verification outcome={0} exit={1}" -f $(if ($healthy) { 'PASS' } else { 'FAIL' }), $exitCode) `
+    -Data @{runId = $runId; outcome = $(if ($healthy) { 'PASS' } else { 'FAIL' }); exitCode = $exitCode; processor = $Processor; release = $CommitSha; releaseTag = $ReleaseTag } `
     -LogFile $LogFile
 exit $exitCode

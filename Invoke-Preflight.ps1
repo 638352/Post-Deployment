@@ -49,6 +49,7 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("preflight-{0}" -f $Processor) }
 
 # every check appends one row here; the final exit code is derived from their statuses
 $checks = New-Object System.Collections.Generic.List[object]
