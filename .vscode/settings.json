@@ -1,0 +1,6 @@
+{
+  "github.copilot.chat.claudeAgent.allowAutoPermissions": true,
+  "github.copilot.chat.claudeAgent.useSdkExtension": true,
+  "github.copilot.chat.alternateGeminiModelFPrompt.enabled": true,
+  "github.copilot.chat.alternateGptPrompt.enabled": true
+}
