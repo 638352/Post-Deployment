@@ -265,13 +265,11 @@ try {
             }
             # files-only mode returns here; All mode stashes the result and falls through to config
             $filesOk = $cmp.Match
-            $fileMismatch = $cmp.Missing.Count + $cmp.Changed.Count + $cmp.Extra.Count
             if ($Mode -eq 'VerifyFiles') {
                 $result.status = if ($filesOk) { 'match' } else { 'drift' }
                 Out-Result ($(if ($filesOk) { $VES_EXIT_OK } else { $VES_EXIT_DRIFT }))
             }
-            $script:filesOk = $filesOk               # All mode picks these up below
-            $script:fileMismatch = $fileMismatch
+            $script:filesOk = $filesOk               # All mode picks this up below
         }
     }
 
@@ -285,8 +283,6 @@ try {
         $cfg = & (Join-Path $PSScriptRoot 'Verify-Config.ps1') -ContractPath $ConfigContract -ConfigPath $ConfigPath -Region $Region -LogFile $LogFile
         $result['detail']['config'] = $cfg
         $configOk = [bool]$cfg.pass
-        $cfgMismatch = $cfg.missingRequired.Count + $cfg.valueMismatch.Count
-        if ($cfg.PSObject.Properties['extraKeys']) { $cfgMismatch += $cfg.extraKeys.Count }
         # config-only mode returns on config alone; All mode requires BOTH files and config to pass
         if ($Mode -eq 'VerifyConfig') {
             $result.status = if ($configOk) { 'match' } else { 'drift' }

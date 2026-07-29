@@ -113,6 +113,8 @@ try {
             ConfigContract = $t.configContract
             ConfigPath = $t.configPath
             Processor = $t.processor
+            # No per-target commitSha in the inventory schema; releaseTag is the
+            # release identifier stamped into log entries for this drift run.
             CommitSha = $t.releaseTag
             Environment = $t.environment
             Region = $Region

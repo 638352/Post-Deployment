@@ -58,7 +58,7 @@ Write-VesLog INFO 'RUN START: configuration verification' `
 # both inputs must exist; then load the contract that says what the config must satisfy
 if (-not (Test-Path -LiteralPath $ContractPath)) { throw "Contract not found: $ContractPath" }
 if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Config not found: $ConfigPath" }
-$contract = Get-Content $ContractPath -Raw | ConvertFrom-Json
+$contract = Get-Content $ContractPath -Raw -Encoding utf8 | ConvertFrom-Json
 
 function Get-FlatConfig([string]$path, [string]$format) {
     # flatten whatever format into key -> value, keys colon-delimited
