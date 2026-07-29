@@ -1,6 +1,7 @@
 #Requires -Version 5.1
 <#
 .DESCRIPTION
+    Runs the repository's file-match test suite.
     Needs Pester 5.x; the in-box Pester 3.4 won't parse the tests. Install once:
         Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
     Run under Windows PowerShell 5.1 so the tests use the same engine as prod:

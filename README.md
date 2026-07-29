@@ -450,14 +450,14 @@ and fresh-log health probes; do not pass their binaries to
 
 ## Testing
 
-For the complete operator-facing procedure, including syntax checks, targeted
-tests for every script, safe local exercises, UAT-only checks, evidence
-collection, and cleanup, see [SCRIPT-TESTING-GUIDE.md](SCRIPT-TESTING-GUIDE.md).
+For the operator runbook, see [SCRIPT-TESTING-GUIDE.md](SCRIPT-TESTING-GUIDE.md).
 
-There is a Pester test suite under `tests/`. It is **dev-time only** — run it on
-the workstation/CI where this suite is maintained, NOT on the legacy PS 5.1
-production boxes. It needs Pester 5.0 or newer (the in-box Pester 3.4 will not
-parse the tests); install it once:
+The automated suite is intentionally scoped to one purpose: proving the
+UAT-baseline-versus-production file match flow (`Invoke-Verification.ps1 -Mode
+VerifyFiles`). Run it on a workstation/CI host, not on production servers.
+
+It needs Pester 5.0 or newer (the in-box Pester 3.4 will not parse the tests);
+install it once:
 
 ```powershell
 Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
@@ -473,35 +473,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1
 `Invoke-Tests.ps1` exits with the failed-test count (0 = green), ready to wire into
 CI later. What's covered:
 
-- **Unit** (`tests/VesVerify.Module.Tests.ps1`): the module's pure functions —
-  manifest hashing (stable, order-independent, change-sensitive), the
-  export/import round-trip and tamper detection, `Compare-VesFiles` drift
-  detection, fail-closed target inventory validation, environment alert tags,
-  and the `Write-VesLog` JSONL format. No AWS/host needed.
-- **End-to-end**: each entry script is driven as a real `powershell.exe` child
-  process and asserted against the documented exit-code contract
-  (`0/1/2/3/10`) plus its `-Json` output — `Invoke-Verification` (capture / verify
-  / drift / usage, and capture's `-ArchiveRepo` commit+tag against a throwaway
-  git repo), `Verify-Config` (all three contract formats, undeclared-setting
-  drift, secret-contract rejection, and explicit ignores),
-  `Invoke-HealthCheck` (fresh-log liveness, assembly load, exact-process failure,
-  and no-probe rejection),
-  `Invoke-Preflight` (usage + manifest/contract self-check),
-  `Invoke-PreDeployGate` (pass / block-naming-the-file / commit block / SSM
-  error — SSM is stubbed by a fake `aws.cmd` prepended to PATH, so no real AWS
-  is touched), and `Deploy-Processor` (clean deploy, `-WhatIf`, and the
-  running-instance abort/kill paths using a real locked process under the
-  target dir). `Start-DriftRunner` covers inventory enforcement, drift exits,
-  heartbeat writing, and safe pruning; `Test-DriftHeartbeat` covers fresh,
-  stale, and missing heartbeats. `Install-DriftTask` uses Task Scheduler mocks
-  to cover runner/watchdog registration, uninstallation, interval validation,
-  and heartbeat-age arguments without changing the host.
-
-Deliberately out of scope this round (would need more mocking): the real
-SSM read/write paths (`Get-/Set-VesTrustedHash` against actual AWS, and
-verify-with-`-TrustParam`), and the health check's service / scheduled-task / HTTP
-branches. No test requires AWS, a running service, a scheduled task, or the
-network.
+- creating a baseline manifest in a local test tree;
+- matching-tree pass (`exit 0`);
+- changed-file drift detection (`exit 1`);
+- tampered baseline rejection (`exit 2`);
+- missing required input rejection (`exit 10`).
 
 ## Host prerequisites
 
