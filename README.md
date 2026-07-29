@@ -429,8 +429,8 @@ and fresh-log health probes; do not pass their binaries to
   with `robocopy /MIR` and no `/XF`, so a config file living under TargetRoot is
   replaced by the staged one — on a server whose config legitimately differs
   (endpoints, thumbprints), the deploy flattens it. The gate only proves the
-  file is *present* (-RequiredArtifactPaths), and Verify-Config checks the live
-  file *after* the copy has already replaced it. Decide the fix before PROD:
+  file is _present_ (-RequiredArtifactPaths), and Verify-Config checks the live
+  file _after_ the copy has already replaced it. Decide the fix before PROD:
   exclude configs from the mirror (`/XF *.config`), or stage the per-server
   config alongside the artifact so the mirrored copy is already correct.
 - SSM region. Examples default to us-gov-west-1, but the OMS SSM convention
@@ -451,10 +451,10 @@ and fresh-log health probes; do not pass their binaries to
 ## Testing
 
 For a plain-language guide (where to run, how to run, what pass/fail means),
-see [How-to-Run-Scripts.md](How-to-Run-Scripts.md). For the full technical
+see [docs/How-to-Run-Scripts.md](docs/How-to-Run-Scripts.md). For the full technical
 tester runbook (workstation tests, preflight, UAT capture, on-system verify,
 config, health, and optional deploy/drift), see
-[SCRIPT-TESTING-GUIDE.md](SCRIPT-TESTING-GUIDE.md).
+[docs/SCRIPT-TESTING-GUIDE.md](docs/SCRIPT-TESTING-GUIDE.md).
 
 The automated suite is intentionally scoped to one purpose: proving the
 UAT-baseline-versus-production file match flow (`Invoke-Verification.ps1 -Mode

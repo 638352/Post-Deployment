@@ -1,10 +1,9 @@
 # Non-Technical Runbook: How to Run the Post-Deployment Scripts
 
 This guide is for testers and operators who are not deeply technical.
-It explains **what to run**, **where to run it**, and **how to run it** in
-plain language.
+It explains **what to run**, **where to run it**, and **how to run it** in clear, simple language.
 
-If you need deep engineering detail, use [RUNBOOK.md](RUNBOOK.md).
+For detailed technical guidance, use [RUNBOOK.md](RUNBOOK.md).
 
 ---
 
