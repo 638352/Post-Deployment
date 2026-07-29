@@ -117,7 +117,7 @@ elseif ($ProcessPathRoot) {
         $runningProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
                 $_.ExecutablePath -and
                 $_.ExecutablePath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -and
-                ([string]::IsNullOrWhiteSpace($ProcessArgumentPattern) -or $_.CommandLine -match $ProcessArgumentPattern)
+                ([string]::IsNullOrWhiteSpace($ProcessArgumentPattern) -or [regex]::IsMatch($_.CommandLine, $ProcessArgumentPattern))
             })
         if ($runningProcesses.Count -eq 0) {
             $detail = if ($ProcessArgumentPattern) { " under $ProcessPathRoot matching /$ProcessArgumentPattern/" } else { " under $ProcessPathRoot" }
