@@ -451,10 +451,10 @@ and fresh-log health probes; do not pass their binaries to
 ## Testing
 
 For a plain-language guide (where to run, how to run, what pass/fail means),
-see [docs/How-to-Run-Scripts.md](docs/How-to-Run-Scripts.md). For the full technical
+see [docs/RUNBOOK-NON-TECHNICAL.md](docs/RUNBOOK-NON-TECHNICAL.md). For the full technical
 tester runbook (workstation tests, preflight, UAT capture, on-system verify,
 config, health, and optional deploy/drift), see
-[docs/SCRIPT-TESTING-GUIDE.md](docs/SCRIPT-TESTING-GUIDE.md).
+[docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 The automated suite is intentionally scoped to one purpose: proving the
 UAT-baseline-versus-production file match flow (`Invoke-Verification.ps1 -Mode

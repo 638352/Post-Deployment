@@ -266,6 +266,5 @@ Include:
 ## 9) Related guides
 
 - Technical deep-dive runbook: [RUNBOOK.md](RUNBOOK.md)
-- Tester-focused flow details: [SCRIPT-TESTING-GUIDE.md](SCRIPT-TESTING-GUIDE.md)
-- Server/path reference: [SERVERS.md](SERVERS.md)
-- Full behavior and trust model: [README.md](README.md)
+- Server/path reference: [SERVERS.md](../SERVERS.md)
+- Full behavior and trust model: [README.md](../README.md)

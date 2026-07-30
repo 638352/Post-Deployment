@@ -10,7 +10,7 @@ Need a plain-language version? Use
 > Scope: OMS .NET executables, PowerBuilder binaries, and their configurations
 > deployed by manual file copy — including every Citrix server that receives a
 > copy. Gateway cloud services and MERA (`VESMERA01`) are **out of scope**.
-> Database objects are a planned fast follow. See [SERVERS.md](SERVERS.md) for
+> Database objects are a planned fast follow. See [SERVERS.md](../SERVERS.md) for
 > the authoritative server/processor path map.
 
 ---
@@ -174,7 +174,7 @@ Record from output: release tag, manifest path, manifest hash, JSONL log path.
 SHA-256, anchored by the SSM-pinned hash. Read-only.
 **Where:** The **production target server** for that processor
 (`VESEMSEGRESS01/02/03`, `VESEMSINGRESS01/02`, etc. — only the servers that
-actually host the processor; see [SERVERS.md](SERVERS.md)).
+actually host the processor; see [SERVERS.md](../SERVERS.md)).
 **How (baseline from a local manifest):**
 
 ```powershell
@@ -274,8 +274,8 @@ undeclared keys). Called automatically by verify/deploy; can be run directly.
 real values but reported as `(masked)`; use `ssmExpectedValues` for secure
 comparisons and never embed secrets in the contract. The contract is exhaustive
 — every live key must be declared or it is reported as drift. See
-[sample.config.json](sample.config.json) and the
-[Verify-Config.ps1](Verify-Config.ps1) header.
+[sample.config.json](../sample.config.json) and the
+[Verify-Config.ps1](../Verify-Config.ps1) header.
 
 ---
 
