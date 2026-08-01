@@ -5,11 +5,11 @@
     Copied from Deploy-SYSTEM_NAME.ps1 and filled in for this box.
 .DESCRIPTION
     DBQ runs as VES.OutboundDBQProcessor.exe under a per-processor folder, launched
-    by VLER_EM_Realtime_DBQ_Processor.bat with mode arg RTPDP (see SERVERS.md).
+    by VLER_EM_Realtime_DBQ_Processor.bat with mode arg RTPDP (see docs/SERVERS.md).
     Paths below are the UAT ones; PROD lives on VESEMSEGRESS02/03 and needs its own
     wrapper with the runbook's PROD paths.
 
-    CONFIRM before a real run: the values tagged # CONFIRM are not in SERVERS.md
+    CONFIRM before a real run: the values tagged # CONFIRM are not in docs/SERVERS.md
     (scheduled-task name, log dir). Pull them from the Outbound Deployment Steps
     runbook. The running console-exe instance is handled: KillProcesses stops the
     instance whose exe lives under TargetRoot (audited by PID + command line) and

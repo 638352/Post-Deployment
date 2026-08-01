@@ -11,8 +11,8 @@ Treat `Post-Deployment-datadog-558667ed/` as a snapshot/reference copy only. Do 
 
 - [README.md](README.md) for the project overview, runtime assumptions, exit codes, and top-level workflow.
 - [SERVERS.md](SERVERS.md) for the authoritative server and processor path map.
-- [sample.config.json](sample.config.json) for config-contract shape and examples.
-- [tests/](tests/) for Pester patterns, fixtures, and expected behaviors.
+- [sample.config.json](../sample.config.json) for config-contract shape and examples.
+- [tests/](../tests/) for Pester patterns, fixtures, and expected behaviors.
 
 ## Working conventions
 
@@ -25,10 +25,10 @@ Treat `Post-Deployment-datadog-558667ed/` as a snapshot/reference copy only. Do 
 
 - Use `./Invoke-Tests.ps1` for the main test pass.
 - If you touch a specific script, prefer the matching test file under `tests/` for a narrower check.
-- Keep behavior aligned with the module in [module/VesVerify.psm1](module/VesVerify.psm1); most shared rules live there.
+- Keep behavior aligned with the module in [module/VesVerify.psm1](../module/VesVerify.psm1); most shared rules live there.
 
 ## Editing guidance
 
-- Update `README.md` and `SERVERS.md` when behavior or paths change in a way users need to know.
+- Update `docs/README.md` and `docs/SERVERS.md` when behavior or paths change in a way users need to know.
 - Do not duplicate documentation from the README into this file; link to the source instead.
 - If a change would affect both the root tree and the snapshot copy, verify whether the snapshot should stay frozen before editing it.

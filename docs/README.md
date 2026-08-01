@@ -24,9 +24,12 @@ Deploy-Processor.ps1         gate -> stop -> backup -> copy -> restart -> verify
 processors/                  one thin deploy script per system (template inside)
 targets.json                 fail-closed server/Citrix inventory starter
 sample.config.json           example config contract
-SERVERS.md                   authoritative server + processor path map
 Invoke-Tests.ps1             dev-time Pester runner (see Testing)
 tests/                       Pester test suite + fixtures
+docs/README.md               this file
+docs/SERVERS.md              authoritative server + processor path map
+docs/SCRIPT-TESTING-GUIDE.md operator-facing testing procedure
+docs/AGENTS.md               agent working instructions
 ```
 
 ## Where this runs (OMS)
