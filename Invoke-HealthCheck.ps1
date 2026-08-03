@@ -55,7 +55,7 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
-if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("health-{0}" -f $Processor) }
+# JSONL audit log is opt-in: pass -LogFile to persist a record of this run.
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: health verification' `
     -Data @{runId = $runId; script = 'Invoke-HealthCheck.ps1'; processor = $Processor; environment = $Environment; release = $CommitSha; releaseTag = $ReleaseTag } `

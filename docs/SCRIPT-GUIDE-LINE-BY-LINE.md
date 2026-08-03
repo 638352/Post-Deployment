@@ -63,7 +63,7 @@ The design rule throughout: **a check that cannot run is never reported as a pas
 | 44 | The single exclude pattern: skip `logs\`, `temp\`, `cache\`, `.git\` (top level *or* nested) and `.log`/`.tmp`/`.config` files. `.config` is excluded on purpose — legacy configs carry server-specific paths and are checked by contract instead of by bytes. |
 | 48–49 | Forces TLS 1.2. PowerShell 5.1 defaults to protocols AWS rejects. |
 | 51–86 | `Write-VesLog` — every log line goes to the console for a human *and* as one JSON object per line to a file for machines. UTC timestamps so logs from many servers correlate. |
-| 88–118 | `New-VesLogFile` — invents a unique log path when the caller didn't supply one, so an interactive run can never leave zero evidence. Prefers `VES_AUDIT_LOG_DIR`, falls back to `ProgramData`. |
+| 88–118 | `New-VesLogFile` — invents a unique log path for the scripts that log by default (deploy, drift runner, watchdog). The read-only verification scripts log only when `-LogFile` is passed. Prefers `VES_AUDIT_LOG_DIR`, falls back to `ProgramData`. |
 | 120–129 | `Get-VesOutcome` — maps exit codes to the brief's three words: PASS / FAIL / ERROR. |
 | 131–238 | `Import-VesTargetInventory` — validates the server inventory **fail-closed**: schema must be `ves.targets.v1` (169–171), `inventoryComplete` must be explicitly `true` (172–174), `requiredServers` must be non-empty (175–177), a legacy bare array is rejected outright (159–161). |
 | 181–195 | Every target must carry all ten required fields, and any leftover placeholder (`SYSTEM_NAME`, `TBD`, `CONFIRM`, `UNKNOWN`) is an error — a half-filled inventory cannot claim coverage. |

@@ -50,7 +50,7 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
-if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix 'verify-config' }
+# JSONL audit log is opt-in: pass -LogFile to persist a record of this run.
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: configuration verification' `
     -Data @{runId=$runId; script='Verify-Config.ps1'; contract=$ContractPath; config=$ConfigPath} -LogFile $LogFile

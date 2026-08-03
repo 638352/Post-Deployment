@@ -277,10 +277,14 @@ re-capture and re-pin:
 Baselines with no such directory hash identically before and after the change and
 need nothing.
 
-Monitoring: every entry script creates a structured JSONL audit log even when
-`-LogFile` is omitted. Set `VES_AUDIT_LOG_DIR` to a durable central share; the
-fallback is `%ProgramData%\ves-verify\logs` (the scheduled runner keeps its
-explicit `-LogDir`). Run boundaries carry a run ID, processor/release context,
+Monitoring: JSONL audit logging is opt-in for the read-only verification
+scripts (verification, config, health, preflight, gate) — pass `-LogFile` to
+persist a record; otherwise they report to the console and exit code only.
+Deploy-Processor, the drift runner, and the heartbeat watchdog still log by
+default because their files are the deployment audit record and monitoring
+signal. Set `VES_AUDIT_LOG_DIR` to a durable central share; the fallback is
+`%ProgramData%\ves-verify\logs` (the scheduled runner keeps its explicit
+`-LogDir`). Run boundaries carry a run ID, processor/release context,
 PASS/FAIL/ERROR outcome, and exit code. The drift runner writes one timestamped
 log per target plus a run summary and atomically updates
 `ves-verify-drift.heartbeat.json`.
@@ -360,8 +364,10 @@ Capture -ArchiveRepo <checkout> -ReleaseTag <system>/vX.Y.Z` commits the
   undeclared settings are named; machine/ignored differences require an
   explicit allowlist; sensitive values cannot be embedded in the contract, and
   secret-named keys are auto-masked in reports even when left undeclared.
-- **Run evidence and outcomes** (closed): scripts create JSONL evidence by
-  default, record run boundaries, and use distinct PASS/FAIL/ERROR exit codes.
+- **Run evidence and outcomes** (closed): deploys and scheduled drift runs
+  create JSONL evidence by default; read-only verification scripts persist
+  evidence when `-LogFile` is passed. All scripts record run boundaries and
+  use distinct PASS/FAIL/ERROR exit codes.
 - **Server/Citrix inventory** (enforcement closed, data pending): the runner
   refuses to claim success until a `ves.targets.v1` inventory explicitly covers
   every required server — including every Citrix server that receives a

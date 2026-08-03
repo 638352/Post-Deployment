@@ -71,7 +71,7 @@ param(
 
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
-if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("verification-{0}-{1}" -f $Processor, $Mode) }
+# JSONL audit log is opt-in: pass -LogFile to persist a record of this run.
 $runId = [guid]::NewGuid().ToString()
 # Now that the module is loaded, fall back to the shared default. Capture and
 # compare must agree on this pattern or excluded files resurface as "Extra".

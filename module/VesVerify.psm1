@@ -89,9 +89,11 @@ function New-VesLogFile {
     <#
     .SYNOPSIS Return a unique JSONL log path and create its parent directory.
     .DESCRIPTION
-      Every entry script uses this when -LogFile is omitted so an interactive
-      run cannot silently leave no execution evidence. Set VES_AUDIT_LOG_DIR to
-      a durable central share on managed hosts; otherwise ProgramData is used.
+      Used by scripts that log by default (Deploy-Processor, the drift runner
+      and its watchdog) and available to any caller that wants a generated
+      path. The read-only verification scripts log only when -LogFile is
+      passed. Set VES_AUDIT_LOG_DIR to a durable central share on managed
+      hosts; otherwise ProgramData is used.
     #>
     [CmdletBinding()]
     param(
