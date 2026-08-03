@@ -53,7 +53,7 @@ $ErrorActionPreference = 'Stop'
 # JSONL audit log is opt-in: pass -LogFile to persist a record of this run.
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: configuration verification' `
-    -Data @{runId=$runId; script='Verify-Config.ps1'; contract=$ContractPath; config=$ConfigPath} -LogFile $LogFile
+    -Data @{runId = $runId; script = 'Verify-Config.ps1'; contract = $ContractPath; config = $ConfigPath } -LogFile $LogFile
 
 # both inputs must exist; then load the contract that says what the config must satisfy
 if (-not (Test-Path -LiteralPath $ContractPath)) { throw "Contract not found: $ContractPath" }
@@ -133,7 +133,8 @@ function Test-PresentValue([string]$key) {
 # not placed under expectedValues.
 $expectedProps = if ($contract.PSObject.Properties['expectedValues'] -and $contract.expectedValues) {
     @($contract.expectedValues.PSObject.Properties)
-} else { @() }
+}
+else { @() }
 foreach ($p in $expectedProps) {
     if ($sensitiveKeys.ContainsKey($p.Name)) {
         throw "Contract stores a sensitive key under expectedValues: $($p.Name). Use requiredKeys for presence or ssmExpectedValues for a secure comparison."
@@ -151,17 +152,18 @@ foreach ($p in $expectedProps) {
     if (-not (Test-PresentValue $p.Name)) { Add-MissingKey $p.Name; continue }
     if ("$($live[$p.Name])" -ne "$($p.Value)") {
         $valueMismatch.Add([PSCustomObject]@{
-            key = $p.Name
-            expected = (Get-ReportValue $p.Name "$($p.Value)")
-            actual   = (Get-ReportValue $p.Name "$($live[$p.Name])")
-        })
+                key      = $p.Name
+                expected = (Get-ReportValue $p.Name "$($p.Value)")
+                actual   = (Get-ReportValue $p.Name "$($live[$p.Name])")
+            })
     }
 }
 # machineKeys are the controlled per-environment allowlist. Their values may
 # differ, but the setting itself must still be present.
 $machineKeys = if ($contract.PSObject.Properties['machineKeys'] -and $contract.machineKeys) {
     @($contract.machineKeys | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-} else { @() }
+}
+else { @() }
 foreach ($k in $machineKeys) {
     if (-not (Test-PresentValue $k)) { Add-MissingKey $k }
 }
@@ -171,7 +173,8 @@ foreach ($k in $machineKeys) {
 # SecureString reader; a failed read throws and the run ends as trust failure.
 $ssmProps = if ($contract.PSObject.Properties['ssmExpectedValues'] -and $contract.ssmExpectedValues) {
     @($contract.ssmExpectedValues.PSObject.Properties)
-} else { @() }
+}
+else { @() }
 if ($ssmProps.Count) {
     foreach ($p in $ssmProps) {
         $expected = Get-VesTrustedHash -ParameterName $p.Value -Region $Region
@@ -194,7 +197,8 @@ foreach ($p in $expectedProps) { $knownKeys[$p.Name] = $true }
 foreach ($p in $ssmProps) { $knownKeys[$p.Name] = $true }
 $ignoredKeys = if ($contract.PSObject.Properties['ignoredKeys'] -and $contract.ignoredKeys) {
     @($contract.ignoredKeys | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-} else { @() }
+}
+else { @() }
 foreach ($k in $ignoredKeys) { $knownKeys[$k] = $true }
 foreach ($k in $live.Keys) {
     if (-not $knownKeys.ContainsKey($k)) { $extraKeys.Add($k) }
@@ -212,9 +216,9 @@ else {
     foreach ($v in $valueMismatch) { Write-VesLog DRIFT "  VALUE $($v.key): expected '$($v.expected)' actual '$($v.actual)'" -LogFile $LogFile }
     foreach ($k in $extraKeys) { Write-VesLog DRIFT "  UNDECLARED-KEY $k" -LogFile $LogFile }
 }
-Write-VesLog ($(if ($pass) {'OK'} else {'DRIFT'})) `
-    ("RUN END: configuration verification outcome={0}" -f $(if ($pass) {'PASS'} else {'FAIL'})) `
-    -Data @{runId=$runId; outcome=$(if ($pass) {'PASS'} else {'FAIL'})} -LogFile $LogFile
+Write-VesLog ($(if ($pass) { 'OK' } else { 'DRIFT' })) `
+("RUN END: configuration verification outcome={0}" -f $(if ($pass) { 'PASS' } else { 'FAIL' })) `
+    -Data @{runId = $runId; outcome = $(if ($pass) { 'PASS' } else { 'FAIL' }) } -LogFile $LogFile
 
 # structured result the caller (Invoke-Verification) folds into its own report
 [PSCustomObject]@{

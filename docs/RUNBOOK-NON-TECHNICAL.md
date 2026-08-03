@@ -244,7 +244,7 @@ For every step, record:
 - Script name
 - Commit (`git rev-parse --short HEAD`)
 - Exit code
-- Log file path
+- Log file path (verification scripts write one only when `-LogFile` is used)
 
 Keep secrets out of notes and screenshots.
 
@@ -259,7 +259,7 @@ Include:
 3. Date/time
 4. Exit code
 5. Output lines showing failures (`MISSING`, `CHANGED`, `EXTRA`, or health errors)
-6. Log file path
+6. Log file path (if one was written)
 
 ---
 

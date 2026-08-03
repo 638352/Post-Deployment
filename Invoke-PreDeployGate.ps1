@@ -59,7 +59,7 @@ $ErrorActionPreference = 'Stop'
 # JSONL audit log is opt-in: pass -LogFile to persist a record of this run.
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: pre-deploy gate' `
-    -Data @{runId=$runId; script='Invoke-PreDeployGate.ps1'; processor=$Processor; environment=$Environment; release=$StagedCommit; releaseTag=$ReleaseTag} `
+    -Data @{runId = $runId; script = 'Invoke-PreDeployGate.ps1'; processor = $Processor; environment = $Environment; release = $StagedCommit; releaseTag = $ReleaseTag } `
     -LogFile $LogFile
 
 # --- DATADOG DISABLED ---------------------------------------------------------
@@ -69,15 +69,15 @@ Write-VesLog INFO 'RUN START: pre-deploy gate' `
 
 function Stop-Gate([int]$code) {
     $outcome = Get-VesOutcome -ExitCode $code
-    Write-VesLog ($(if ($outcome -eq 'PASS') {'OK'} elseif ($outcome -eq 'FAIL') {'ERROR'} else {'ERROR'})) `
+    Write-VesLog ($(if ($outcome -eq 'PASS') { 'OK' } elseif ($outcome -eq 'FAIL') { 'ERROR' } else { 'ERROR' })) `
         "RUN END: pre-deploy gate outcome=$outcome exit=$code" `
-        -Data @{runId=$runId; outcome=$outcome; exitCode=$code; processor=$Processor; release=$StagedCommit; releaseTag=$ReleaseTag} -LogFile $LogFile
+        -Data @{runId = $runId; outcome = $outcome; exitCode = $code; processor = $Processor; release = $StagedCommit; releaseTag = $ReleaseTag } -LogFile $LogFile
     exit $code
 }
 
 # central block path: log the reason, honor an audited break-glass override, else block the deploy
 function Fail-Gate([string]$msg) {
-    Write-VesLog ERROR "GATE FAIL: $msg" -Data @{processor=$Processor;staged=$StagedCommit} -LogFile $LogFile
+    Write-VesLog ERROR "GATE FAIL: $msg" -Data @{processor = $Processor; staged = $StagedCommit } -LogFile $LogFile
     if ($AllowOverride) {
         if ([string]::IsNullOrWhiteSpace($OverrideReason)) {
             Write-VesLog ERROR '-AllowOverride requires -OverrideReason. Refusing.' -LogFile $LogFile
@@ -85,7 +85,7 @@ function Fail-Gate([string]$msg) {
         }
         # audited bypass: the override is recorded in the log with who/why/when
         Write-VesLog WARN "OVERRIDE ENGAGED by $env:USERNAME: $OverrideReason (staged=$StagedCommit)" `
-            -Data @{processor=$Processor;override=$true;by=$env:USERNAME;reason=$OverrideReason} -LogFile $LogFile
+            -Data @{processor = $Processor; override = $true; by = $env:USERNAME; reason = $OverrideReason } -LogFile $LogFile
         # --- DATADOG DISABLED ---------------------------------------------------
         # Timeline event: an override is the exception worth seeing on the dashboard.
         # Send-VesDatadogEvent -Title "Deploy gate OVERRIDE: $Processor" `
@@ -149,12 +149,14 @@ try {
     if (-not $TrustParam -and -not $useTag) {
         if ($AllowCommitOnly) {
             Write-VesLog WARN 'AllowCommitOnly engaged: artifact content NOT verified; gate passed on the commit string alone.' `
-                -Data @{processor=$Processor; allowCommitOnly=$true} -LogFile $LogFile
-        } else {
+                -Data @{processor = $Processor; allowCommitOnly = $true } -LogFile $LogFile
+        }
+        else {
             Write-VesLog ERROR 'No content check possible: supply -TrustParam or -BaselineRepo/-ReleaseTag, or pass -AllowCommitOnly explicitly (logged, local use only).' -LogFile $LogFile
             Stop-Gate $VES_EXIT_USAGE
         }
-    } else {
+    }
+    else {
         $ssmHash = $null
         $tagManifest = $null
         if ($TrustParam) {
@@ -171,7 +173,7 @@ try {
             Write-VesLog OK ("Baseline manifest read from Git release tag {0} ({1})." -f $ReleaseTag, $tagManifest.Source) -LogFile $LogFile
             if ($ssmHash -and $tagManifest.RecomputedHash -ne $ssmHash) {
                 throw ("Tag-archived manifest hash {0} does not match the SSM-trusted hash {1}; a rewritten tag cannot relax the gate. Refusing." -f `
-                    $tagManifest.RecomputedHash, $ssmHash)
+                        $tagManifest.RecomputedHash, $ssmHash)
             }
             if (-not $ssmHash) {
                 Write-VesLog WARN 'Content gate anchored to the Git release tag only (no SSM trust parameter).' -LogFile $LogFile
@@ -195,12 +197,14 @@ try {
                     $m = Import-VesManifest -Path $ManifestPath
                     if ($m.Consistent -and $m.RecomputedHash -eq $trustedHash) {
                         $namingFiles = $m.Doc.files
-                    } else {
+                    }
+                    else {
                         # The local manifest disagrees with the anchor: that IS the likely
                         # story behind the hash mismatch, so say so instead of naming files off it.
                         Write-VesLog WARN "Baseline manifest at $ManifestPath is stale or tampered (does not match the trusted hash); cannot name files from it." -LogFile $LogFile
                     }
-                } catch {
+                }
+                catch {
                     Write-VesLog WARN "Could not read baseline manifest for file-level detail: $($_.Exception.Message)" -LogFile $LogFile
                 }
             }
@@ -211,11 +215,12 @@ try {
                 $cmp = Compare-VesFiles -Baseline $namingFiles -ReleaseRoot $StagedRoot
                 foreach ($x in $cmp.Missing) { Write-VesLog ERROR "  MISSING from artifact: $x" -LogFile $LogFile }
                 foreach ($x in $cmp.Changed) { Write-VesLog ERROR "  CHANGED vs approved:   $($x.RelPath)" -LogFile $LogFile }
-                foreach ($x in $cmp.Extra)   { Write-VesLog ERROR "  EXTRA in artifact:     $x" -LogFile $LogFile }
+                foreach ($x in $cmp.Extra) { Write-VesLog ERROR "  EXTRA in artifact:     $x" -LogFile $LogFile }
                 $counts = '{0} missing, {1} changed, {2} extra' -f $cmp.Missing.Count, $cmp.Changed.Count, $cmp.Extra.Count
                 if ($cmp.Missing.Count) {
                     $msg = "Deployment blocked: $($cmp.Missing[0]) is missing from the artifact ($counts)"
-                } else {
+                }
+                else {
                     $msg = "Deployment blocked: staged artifact does not match the approved release ($counts)"
                 }
             }

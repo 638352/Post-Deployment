@@ -20,11 +20,11 @@ Set-StrictMode -Version 2.0
 # 10 USAGE / parameter error
 
 # Global scope so entry scripts that import this module can reference the constants directly.
-$Global:VES_EXIT_OK        = 0      # Success / production matches baseline.
-$Global:VES_EXIT_DRIFT     = 1      # Divergence detected between prod and baseline.
-$Global:VES_EXIT_NOBASE    = 2      # Baseline missing, unreadable, or failed trust check.
-$Global:VES_EXIT_HEALTH    = 3      # Functional health failure (independent of baseline).
-$Global:VES_EXIT_USAGE     = 10     # Caller passed bad/missing parameters.
+$Global:VES_EXIT_OK = 0      # Success / production matches baseline.
+$Global:VES_EXIT_DRIFT = 1      # Divergence detected between prod and baseline.
+$Global:VES_EXIT_NOBASE = 2      # Baseline missing, unreadable, or failed trust check.
+$Global:VES_EXIT_HEALTH = 3      # Functional health failure (independent of baseline).
+$Global:VES_EXIT_USAGE = 10     # Caller passed bad/missing parameters.
 
 # --- Default manifest exclude pattern (single source of truth) ---------------
 # Capture and compare MUST use the same rules: if they disagree, files excluded at
@@ -55,7 +55,7 @@ function Write-VesLog {
     [CmdletBinding()]
     param(
         # Severity level; constrained set keeps downstream log parsing predictable.
-        [Parameter(Mandatory)][ValidateSet('INFO','WARN','ERROR','OK','DRIFT')][string]$Level,
+        [Parameter(Mandatory)][ValidateSet('INFO', 'WARN', 'ERROR', 'OK', 'DRIFT')][string]$Level,
         # Human-readable message for both console and JSON record.
         [Parameter(Mandatory)][string]$Message,
         # Optional structured fields merged into the JSON record (e.g. processor, commit).
@@ -71,7 +71,7 @@ function Write-VesLog {
     if ($Data) { foreach ($k in $Data.Keys) { $record[$k] = $Data[$k] } }
 
     # Map each level to a console color so operators can scan output visually.
-    $color = @{ INFO='Gray'; OK='Green'; WARN='Yellow'; ERROR='Red'; DRIFT='Magenta' }[$Level]
+    $color = @{ INFO = 'Gray'; OK = 'Green'; WARN = 'Yellow'; ERROR = 'Red'; DRIFT = 'Magenta' }[$Level]
     # Console line: fixed-width level column keeps multi-line output aligned.
     Write-Host ("[{0}] {1,-5} {2}" -f $ts, $Level, $Message) -ForegroundColor $color
 
@@ -103,9 +103,11 @@ function New-VesLogFile {
     if ([string]::IsNullOrWhiteSpace($LogDir)) {
         if (-not [string]::IsNullOrWhiteSpace($env:VES_AUDIT_LOG_DIR)) {
             $LogDir = $env:VES_AUDIT_LOG_DIR
-        } elseif (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
             $LogDir = Join-Path $env:ProgramData 'ves-verify\logs'
-        } else {
+        }
+        else {
             $LogDir = Join-Path ([IO.Path]::GetTempPath()) 'ves-verify\logs'
         }
     }
@@ -161,13 +163,14 @@ function Import-VesTargetInventory {
     if ($doc -is [System.Array]) {
         $targets = @($doc)
         $errors.Add("Legacy bare-array inventory is not accepted; use schema 'ves.targets.v1' and set inventoryComplete=true after server/Citrix review.")
-    } else {
+    }
+    else {
         $schema = if ($doc.PSObject.Properties['schema']) { "$($doc.schema)" } else { $null }
         $inventoryComplete = ($doc.PSObject.Properties['inventoryComplete'] -and [bool]$doc.inventoryComplete)
         $targets = @(if ($doc.PSObject.Properties['targets']) { $doc.targets })
         $requiredServers = @(if ($doc.PSObject.Properties['requiredServers']) {
-            $doc.requiredServers | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") }
-        })
+                $doc.requiredServers | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") }
+            })
         if ($schema -ne 'ves.targets.v1') {
             $errors.Add("Inventory schema must be 'ves.targets.v1' (found '$schema').")
         }
@@ -181,8 +184,8 @@ function Import-VesTargetInventory {
 
     if ($targets.Count -eq 0) { $errors.Add('Inventory contains no targets.') }
     $requiredFields = @(
-        'processor','server','environment','inventoryStatus','releaseTag','releaseRoot',
-        'manifestPath','trustParam','configContract','configPath'
+        'processor', 'server', 'environment', 'inventoryStatus', 'releaseTag', 'releaseRoot',
+        'manifestPath', 'trustParam', 'configContract', 'configPath'
     )
     $seen = @{}
     foreach ($target in $targets) {
@@ -191,7 +194,8 @@ function Import-VesTargetInventory {
             $value = if ($target.PSObject.Properties[$field]) { "$($target.$field)" } else { $null }
             if ([string]::IsNullOrWhiteSpace($value)) {
                 $errors.Add("Target '$label' is missing required field '$field'.")
-            } elseif ($value -match '(?i)(SYSTEM_NAME|CHANGE_ME|<[^>]+>|\bTBD\b|\bCONFIRM\b|\bUNKNOWN\b)') {
+            }
+            elseif ($value -match '(?i)(SYSTEM_NAME|CHANGE_ME|<[^>]+>|\bTBD\b|\bCONFIRM\b|\bUNKNOWN\b)') {
                 $errors.Add("Target '$label' field '$field' still contains a placeholder: $value")
             }
         }
@@ -200,23 +204,24 @@ function Import-VesTargetInventory {
             $errors.Add("Target '$label' inventoryStatus must be 'confirmed' (found '$status').")
         }
         $environment = if ($target.PSObject.Properties['environment']) { "$($target.environment)".ToLowerInvariant() } else { '' }
-        if ($environment -notin @('dev','qa','uat','prod','production')) {
+        if ($environment -notin @('dev', 'qa', 'uat', 'prod', 'production')) {
             $errors.Add("Target '$label' environment '$environment' is not dev, qa, uat, prod, or production.")
         }
         $server = if ($target.PSObject.Properties['server']) { "$($target.server)" } else { '' }
         $identity = ("{0}|{1}" -f $server, $label).ToLowerInvariant()
         if ($seen.ContainsKey($identity)) {
             $errors.Add("Duplicate server/processor target: $server / $label")
-        } else {
+        }
+        else {
             $seen[$identity] = $true
         }
     }
 
     $coveredServers = @($targets | ForEach-Object {
-        if ($_.PSObject.Properties['server'] -and $_.PSObject.Properties['inventoryStatus'] -and $_.inventoryStatus -eq 'confirmed') {
-            "$($_.server)"
-        }
-    } | Select-Object -Unique)
+            if ($_.PSObject.Properties['server'] -and $_.PSObject.Properties['inventoryStatus'] -and $_.inventoryStatus -eq 'confirmed') {
+                "$($_.server)"
+            }
+        } | Select-Object -Unique)
     foreach ($server in $requiredServers) {
         if ($coveredServers -notcontains "$server") {
             $errors.Add("Required server '$server' has no confirmed target entry.")
@@ -282,7 +287,7 @@ function Get-VesManifest {
         # Skip anything matching the exclude regex (checked before hashing to save I/O).
         if ($rel -match $ExcludePattern) { continue }
         # Normalize separators to '/' so manifests hash identically regardless of tooling.
-        $relNorm = $rel -replace '\\','/'
+        $relNorm = $rel -replace '\\', '/'
         # SHA-256 of file contents -- the core drift-detection primitive.
         $hash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
         # Record path, hash, and size; size is a cheap secondary sanity signal.
@@ -290,7 +295,7 @@ function Get-VesManifest {
     }
     # Sort for deterministic order (required for a stable manifest hash); leading comma
     # prevents PowerShell from unrolling a single-element result into a scalar.
-    return ,($out | Sort-Object RelPath)
+    return , ($out | Sort-Object RelPath)
 }
 
 function Get-VesManifestHash {
@@ -318,7 +323,7 @@ function Get-VesManifestHash {
     # Create the SHA-256 provider (disposed below -- it holds native crypto handles).
     $sha = [Security.Cryptography.SHA256]::Create()
     # Hash the canonical bytes and render each byte as lowercase hex, joined into one string.
-    try   { return -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) }
+    try { return -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) }
     # Always release the crypto provider even if hashing throws.
     finally { $sha.Dispose() }
 }
@@ -403,11 +408,11 @@ function Compare-VesFiles {
     # Index baseline by relative path for O(1) lookups.
     $baseMap = @{}; foreach ($b in $Baseline) { $baseMap[$b.RelPath] = $b }
     # Index live tree the same way.
-    $liveMap = @{}; foreach ($l in $live)     { $liveMap[$l.RelPath] = $l }
+    $liveMap = @{}; foreach ($l in $live) { $liveMap[$l.RelPath] = $l }
 
     $missing = New-Object System.Collections.Generic.List[string]  # In baseline, absent in prod (the Storage.Net case).
     $changed = New-Object System.Collections.Generic.List[object]  # Present in both but hash differs.
-    $extra   = New-Object System.Collections.Generic.List[string]  # In prod, not in baseline (unauthorized addition).
+    $extra = New-Object System.Collections.Generic.List[string]  # In prod, not in baseline (unauthorized addition).
 
     # Pass 1: everything the baseline says must exist.
     foreach ($rel in $baseMap.Keys) {
@@ -416,7 +421,7 @@ function Compare-VesFiles {
         # File exists in both -> compare content hashes.
         if ($liveMap[$rel].Sha256 -ne $baseMap[$rel].Sha256) {
             # Record both hashes so the operator can see expected vs actual.
-            $changed.Add([PSCustomObject]@{ RelPath=$rel; Expected=$baseMap[$rel].Sha256; Actual=$liveMap[$rel].Sha256 })
+            $changed.Add([PSCustomObject]@{ RelPath = $rel; Expected = $baseMap[$rel].Sha256; Actual = $liveMap[$rel].Sha256 })
         }
     }
     # Pass 2: anything in prod the baseline never declared -> extra.
@@ -465,22 +470,23 @@ function Invoke-VesAwsCli {
     # Missing CLI is a clean non-zero result, not a CommandNotFoundException that
     # would blow past the caller's error handling.
     if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
-        return [PSCustomObject]@{ StdOut=''; StdErr='AWS CLI not found on PATH'; ExitCode=127 }
+        return [PSCustomObject]@{ StdOut = ''; StdErr = 'AWS CLI not found on PATH'; ExitCode = 127 }
     }
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $out  = & aws @Arguments 2>&1
+        $out = & aws @Arguments 2>&1
         $code = $LASTEXITCODE
-    } finally {
+    }
+    finally {
         # Restore even if the call blows up, so we never leak 'Continue' to the caller.
         $ErrorActionPreference = $prev
     }
     # Split the merged stream: ErrorRecords came from stderr, everything else is stdout.
     $stdout = @($out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
-    $stderr = @($out | Where-Object { $_ -is  [System.Management.Automation.ErrorRecord] } |
-                       ForEach-Object { $_.ToString() }) -join ' '
-    return [PSCustomObject]@{ StdOut=$stdout; StdErr=$stderr; ExitCode=$code }
+    $stderr = @($out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
+        ForEach-Object { $_.ToString() }) -join ' '
+    return [PSCustomObject]@{ StdOut = $stdout; StdErr = $stderr; ExitCode = $code }
 }
 
 function Get-VesTrustedHash {
@@ -494,8 +500,8 @@ function Get-VesTrustedHash {
     # Call the AWS CLI directly (no AWSPowerShell module dependency on legacy hosts).
     # --with-decryption handles SecureString; failure detected via exit code.
     $r = Invoke-VesAwsCli -Arguments @(
-        'ssm','get-parameter','--name',$ParameterName,'--with-decryption',
-        '--region',$Region,'--query','Parameter.Value','--output','text')
+        'ssm', 'get-parameter', '--name', $ParameterName, '--with-decryption',
+        '--region', $Region, '--query', 'Parameter.Value', '--output', 'text')
     # Treat CLI failure OR empty value as a trust failure -- never proceed on a blank anchor.
     if ($r.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($r.StdOut)) {
         throw ("SSM read failed for $ParameterName (region $Region). aws exit=$($r.ExitCode). $($r.StdErr)").Trim()
@@ -516,8 +522,8 @@ function Set-VesTrustedHash {
     )
     # SecureString type gates reads behind kms:Decrypt; --overwrite allows re-pinning on each release.
     $r = Invoke-VesAwsCli -Arguments @(
-        'ssm','put-parameter','--name',$ParameterName,'--value',$Value,
-        '--type','SecureString','--overwrite','--region',$Region)
+        'ssm', 'put-parameter', '--name', $ParameterName, '--value', $Value,
+        '--type', 'SecureString', '--overwrite', '--region', $Region)
     # Surface CLI failure as a hard error -- an unpinned baseline must not look like success.
     if ($r.ExitCode -ne 0) {
         throw ("SSM write failed for $ParameterName. aws exit=$($r.ExitCode). $($r.StdErr)").Trim()
@@ -675,7 +681,7 @@ function Get-VesAlertType {
     [CmdletBinding()]
     param([string]$Environment)
     $value = if ([string]::IsNullOrWhiteSpace($Environment)) { 'prod' } else { $Environment.Trim().ToLowerInvariant() }
-    if ($value -in @('prod','production')) { return 'error' }
+    if ($value -in @('prod', 'production')) { return 'error' }
     return 'warning'
 }
 

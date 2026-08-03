@@ -163,6 +163,9 @@ off-host immediately (a failed push fails the capture).
 
 Record from output: release tag, manifest path, manifest hash, JSONL log path.
 
+> JSONL logging is opt-in for this script: add `-LogFile <path>` to the command
+> above when you need a persisted run record (recommended for approved releases).
+
 > `-AllowUntrustedCapture` / `-AllowUnarchivedCapture` exist **only** for
 > isolated local tests and must never be used for an approved release.
 
@@ -367,8 +370,9 @@ watchdog reads it.
 2. `git rev-parse --short HEAD`.
 3. `$LASTEXITCODE`.
 4. Any `MISSING`, `CHANGED`, or `EXTRA` lines.
-5. JSONL log path (default `%ProgramData%\ves-verify\logs`, or the
-   `VES_AUDIT_LOG_DIR` central share).
+5. JSONL log path if `-LogFile` was passed (deploys and drift runs log by
+   default under `%ProgramData%\ves-verify\logs` or the `VES_AUDIT_LOG_DIR`
+   central share; verification scripts log only when `-LogFile` is given).
 
 Never copy passwords, tokens, connection strings, or raw SSM secret values into
 the record.
@@ -382,7 +386,7 @@ the record.
 3. Commit hash.
 4. Exit code.
 5. Full list of `MISSING` / `CHANGED` / `EXTRA` lines.
-6. JSONL log file path.
+6. JSONL log file path (if `-LogFile` was passed).
 7. Screenshot of the final output section.
 
 ---
