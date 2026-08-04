@@ -124,6 +124,13 @@ and tag off-host immediately — a failed push fails the capture, because a
 release record that exists only on one workstation is not an audit trail.
 Capture also generates `release-record.json` with the release tag, source
 commit, manifest hash, file count, trust parameter, and approval provenance.
+It also records `previousManifestHash` — the hash the trust anchor pointed at
+immediately before this capture, read from SSM before the pin is overwritten —
+so the tagged records chain and a rollback target can be identified from the
+archive alone. A first capture (or an unreadable parameter) leaves it null with
+a warning rather than failing. When the pin is being replaced, capture logs a
+WARN naming both the prior and the new hash, because that write is what a
+rollback would have to undo.
 `-TrustParam`, `-ArchiveRepo`, and `-ReleaseTag` are required; capture fails
 closed if any is missing. The
 `-AllowUntrustedCapture`/`-AllowUnarchivedCapture` switches exist only for
@@ -553,12 +560,6 @@ and fresh-log health probes; do not pass their binaries to
 
 ## Testing
 
-For a plain-language guide (where to run, how to run, what pass/fail means),
-see [docs/RUNBOOK-NON-TECHNICAL.md](docs/RUNBOOK-NON-TECHNICAL.md). For the full technical
-tester runbook (workstation tests, preflight, UAT capture, on-system verify,
-config, health, and optional deploy/drift), see
-[docs/RUNBOOK.md](docs/RUNBOOK.md).
-
 The automated suite is intentionally scoped to one purpose: proving the
 UAT-baseline-versus-production file match flow (`Invoke-Verification.ps1 -Mode
 VerifyFiles`). Run it on a workstation/CI host, not on production servers.
@@ -577,14 +578,28 @@ exercise the same engine as production:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1
 ```
 
-`Invoke-Tests.ps1` exits with the failed-test count (0 = green), ready to wire into
-CI later. What's covered:
+`Invoke-Tests.ps1` exits with the failed-test count (0 = green). What's covered:
 
 - creating a baseline manifest in a local test tree;
 - matching-tree pass (`exit 0`);
 - changed-file drift detection (`exit 1`);
 - tampered baseline rejection (`exit 2`);
 - missing required input rejection (`exit 10`).
+
+Run the scripts directly from the repo root:
+
+```powershell
+.\Invoke-Preflight.ps1 -TargetsFile .\targets.json
+.\Invoke-Verification.ps1 -Mode VerifyFiles -ReleaseRoot <path> -ManifestPath <manifest.json>
+.\Invoke-HealthCheck.ps1 -ProcessPathRoot <processor-root> -FreshLogDir <log-dir>
+.\Start-DriftRunner.ps1 -TargetsFile .\targets.json
+.\Deploy-Processor.ps1 -WhatIf
+.\Invoke-Rollback.ps1 -ListBackups
+.\Invoke-Tests.ps1
+```
+
+If `Invoke-Tests.ps1` passes, the checked-in scripts are loading cleanly enough
+for the repository's current coverage.
 
 ## Host prerequisites
 
