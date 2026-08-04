@@ -48,7 +48,7 @@ param(
     # cross-check the manifest archived under that tag.
     [string]$ReleaseTag,
     [string]$BaselineRepo,
-    [ValidateSet('dev','qa','uat','prod','production')][string]$Environment = 'uat',
+    [ValidateSet('dev', 'qa', 'uat', 'prod', 'production')][string]$Environment = 'uat',
     [string]$AuditLogDir,
     [string]$Region = 'us-gov-west-1'
 )
@@ -65,40 +65,40 @@ $log = Join-Path $logDir ('deploy_SYSTEM_NAME_{0}.jsonl' -f (Get-Date).ToUnivers
 # - BackupRoot is the folder where dated restore points are stored for rollback.
 # Values below are shaped for an outbound .exe processor on an egress server.
 $fixed = @{
-    Processor           = 'SYSTEM_NAME'                                   # e.g. OutboundDBQProcessor
-    TargetRoot          = 'C:\VLER_Test\Processors\SYSTEM_NAME'           # where the .exe lives on the box
-    ManifestPath        = 'D:\baselines\SYSTEM_NAME.json'
-    TrustParam          = '/ves/SYSTEM_NAME/baseline-hash'
-    ApprovedCommitParam = '/ves/SYSTEM_NAME/approved-commit'
-    ConfigContract      = 'D:\baselines\SYSTEM_NAME.config.json'
-    ConfigPath          = 'C:\VLER_Test\Processors\SYSTEM_NAME\VES.OutboundDBQProcessor.exe.config'
+    Processor              = 'SYSTEM_NAME'                                   # e.g. OutboundDBQProcessor
+    TargetRoot             = 'C:\VLER_Test\Processors\SYSTEM_NAME'           # where the .exe lives on the box
+    ManifestPath           = 'D:\baselines\SYSTEM_NAME.json'
+    TrustParam             = '/ves/SYSTEM_NAME/baseline-hash'
+    ApprovedCommitParam    = '/ves/SYSTEM_NAME/approved-commit'
+    ConfigContract         = 'D:\baselines\SYSTEM_NAME.config.json'
+    ConfigPath             = 'C:\VLER_Test\Processors\SYSTEM_NAME\VES.OutboundDBQProcessor.exe.config'
     # dated backup of the current prod files before overwrite (runbook convention)
-    BackupRoot          = 'C:\VLER_Test\Processors\BackUp'
+    BackupRoot             = 'C:\VLER_Test\Processors\BackUp'
     # stop/restart: the outbound processors run as Task Scheduler jobs on THIS
     # server. List only the jobs that live here (see VEMS-5346 note in header).
-    ScheduledTasks      = @('VLER_EM_Real_Time_Outbound_Processor')
+    ScheduledTasks         = @('VLER_EM_Real_Time_Outbound_Processor')
     # console EXEs hold their files open even with the task disabled: kill the
     # running instance (matched by exe path under TargetRoot, audited by PID +
     # command line) and relaunch via the task right after a clean copy
-    KillProcesses       = $true
-    StartTasksAfter     = $true
+    KillProcesses          = $true
+    StartTasksAfter        = $true
     # Match the processor mode argument as well as the executable path.
     ProcessArgumentPattern = '\bRTPDP\b'
     # health for an endpoint-less .exe: a fresh line in today's log proves life
-    FreshLogDir         = 'C:\VLER_Test\Logs\VES.OutboundProcessor'
+    FreshLogDir            = 'C:\VLER_Test\Logs\VES.OutboundProcessor'
     # .NET assembly load check (defect UAT may have signed off on)
-    RequiredAssemblies  = @('C:\VLER_Test\Processors\SYSTEM_NAME\VES.OutboundDBQProcessor.exe')
+    RequiredAssemblies     = @('C:\VLER_Test\Processors\SYSTEM_NAME\VES.OutboundDBQProcessor.exe')
     # --- Java/Spring Boot variant instead of the two lines above: ---
     # ServiceName       = 'oms-vems-pagecount-prod'
     # HealthUrl         = 'http://localhost:9191/actuator/health'
-    ServiceName         = ''
-    HealthUrl           = ''
+    ServiceName            = ''
+    HealthUrl              = ''
 }
 # ------------------------------------------------------------------------------
 
 # -WhatIf propagates via $WhatIfPreference; Deploy-Processor then runs gate-only
 $passthru = @{}
-if ($ReleaseTag)   { $passthru['ReleaseTag'] = $ReleaseTag }
+if ($ReleaseTag) { $passthru['ReleaseTag'] = $ReleaseTag }
 if ($BaselineRepo) { $passthru['BaselineRepo'] = $BaselineRepo }
 & (Join-Path $core 'Deploy-Processor.ps1') @fixed @passthru `
     -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Environment $Environment -Region $Region -LogFile $log

@@ -25,6 +25,14 @@
     Break-glass is intentionally not wired through here (open policy decision).
     -WhatIf runs the gate only and skips stop/backup/copy.
 
+    Rollback: with -BackupRoot the pre-copy backup is the restore point, recorded
+    by a rollback-record.json sidecar (what it replaced, the config it stashed,
+    and the SSM values in force at the time). -AutoRollback restores it when the
+    post-deploy verify or the health check fails; the deploy still exits with that
+    stage's code, because rolling back is remediation, not success. -Rollback runs
+    a restore instead of a deploy by delegating to Invoke-Rollback.ps1, which owns
+    the safety gates and the post-restore proof.
+
     Server-aware by design: pass only the -ScheduledTasks that live on THIS
     server. PROD splits the outbound processors across VESEMSEGRESS01/02/03
     (VEMS-5346) whereas UAT runs all three on one box, so the per-processor
@@ -64,14 +72,26 @@ param(
     # start the re-enabled scheduled tasks right after a clean copy, so the
     # processor relaunches now instead of at its next trigger
     [switch]$StartTasksAfter,
-    # dated backup of the current target before overwrite (runbook convention:
-    # <BackupRoot>\<yyyyMMdd>_<Initials>_<Processor>). Skipped if not set.
+    # dated backup of the current target before overwrite:
+    # <BackupRoot>\<yyyyMMddTHHmmss>_<Initials>_<Processor>, plus a
+    # rollback-record.json sidecar. Skipped if not set -- and without it there is
+    # nothing to roll back to, so set it on every real deploy.
     [string]$BackupRoot,
     # newest N backups to keep for this processor; older ones get pruned after a
     # successful deploy only. 0 keeps everything.
     [int]$KeepBackups = 5,
+    # opt-in: restore the backup automatically when the post-deploy verify or the
+    # health check fails. Requires -BackupRoot. A rolled-back deploy still exits
+    # with the failing stage's code -- rollback is remediation, not success.
+    # Never re-pins the SSM trust anchor (that is operator-only, see Invoke-Rollback).
+    [switch]$AutoRollback,
+    # Restore a backup instead of deploying. Thin alias for Invoke-Rollback.ps1,
+    # which owns the restore logic (selection, safety gates, post-restore verify).
     [switch]$Rollback,
+    # rollback only: restore this specific backup folder instead of the newest.
     [string]$RollbackBackup,
+    # rollback only: why this restore is happening. Recorded in the audit log.
+    [string]$RollbackReason,
     [string]$Initials = $env:USERNAME,
     [string]$HealthUrl,
     # liveness for endpoint-less .exe processors; passed through to the health check
@@ -83,8 +103,10 @@ param(
     [string]$LogFile
 )
 # Backup and rollback capabilities:
-# - Deploy mode creates a dated backup of the live TargetRoot before overwriting it.
-# - Rollback mode restores a previously created backup tree back into TargetRoot.
+# - Deploy mode backs the live TargetRoot up to <BackupRoot>\<stamp>_<Initials>_<Processor>
+#   before overwriting it, with a rollback-record.json sidecar naming what it replaced.
+# - -AutoRollback restores that backup when the post-deploy verify or health stage fails.
+# - -Rollback delegates to Invoke-Rollback.ps1 for an operator-driven restore.
 # - Each processor wrapper supplies the live target path and backup root used here.
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
@@ -100,150 +122,49 @@ Write-VesLog INFO 'RUN START: deployment' `
 # $ddTags = @("processor:$Processor", (Get-VesDatadogEnvTag -Environment $Environment))
 # ------------------------------------------------------------------------------
 
+# Set by the auto-rollback handler so the terminal record always states whether a
+# rollback was attempted and how it went -- a rollback must never be silent.
+$script:rolledBack = $false
+$script:rollbackExitCode = $null
+
 function Stop-Deploy([int]$code) {
     $outcome = Get-VesOutcome -ExitCode $code
     Write-VesLog ($(if ($outcome -eq 'PASS') { 'OK' } elseif ($outcome -eq 'FAIL') { 'ERROR' } else { 'ERROR' })) `
         "RUN END: deployment outcome=$outcome exit=$code" `
-        -Data @{runId = $runId; outcome = $outcome; exitCode = $code; processor = $Processor; release = $StagedCommit; releaseTag = $ReleaseTag } -LogFile $LogFile
+        -Data @{runId = $runId; outcome = $outcome; exitCode = $code; processor = $Processor; release = $StagedCommit; releaseTag = $ReleaseTag; rolledBack = $script:rolledBack; rollbackExitCode = $script:rollbackExitCode } -LogFile $LogFile
     exit $code
 }
 
-# Rollback capability: resolve the backup folder to restore, either from an
-# explicit -RollbackBackup path or from the latest dated backup under BackupRoot.
-function Get-RollbackSourcePath {
-    param([string]$BackupRootPath, [string]$RequestedPath, [string]$TargetProcessor)
-    if ($RequestedPath) {
-        if (-not (Test-Path -LiteralPath $RequestedPath)) {
-            throw "Rollback backup path not found: $RequestedPath"
-        }
-        return (Get-Item -LiteralPath $RequestedPath).FullName
-    }
-    if ([string]::IsNullOrWhiteSpace($BackupRootPath)) {
-        throw 'Rollback requires -BackupRoot or -RollbackBackup.'
-    }
-    $pattern = '^\d{8}_.+_' + [regex]::Escape($TargetProcessor) + '$'
-    $latest = @(Get-ChildItem -LiteralPath $BackupRootPath -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match $pattern } |
-        Sort-Object Name -Descending | Select-Object -First 1)
-    if (-not $latest) {
-        throw "No rollback backup found under $BackupRootPath for $TargetProcessor"
-    }
-    return $latest[0].FullName
-}
-
-# Rollback mode: stop the processor, restore the selected backup tree into
-# TargetRoot, and restart the processor so the prior release is live again.
+# Rollback mode: hand off to Invoke-Rollback.ps1, which owns backup selection,
+# the safety gates (empty/partial backup, nested BackupRoot), config restore, and
+# the post-restore verify + health proof. Kept here as an alias so an operator
+# already holding the deploy command line can reverse it without a second script,
+# but the restore itself has exactly one implementation.
 if ($Rollback) {
-    try {
-        $rollbackSource = Get-RollbackSourcePath -BackupRootPath $BackupRoot -RequestedPath $RollbackBackup -TargetProcessor $Processor
-    }
-    catch {
-        Write-VesLog ERROR $_.Exception.Message -LogFile $LogFile
-        Stop-Deploy $VES_EXIT_USAGE
-    }
-
-    $disabled = New-Object System.Collections.Generic.List[string]
-    $stopFailed = $false
-    try {
-        foreach ($tn in $ScheduledTasks) {
-            try {
-                Disable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
-                $disabled.Add($tn)
-                Write-VesLog INFO "Disabled task: $tn" -LogFile $LogFile
-            }
-            catch {
-                Write-VesLog ERROR "Could not disable task $tn -> $($_.Exception.Message)" -LogFile $LogFile
-                $stopFailed = $true
-                break
-            }
-        }
-        if (-not $stopFailed -and $ServiceName) {
-            $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-            if ($svc) {
-                try {
-                    Stop-Service -Name $ServiceName -Force -ErrorAction Stop
-                    Write-VesLog INFO "Stopped service: $ServiceName" -LogFile $LogFile
-                }
-                catch {
-                    Write-VesLog ERROR "Could not stop service $ServiceName -> $($_.Exception.Message)" -LogFile $LogFile
-                    $stopFailed = $true
-                }
-            }
-        }
-        if (-not $stopFailed) {
-            $targetItem = Get-Item -LiteralPath $TargetRoot -ErrorAction SilentlyContinue
-            if ($targetItem) {
-                $targetPrefix = $targetItem.FullName.TrimEnd('\') + '\'
-                $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-                    Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) })
-                foreach ($p in $running) {
-                    if ($KillProcesses) {
-                        Write-VesLog WARN ("Killing running instance PID {0}: {1}" -f $p.ProcessId, $p.CommandLine) -Data @{processor = $Processor; pid = $p.ProcessId; commandLine = $p.CommandLine } -LogFile $LogFile
-                        try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop }
-                        catch {
-                            Write-VesLog ERROR "Could not kill PID $($p.ProcessId) -> $($_.Exception.Message)" -LogFile $LogFile
-                            $stopFailed = $true
-                        }
-                    }
-                    else {
-                        Write-VesLog ERROR ("Running instance holds {0}: PID {1} {2}. Re-run with -KillProcesses to stop it." -f $TargetRoot, $p.ProcessId, $p.CommandLine) -LogFile $LogFile
-                        $stopFailed = $true
-                    }
-                }
-                if ($KillProcesses -and -not $stopFailed -and $running.Count) {
-                    $ids = @($running | ForEach-Object { $_.ProcessId })
-                    $deadline = (Get-Date).AddSeconds(30)
-                    while ((Get-Date) -lt $deadline -and (Get-Process -Id $ids -ErrorAction SilentlyContinue)) {
-                        Start-Sleep -Milliseconds 250
-                    }
-                    $alive = @(Get-Process -Id $ids -ErrorAction SilentlyContinue)
-                    if ($alive.Count) {
-                        Write-VesLog ERROR "Instance(s) still alive after kill: $(($alive | ForEach-Object Id) -join ', ')" -LogFile $LogFile
-                        $stopFailed = $true
-                    }
-                }
-            }
-        }
-        if (-not $stopFailed) {
-            Write-VesLog INFO "Rollback $rollbackSource -> $TargetRoot" -LogFile $LogFile
-            New-Item -ItemType Directory -Path $TargetRoot -Force | Out-Null
-            robocopy $rollbackSource $TargetRoot /MIR /NP /R:2 /W:5 | Out-Null
-            if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "Rollback copy failed ($LASTEXITCODE)" -LogFile $LogFile; Stop-Deploy $VES_EXIT_DRIFT }
-            $global:LASTEXITCODE = 0
-        }
-    }
-    finally {
-        if ($ServiceName) {
-            $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-            if ($svc) {
-                try {
-                    Start-Service -Name $ServiceName -ErrorAction Stop
-                    Write-VesLog INFO "Started service: $ServiceName" -LogFile $LogFile
-                }
-                catch { Write-VesLog ERROR "FAILED to restart service $ServiceName -> $($_.Exception.Message)" -LogFile $LogFile }
-            }
-        }
-        foreach ($tn in $disabled) {
-            try {
-                Enable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
-                Write-VesLog INFO "Re-enabled task: $tn" -LogFile $LogFile
-            }
-            catch { Write-VesLog ERROR "FAILED to re-enable task $tn -> $($_.Exception.Message)" -LogFile $LogFile }
-        }
-        if ($StartTasksAfter -and -not $stopFailed) {
-            foreach ($tn in $disabled) {
-                try {
-                    Start-ScheduledTask -TaskName $tn -ErrorAction Stop
-                    Write-VesLog INFO "Started task: $tn" -LogFile $LogFile
-                }
-                catch { Write-VesLog WARN "Could not start task $tn -> $($_.Exception.Message)" -LogFile $LogFile }
-            }
-        }
-    }
-    if ($stopFailed) { Write-VesLog ERROR 'Rollback stopped because the processor could not be quiesced.' -LogFile $LogFile; Stop-Deploy $VES_EXIT_DRIFT }
-    Write-VesLog OK "Rollback complete: $Processor restored from $rollbackSource" -LogFile $LogFile
-    Stop-Deploy $VES_EXIT_OK
+    $rbArgs = @('-Processor', $Processor, '-TargetRoot', $TargetRoot)
+    if ($BackupRoot) { $rbArgs += '-BackupRoot', $BackupRoot }
+    if ($RollbackBackup) { $rbArgs += '-BackupDir', $RollbackBackup }
+    if ($RollbackReason) { $rbArgs += '-Reason', $RollbackReason }
+    if ($ConfigPath) { $rbArgs += '-ConfigPath', $ConfigPath }
+    if ($ConfigContract) { $rbArgs += '-ConfigContract', $ConfigContract }
+    if ($ServiceName) { $rbArgs += '-ServiceName', $ServiceName }
+    foreach ($tn in $ScheduledTasks) { $rbArgs += '-ScheduledTasks', $tn }
+    foreach ($dll in $RequiredAssemblies) { $rbArgs += '-RequiredAssemblies', $dll }
+    if ($KillProcesses) { $rbArgs += '-KillProcesses' }
+    if (-not $StartTasksAfter) { $rbArgs += '-NoStartTasksAfter' }
+    if ($HealthUrl) { $rbArgs += '-HealthUrl', $HealthUrl }
+    if ($FreshLogDir) { $rbArgs += '-FreshLogDir', $FreshLogDir, '-FreshLogMaxAgeMinutes', "$FreshLogMaxAgeMinutes" }
+    if ($ProcessArgumentPattern) { $rbArgs += '-ProcessArgumentPattern', $ProcessArgumentPattern }
+    $rbArgs += '-Initials', $Initials, '-Environment', $Environment, '-Region', $Region
+    if ($LogFile) { $rbArgs += '-LogFile', $LogFile }
+    # -WhatIf does not cross a -File boundary; forward it explicitly.
+    if ($WhatIfPreference) { $rbArgs += '-WhatIf' }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-Rollback.ps1') @rbArgs
+    $rbCode = $LASTEXITCODE
+    $global:LASTEXITCODE = 0
+    Stop-Deploy $rbCode
 }
+
 
 # A tag source needs both halves; fail closed before any stage runs.
 if ($BaselineRepo -and [string]::IsNullOrWhiteSpace($ReleaseTag)) {
@@ -254,24 +175,19 @@ if ($BaselineRepo -and [string]::IsNullOrWhiteSpace($ReleaseTag)) {
 }
 
 $gateRequired = New-Object System.Collections.Generic.List[string]
-$rollbackOnlyProvided = (-not [string]::IsNullOrWhiteSpace($BackupRoot)) -or (-not [string]::IsNullOrWhiteSpace($RollbackBackup))
-if ($Rollback) {
-    if (-not [string]::IsNullOrWhiteSpace($StagedRoot) -or -not [string]::IsNullOrWhiteSpace($StagedCommit) -or -not [string]::IsNullOrWhiteSpace($ManifestPath) -or -not [string]::IsNullOrWhiteSpace($TrustParam) -or -not [string]::IsNullOrWhiteSpace($ApprovedCommitParam) -or -not [string]::IsNullOrWhiteSpace($ReleaseTag) -or -not [string]::IsNullOrWhiteSpace($BaselineRepo)) {
-        Write-VesLog ERROR 'Rollback mode does not accept deploy-only parameters (StagedRoot, StagedCommit, ManifestPath, TrustParam, ApprovedCommitParam, ReleaseTag, BaselineRepo).' -LogFile $LogFile
-        Stop-Deploy $VES_EXIT_USAGE
-    }
-    if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
-        Write-VesLog ERROR '-TargetRoot is required for rollback.' -LogFile $LogFile
-        Stop-Deploy $VES_EXIT_USAGE
-    }
-    if ([string]::IsNullOrWhiteSpace($BackupRoot) -and [string]::IsNullOrWhiteSpace($RollbackBackup)) {
-        Write-VesLog ERROR 'Rollback requires -BackupRoot or -RollbackBackup.' -LogFile $LogFile
-        Stop-Deploy $VES_EXIT_USAGE
-    }
-}
-else {
+# -BackupRoot is NOT rollback-only: a deploy needs it to create the restore point
+# in the first place, and both processor wrappers set it. Only -RollbackBackup and
+# -RollbackReason are meaningless outside rollback mode.
+$rollbackOnlyProvided = (-not [string]::IsNullOrWhiteSpace($RollbackBackup)) -or (-not [string]::IsNullOrWhiteSpace($RollbackReason))
+if (-not $Rollback) {
     if ($rollbackOnlyProvided) {
         Write-VesLog ERROR 'Rollback-only parameters require -Rollback.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+    if ($AutoRollback -and [string]::IsNullOrWhiteSpace($BackupRoot)) {
+        # Fail here, not at stage 4: finding out there is nothing to restore from
+        # only once the deploy has already overwritten prod is the worst moment.
+        Write-VesLog ERROR '-AutoRollback requires -BackupRoot: there would be nothing to restore from.' -LogFile $LogFile
         Stop-Deploy $VES_EXIT_USAGE
     }
     if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
@@ -324,8 +240,15 @@ if ($ConfigContract) {
     }
 }
 
-# run a named stage; if it exits non-zero, abort the whole deploy with that stage's code
-function Step($name, $code) {
+# Set by the backup block below; declared here so the auto-rollback handler can
+# test it even on the paths where no backup was taken.
+$backupDir = $null
+$rollbackOnFail = $null
+
+# run a named stage; if it exits non-zero, abort the whole deploy with that stage's
+# code. $onFail (optional) gets a chance to remediate first and returns the code to
+# exit with; both pre-existing call sites pass two arguments and are unaffected.
+function Step($name, $code, $onFail = $null) {
     Write-VesLog INFO ">>> $name" -LogFile $LogFile
     & $code
     if ($LASTEXITCODE -ne 0) {
@@ -340,6 +263,7 @@ function Step($name, $code) {
         #         -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:deploy-failed')
         # }
         # ----------------------------------------------------------------------
+        if ($onFail) { $stageCode = & $onFail $name $stageCode }
         Stop-Deploy $stageCode
     }
 }
@@ -365,94 +289,216 @@ Step 'pre-deploy gate' {
 # Past the gate. -WhatIf short-circuits to the else branch; the real work runs here.
 if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
 
-    # Deploy backup capability: snapshot the current live tree into a dated backup
-    # folder before overwriting it with the staged release, creating the restore
-    # point used by rollback.
+    # Stage 2: snapshot the current live tree into a timestamped backup folder
+    # before overwriting it. This IS the restore point -- everything after the
+    # robocopy is best-effort evidence that must never abort a deploy, but the
+    # copy itself is load-bearing and aborts on failure.
     if ($BackupRoot) {
-        $backupDir = Join-Path $BackupRoot ("{0}_{1}_{2}" -f (Get-Date).ToString('yyyyMMdd'), $Initials, $Processor)
+        # yyyyMMddTHHmmss, not yyyyMMdd: with date-only names a second deploy on
+        # the same day by the same operator robocopied the ALREADY-OVERWRITTEN
+        # tree into the same folder, destroying the true pre-deploy state.
+        # Local time to match how operators read these names; createdUtc in the
+        # sidecar is the unambiguous value.
+        $backupDir = Join-Path $BackupRoot ("{0}_{1}_{2}" -f (Get-Date).ToString('yyyyMMddTHHmmss'), $Initials, $Processor)
         if (Test-Path -LiteralPath $TargetRoot) {
             Write-VesLog INFO "Backup $TargetRoot -> $backupDir" -LogFile $LogFile
+            if ((Test-Path -LiteralPath $backupDir) -and
+                @(Get-ChildItem -LiteralPath $backupDir -Recurse -File -Force -ErrorAction SilentlyContinue).Count) {
+                Write-VesLog WARN "Backup folder already exists and is not empty; /E will merge two releases into it: $backupDir" -LogFile $LogFile
+            }
             New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
             robocopy $TargetRoot $backupDir /E /NP /R:2 /W:5 | Out-Null
             if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "Backup failed ($LASTEXITCODE); aborting before copy" -LogFile $LogFile; Stop-Deploy $VES_EXIT_DRIFT }
             $global:LASTEXITCODE = 0
+
+            $recordErrors = New-Object System.Collections.Generic.List[string]
+
+            # (a) Hash the tree we are about to replace. Hash $TargetRoot, not the
+            # backup copy, so our own sidecars stay out of the manifest.
+            $backupHash = $null
+            $backupFileCount = $null
+            try {
+                $preManifest = @(Get-VesManifest -ReleaseRoot $TargetRoot)
+                $backupHash = Export-VesManifest -Manifest $preManifest `
+                    -Path (Join-Path $backupDir 'backup-manifest.json') -CommitSha 'pre-deploy' -Processor $Processor
+                $backupFileCount = $preManifest.Count
+            }
+            catch {
+                # >260-char paths defeat Get-ChildItem/Get-FileHash under 5.1 where
+                # robocopy succeeds. Degrade the evidence, never the deploy.
+                $msg = "Could not hash the pre-deploy tree: $($_.Exception.Message)"
+                Write-VesLog WARN $msg -LogFile $LogFile; $recordErrors.Add($msg)
+            }
+
+            # (b) Config living outside TargetRoot is not in the /E copy above and
+            # would otherwise be unrecoverable. Stash it beside the payload.
+            $configInsideTarget = $false
+            $configBackupRelPath = $null
+            if ($ConfigPath) {
+                $targetFullForCfg = [IO.Path]::GetFullPath($TargetRoot).TrimEnd('\') + '\'
+                $configInsideTarget = ([IO.Path]::GetFullPath($ConfigPath)).StartsWith($targetFullForCfg, [StringComparison]::OrdinalIgnoreCase)
+                if (-not $configInsideTarget) {
+                    try {
+                        if (Test-Path -LiteralPath $ConfigPath) {
+                            $stash = Join-Path $backupDir '_ves-config'
+                            New-Item -ItemType Directory -Path $stash -Force | Out-Null
+                            Copy-Item -LiteralPath $ConfigPath -Destination $stash -Force
+                            $configBackupRelPath = Join-Path '_ves-config' (Split-Path -Leaf $ConfigPath)
+                            Write-VesLog INFO "Backed up out-of-tree config: $ConfigPath" -LogFile $LogFile
+                        }
+                        else {
+                            $msg = "ConfigPath not found at backup time: $ConfigPath"
+                            Write-VesLog WARN $msg -LogFile $LogFile; $recordErrors.Add($msg)
+                        }
+                    }
+                    catch {
+                        $msg = "Could not back up config $ConfigPath -> $($_.Exception.Message)"
+                        Write-VesLog WARN $msg -LogFile $LogFile; $recordErrors.Add($msg)
+                    }
+                }
+            }
+
+            # (c) The SSM values in force BEFORE this release. Capture overwrites
+            # them with no read-back, so without this a rollback has no way to say
+            # what the trust anchor used to point at. Get-VesTrustedHash throws on
+            # any failure and cannot tell ParameterNotFound from AccessDenied, so
+            # record the outcome explicitly instead of inferring it from a null.
+            $priorSsm = [ordered]@{
+                trustHash = $null; trustHashRead = $false
+                approvedCommit = $null; approvedCommitRead = $false
+                readError = $null
+            }
+            if ($TrustParam) {
+                try { $priorSsm.trustHash = Get-VesTrustedHash -ParameterName $TrustParam -Region $Region; $priorSsm.trustHashRead = $true }
+                catch {
+                    $priorSsm.readError = $_.Exception.Message
+                    Write-VesLog WARN "No prior trust pin readable at $TrustParam (first deploy, or SSM denied): $($_.Exception.Message)" -LogFile $LogFile
+                }
+            }
+            if ($ApprovedCommitParam) {
+                try { $priorSsm.approvedCommit = Get-VesTrustedHash -ParameterName $ApprovedCommitParam -Region $Region; $priorSsm.approvedCommitRead = $true }
+                catch { Write-VesLog WARN "No prior approved-commit readable at $ApprovedCommitParam." -LogFile $LogFile }
+            }
+
+            # Free, high-value signal: did the tree we are replacing actually match
+            # the pinned baseline, or had prod already drifted before this deploy?
+            if ($backupHash -and $priorSsm.trustHashRead) {
+                if ($backupHash -eq $priorSsm.trustHash) {
+                    Write-VesLog OK 'Pre-deploy tree matches the SSM-pinned baseline; the backup is a trusted restore point.' -LogFile $LogFile
+                }
+                else {
+                    Write-VesLog DRIFT 'Pre-deploy tree does NOT match the SSM-pinned baseline; the backup restores production as it actually was, not as approved.' -LogFile $LogFile
+                }
+            }
+
+            # (d) Written LAST, on purpose: its presence is how rollback knows the
+            # backup finished rather than dying part-way through the copy.
+            try {
+                $record = [ordered]@{
+                    schema              = 'ves.rollback-record.v1'
+                    processor           = $Processor
+                    createdUtc          = (Get-Date).ToUniversalTime().ToString('o')
+                    createdBy           = "$env:USERNAME@$env:COMPUTERNAME"
+                    initials            = $Initials
+                    sourceTargetRoot    = $TargetRoot
+                    replacedByCommit    = $StagedCommit
+                    replacedByReleaseTag = $ReleaseTag
+                    priorReleaseTag     = $null
+                    backupManifestHash  = $backupHash
+                    backupFileCount     = $backupFileCount
+                    manifestPath        = $ManifestPath
+                    configPath          = $ConfigPath
+                    configInsideTarget  = $configInsideTarget
+                    configBackupRelPath = $configBackupRelPath
+                    trustParam          = $TrustParam
+                    approvedCommitParam = $ApprovedCommitParam
+                    region              = $Region
+                    priorSsm            = $priorSsm
+                    recordErrors        = $recordErrors.ToArray()
+                }
+                ($record | ConvertTo-Json -Depth 6) | Out-File -FilePath (Join-Path $backupDir 'rollback-record.json') -Encoding utf8
+                Write-VesLog OK "Restore point ready: $backupDir" -LogFile $LogFile
+            }
+            catch {
+                Write-VesLog WARN "Could not write rollback-record.json: $($_.Exception.Message)" -LogFile $LogFile
+            }
         }
         else {
             Write-VesLog WARN "TargetRoot does not exist yet; nothing to back up." -LogFile $LogFile
         }
     }
 
-    # Stop -> copy -> restart. try/finally guarantees we re-enable tasks and
-    # restart the service even if the copy fails, so we never leave prod down.
-    # Stage 3: stop -> copy -> restart, tracking what we disabled so finally can undo it
-    $disabled = New-Object System.Collections.Generic.List[string]
-    $copyFailed = $false
-    $stopFailed = $false
-    try {
-        # disable the scheduled tasks that hold the target files open
-        foreach ($tn in $ScheduledTasks) {
+    # Auto-rollback handler. Runs when a stage AFTER the copy fails, i.e. once prod
+    # is already carrying the new bits. Shells Invoke-Rollback with this run's own
+    # -LogFile so both runs interleave in one JSONL stream, and deliberately does
+    # NOT pass -RepinTrust: an automated write to the trust anchor, triggered by a
+    # failing deploy, is the most dangerous thing this suite could do.
+    if ($AutoRollback) {
+        $rollbackOnFail = {
+            param([string]$stageName, [int]$stageCode)
+            if (-not $backupDir -or -not (Test-Path -LiteralPath $backupDir)) {
+                Write-VesLog ERROR 'AUTO-ROLLBACK UNAVAILABLE: no backup was taken (TargetRoot did not exist at deploy time). Manual recovery required.' `
+                    -Data @{runId = $runId; stage = $stageName } -LogFile $LogFile
+                return $VES_EXIT_NOBASE
+            }
+            Write-VesLog WARN "AUTO-ROLLBACK: restoring $backupDir after '$stageName' failed (exit $stageCode)" `
+                -Data @{runId = $runId; stage = $stageName; stageExitCode = $stageCode; backupDir = $backupDir } -LogFile $LogFile
+            $rbCode = $null
             try {
-                Disable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
-                $disabled.Add($tn); Write-VesLog INFO "Disabled task: $tn" -LogFile $LogFile 
+                $rbArgs = @(
+                    '-Processor', $Processor, '-TargetRoot', $TargetRoot, '-BackupRoot', $BackupRoot,
+                    '-BackupDir', $backupDir, '-Environment', $Environment, '-Region', $Region,
+                    '-Initials', $Initials, '-LogFile', $LogFile,
+                    '-Reason', ("auto-rollback: deploy stage '$stageName' failed with exit $stageCode"))
+                # -File cannot bind arrays: repeat the named argument instead.
+                foreach ($tn in $ScheduledTasks) { $rbArgs += '-ScheduledTasks', $tn }
+                foreach ($dll in $RequiredAssemblies) { $rbArgs += '-RequiredAssemblies', $dll }
+                if ($ServiceName) { $rbArgs += '-ServiceName', $ServiceName }
+                if ($BaselineRepo) { $rbArgs += '-BaselineRepo', $BaselineRepo }
+                if ($TrustParam) { $rbArgs += '-TrustParam', $TrustParam }
+                if ($ConfigContract) { $rbArgs += '-ConfigContract', $ConfigContract }
+                if ($ConfigPath) { $rbArgs += '-ConfigPath', $ConfigPath }
+                if ($FreshLogDir) { $rbArgs += '-FreshLogDir', $FreshLogDir, '-FreshLogMaxAgeMinutes', "$FreshLogMaxAgeMinutes" }
+                if ($ProcessArgumentPattern) { $rbArgs += '-ProcessArgumentPattern', $ProcessArgumentPattern }
+                if ($HealthUrl) { $rbArgs += '-HealthUrl', $HealthUrl }
+                # by stage 4 the finally above has already restarted the tasks, so the
+                # processor may be live and holding files again
+                if ($KillProcesses) { $rbArgs += '-KillProcesses' }
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-Rollback.ps1') @rbArgs
+                $rbCode = $LASTEXITCODE
             }
-            catch { Write-VesLog ERROR "Could not disable task $tn -> $($_.Exception.Message)" -LogFile $LogFile; $stopFailed = $true; break }
-        }
-        # stop the Windows service too, for Java-service targets
-        if (-not $stopFailed -and $ServiceName) {
-            $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-            if ($svc) {
-                try {
-                    Stop-Service -Name $ServiceName -Force -ErrorAction Stop
-                    Write-VesLog INFO "Stopped service: $ServiceName" -LogFile $LogFile 
-                }
-                catch { Write-VesLog ERROR "Could not stop service $ServiceName -> $($_.Exception.Message)" -LogFile $LogFile; $stopFailed = $true }
+            catch {
+                Write-VesLog ERROR "AUTO-ROLLBACK could not be launched: $($_.Exception.Message)" -Data @{runId = $runId } -LogFile $LogFile
+                $rbCode = $VES_EXIT_NOBASE
             }
-        }
-        # Console-EXE instances: a running exe under TargetRoot keeps its files
-        # locked even after its task is disabled and would corrupt the /MIR copy.
-        # ExecutablePath-under-TargetRoot is the instance identity (same exe name
-        # runs from several folders per box); working dir isn't exposed by WMI.
-        if (-not $stopFailed) {
-            $targetItem = Get-Item -LiteralPath $TargetRoot -ErrorAction SilentlyContinue
-            if ($targetItem) {
-                $targetPrefix = $targetItem.FullName.TrimEnd('\') + '\'
-                $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-                    Where-Object { $_.ExecutablePath -and
-                        $_.ExecutablePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) })
-                foreach ($p in $running) {
-                    if ($KillProcesses) {
-                        # audit line BEFORE the kill: which instance (mode arg visible in CommandLine)
-                        Write-VesLog WARN ("Killing running instance PID {0}: {1}" -f $p.ProcessId, $p.CommandLine) `
-                            -Data @{processor = $Processor; pid = $p.ProcessId; commandLine = $p.CommandLine } -LogFile $LogFile
-                        try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop }
-                        catch {
-                            Write-VesLog ERROR "Could not kill PID $($p.ProcessId) -> $($_.Exception.Message)" -LogFile $LogFile
-                            $stopFailed = $true
-                        }
-                    }
-                    else {
-                        Write-VesLog ERROR ("Running instance holds {0}: PID {1} {2}. Re-run with -KillProcesses to stop it." -f `
-                                $TargetRoot, $p.ProcessId, $p.CommandLine) -LogFile $LogFile
-                        $stopFailed = $true
-                    }
-                }
-                # wait for killed instances to actually exit and release handles
-                if ($KillProcesses -and -not $stopFailed -and $running.Count) {
-                    $ids = @($running | ForEach-Object { $_.ProcessId })
-                    $deadline = (Get-Date).AddSeconds(30)
-                    while ((Get-Date) -lt $deadline -and (Get-Process -Id $ids -ErrorAction SilentlyContinue)) {
-                        Start-Sleep -Milliseconds 250
-                    }
-                    $alive = @(Get-Process -Id $ids -ErrorAction SilentlyContinue)
-                    if ($alive.Count) {
-                        Write-VesLog ERROR "Instance(s) still alive after kill: $(($alive | ForEach-Object Id) -join ', ')" -LogFile $LogFile
-                        $stopFailed = $true
-                    }
-                }
+            # never let the child's code leak into the deploy's own exit path
+            $global:LASTEXITCODE = 0
+            $script:rolledBack = $true
+            $script:rollbackExitCode = $rbCode
+            Write-VesLog ($(if ($rbCode -eq 0) { 'OK' } else { 'ERROR' })) 'ROLLBACK OUTCOME' `
+                -Data @{runId = $runId; stage = $stageName; stageExitCode = $stageCode; rollbackExitCode = $rbCode; backupDir = $backupDir } -LogFile $LogFile
+            if ($rbCode -eq 0) {
+                Write-VesLog OK "AUTO-ROLLBACK COMPLETE: prior release restored, re-verified, healthy. The deploy still FAILED (exit $stageCode)." -LogFile $LogFile
+                return $stageCode
             }
+            Write-VesLog ERROR "AUTO-ROLLBACK FAILED (exit $rbCode). Production is in an INDETERMINATE state; manual recovery required." -LogFile $LogFile
+            return $VES_EXIT_NOBASE
         }
+    }
+
+    # Stage 3: stop -> copy -> restart. The try/finally is what guarantees prod
+    # comes back up even if the copy throws, so it stays here in plain sight; the
+    # two long side-effecting halves live in the module and are shared with
+    # Invoke-Rollback so a restore quiesces the box exactly the way a deploy does.
+    # $stop is initialised BEFORE the try: if the stop call itself throws, finally
+    # must not blow up on an unassigned variable.
+    $stop = $null
+    $copyFailed = $false
+    try {
+        $stop = Stop-VesProcessorTarget -TargetRoot $TargetRoot -ScheduledTasks $ScheduledTasks `
+            -ServiceName $ServiceName -KillProcesses:$KillProcesses -Processor $Processor -LogFile $LogFile
         # only mirror the staged tree in once everything is safely stopped
-        if (-not $stopFailed) {
+        if ($stop.Stopped) {
             Write-VesLog INFO "Copy $StagedRoot -> $TargetRoot" -LogFile $LogFile
             # /MIR so stale files get removed; binary copy, nothing rewrites line endings
             robocopy $StagedRoot $TargetRoot /MIR /NP /R:2 /W:5 | Out-Null
@@ -462,39 +508,27 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
         }
     }
     finally {
-        # restart in reverse order: service first, then re-enable the tasks
-        if ($ServiceName) {
-            $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-            if ($svc) {
-                try {
-                    Start-Service -Name $ServiceName -ErrorAction Stop
-                    Write-VesLog INFO "Started service: $ServiceName" -LogFile $LogFile 
-                }
-                catch { Write-VesLog ERROR "FAILED to restart service $ServiceName -> $($_.Exception.Message)" -LogFile $LogFile }
-            }
-        }
-        foreach ($tn in $disabled) {
-            try {
-                Enable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
-                Write-VesLog INFO "Re-enabled task: $tn" -LogFile $LogFile
-            }
-            catch { Write-VesLog ERROR "FAILED to re-enable task $tn -> $($_.Exception.Message)" -LogFile $LogFile }
-        }
         # prompt relaunch, only after a clean stop+copy: never auto-start a tree a
         # failed copy may have left broken (next trigger / the operator owns that).
-        if ($StartTasksAfter -and -not $stopFailed -and -not $copyFailed) {
-            foreach ($tn in $disabled) {
-                try {
-                    Start-ScheduledTask -TaskName $tn -ErrorAction Stop
-                    Write-VesLog INFO "Started task: $tn" -LogFile $LogFile
-                }
-                catch { Write-VesLog WARN "Could not start task $tn -> $($_.Exception.Message)" -LogFile $LogFile }
-            }
+        $startTasks = ($StartTasksAfter -and $stop -and $stop.Stopped -and -not $copyFailed)
+        if ($stop) {
+            Start-VesProcessorTarget -DisabledTasks $stop.DisabledTasks -ServiceName $ServiceName `
+                -StartTasks:$startTasks -LogFile $LogFile | Out-Null
         }
     }
     # a failed stop or copy aborts here (processor already restored by finally)
-    if ($stopFailed) { Write-VesLog ERROR "Stop phase failed; processor state restored, no copy performed." -LogFile $LogFile; Stop-Deploy $VES_EXIT_DRIFT }
-    if ($copyFailed) { Stop-Deploy $VES_EXIT_DRIFT }
+    if (-not $stop -or -not $stop.Stopped) {
+        # Nothing was copied, so the tree is untouched: an auto-rollback here would
+        # be pointless churn against the same file locks that blocked the stop.
+        Write-VesLog ERROR "Stop phase failed; processor state restored, no copy performed." -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_DRIFT
+    }
+    if ($copyFailed) {
+        # A /MIR that died part-way IS the case rollback exists for.
+        $code = $VES_EXIT_DRIFT
+        if ($rollbackOnFail) { $code = & $rollbackOnFail 'copy' $VES_EXIT_DRIFT }
+        Stop-Deploy $code
+    }
 
 }
 else {
@@ -526,7 +560,7 @@ Step 'post-deploy verify' {
     if ($LogFile) { $verArgs += '-LogFile', $LogFile }
     if ($ConfigContract) { $verArgs += '-ConfigContract', $ConfigContract, '-ConfigPath', $ConfigPath }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-Verification.ps1') @verArgs
-}
+} $rollbackOnFail
 
 # Stage 5: confirm the processor is actually alive after the restart (service/task/log/endpoint)
 Step 'health check' {
@@ -546,15 +580,15 @@ Step 'health check' {
     }
     if ($HealthUrl) { $hcArgs += '-HealthUrl', $HealthUrl }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-HealthCheck.ps1') @hcArgs
-}
+} $rollbackOnFail
 
-# Backup retention capability: after a fully green deploy, keep only the newest
-# N dated backup folders for this processor and prune the older restore points.
+# Backup retention capability: after a fully green deploy, keep only the newest N
+# backup folders for this processor and prune the older restore points. Enumerated
+# through Get-VesBackupSet, the same function the restore picker uses, so the two
+# can never disagree about what counts as a backup (both name shapes included).
+# Unreachable on a failed deploy, so a failure can never eat its own restore point.
 if ($BackupRoot -and $KeepBackups -gt 0 -and (Test-Path -LiteralPath $BackupRoot)) {
-    $pattern = '^\d{8}_.+_' + [regex]::Escape($Processor) + '$'
-    $old = @(Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match $pattern } |
-        Sort-Object Name -Descending | Select-Object -Skip $KeepBackups)
+    $old = @(Get-VesBackupSet -BackupRoot $BackupRoot -Processor $Processor | Select-Object -Skip $KeepBackups)
     foreach ($b in $old) {
         try {
             Remove-Item -LiteralPath $b.FullName -Recurse -Force

@@ -48,28 +48,28 @@ $log = Join-Path $logDir ('deploy_OutboundDBQ_{0}.jsonl' -f (Get-Date).ToUnivers
 # - TargetRoot is the live processor tree that will be backed up before deploy.
 # - BackupRoot is the folder where dated restore points are stored for rollback.
 $fixed = @{
-    Processor           = 'OutboundDBQ'
-    TargetRoot          = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor'
-    ManifestPath        = 'D:\baselines\OutboundDBQ.json'
-    TrustParam          = '/ves/OutboundDBQ/baseline-hash'
-    ApprovedCommitParam = '/ves/OutboundDBQ/approved-commit'
-    ConfigContract      = 'D:\baselines\OutboundDBQ.config.json'
-    ConfigPath          = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe.config'
-    BackupRoot          = 'C:\VLER_TEST_OUTBOUND\Processors\BackUp'
-    ScheduledTasks      = @('VLER_EM_Realtime_DBQ_Processor')            # CONFIRM task name
-    FreshLogDir         = 'C:\VLER_TEST_OUTBOUND\Logs\VES.OutboundProcessor'  # CONFIRM log dir
+    Processor              = 'OutboundDBQ'
+    TargetRoot             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor'
+    ManifestPath           = 'D:\baselines\OutboundDBQ.json'
+    TrustParam             = '/ves/OutboundDBQ/baseline-hash'
+    ApprovedCommitParam    = '/ves/OutboundDBQ/approved-commit'
+    ConfigContract         = 'D:\baselines\OutboundDBQ.config.json'
+    ConfigPath             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe.config'
+    BackupRoot             = 'C:\VLER_TEST_OUTBOUND\Processors\BackUp'
+    ScheduledTasks         = @('VLER_EM_Realtime_DBQ_Processor')            # CONFIRM task name
+    FreshLogDir            = 'C:\VLER_TEST_OUTBOUND\Logs\VES.OutboundProcessor'  # CONFIRM log dir
     # kill the running console-exe instance before copy; relaunch via task after
-    KillProcesses       = $true
-    StartTasksAfter     = $true
+    KillProcesses          = $true
+    StartTasksAfter        = $true
     ProcessArgumentPattern = '\bRTPDP\b'
-    RequiredAssemblies  = @('C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe')
+    RequiredAssemblies     = @('C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe')
     # DBQ has no actuator endpoint; leave these empty
-    ServiceName         = ''
-    HealthUrl           = ''
+    ServiceName            = ''
+    HealthUrl              = ''
 }
 
 $passthru = @{}
-if ($ReleaseTag)   { $passthru['ReleaseTag'] = $ReleaseTag }
+if ($ReleaseTag) { $passthru['ReleaseTag'] = $ReleaseTag }
 if ($BaselineRepo) { $passthru['BaselineRepo'] = $BaselineRepo }
 & (Join-Path $core 'Deploy-Processor.ps1') @fixed @passthru `
     -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Environment 'uat' -Region $Region -LogFile $log
