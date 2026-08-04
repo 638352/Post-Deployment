@@ -246,6 +246,7 @@ if ($BaselineRepo -and [string]::IsNullOrWhiteSpace($ReleaseTag)) {
 }
 
 $gateRequired = New-Object System.Collections.Generic.List[string]
+$rollbackOnlyProvided = (-not [string]::IsNullOrWhiteSpace($BackupRoot)) -or (-not [string]::IsNullOrWhiteSpace($RollbackBackup))
 if ($Rollback) {
     if (-not [string]::IsNullOrWhiteSpace($StagedRoot) -or -not [string]::IsNullOrWhiteSpace($StagedCommit) -or -not [string]::IsNullOrWhiteSpace($ManifestPath) -or -not [string]::IsNullOrWhiteSpace($TrustParam) -or -not [string]::IsNullOrWhiteSpace($ApprovedCommitParam) -or -not [string]::IsNullOrWhiteSpace($ReleaseTag) -or -not [string]::IsNullOrWhiteSpace($BaselineRepo)) {
         Write-VesLog ERROR 'Rollback mode does not accept deploy-only parameters (StagedRoot, StagedCommit, ManifestPath, TrustParam, ApprovedCommitParam, ReleaseTag, BaselineRepo).' -LogFile $LogFile
@@ -261,6 +262,10 @@ if ($Rollback) {
     }
 }
 else {
+    if ($rollbackOnlyProvided) {
+        Write-VesLog ERROR 'Rollback-only parameters require -Rollback.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
     if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
         Write-VesLog ERROR '-TargetRoot is required for deploy.' -LogFile $LogFile
         Stop-Deploy $VES_EXIT_USAGE
