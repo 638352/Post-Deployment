@@ -214,6 +214,19 @@ if (-not $Rollback) {
         Write-VesLog ERROR '-ApprovedCommitParam is required for deploy.' -LogFile $LogFile
         Stop-Deploy $VES_EXIT_USAGE
     }
+    # A BackupRoot inside TargetRoot destroys itself twice over: the /E backup
+    # recurses into its own destination, and the /MIR that follows then deletes
+    # the restore point it just made. Measured, not theoretical.
+    if ($BackupRoot -and $TargetRoot) {
+        $rootFull = [IO.Path]::GetFullPath($BackupRoot).TrimEnd('\')
+        $tgtFull = [IO.Path]::GetFullPath($TargetRoot).TrimEnd('\')
+        if ($rootFull -eq $tgtFull -or
+            $rootFull.StartsWith($tgtFull + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            $tgtFull.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            Write-VesLog ERROR "Unsafe configuration: BackupRoot and TargetRoot overlap ($rootFull vs $tgtFull). The backup would copy into itself and the mirror would then delete it." -LogFile $LogFile
+            Stop-Deploy $VES_EXIT_USAGE
+        }
+    }
 }
 foreach ($path in $RequiredArtifactPaths) {
     if (-not [string]::IsNullOrWhiteSpace($path) -and -not $gateRequired.Contains($path)) {
@@ -263,7 +276,14 @@ function Step($name, $code, $onFail = $null) {
         #         -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:deploy-failed')
         # }
         # ----------------------------------------------------------------------
-        if ($onFail) { $stageCode = & $onFail $name $stageCode }
+        if ($onFail) {
+            # The handler shells a child process whose stdout would otherwise be
+            # spliced into the scriptblock's return value, so read the code back
+            # through a script-scoped variable instead of from the pipeline.
+            $script:onFailExitCode = $null
+            & $onFail $name $stageCode
+            if ($null -ne $script:onFailExitCode) { $stageCode = $script:onFailExitCode }
+        }
         Stop-Deploy $stageCode
     }
 }
@@ -318,10 +338,13 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             $backupHash = $null
             $backupFileCount = $null
             try {
-                $preManifest = @(Get-VesManifest -ReleaseRoot $TargetRoot)
+                # Assign the call directly: Get-VesManifest returns a comma-wrapped
+                # array, so wrapping the CALL in @() nests it one level deeper and
+                # the manifest lands with a single bogus entry.
+                $preManifest = Get-VesManifest -ReleaseRoot $TargetRoot
                 $backupHash = Export-VesManifest -Manifest $preManifest `
                     -Path (Join-Path $backupDir 'backup-manifest.json') -CommitSha 'pre-deploy' -Processor $Processor
-                $backupFileCount = $preManifest.Count
+                $backupFileCount = @($preManifest).Count
             }
             catch {
                 # >260-char paths defeat Get-ChildItem/Get-FileHash under 5.1 where
@@ -439,7 +462,8 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             if (-not $backupDir -or -not (Test-Path -LiteralPath $backupDir)) {
                 Write-VesLog ERROR 'AUTO-ROLLBACK UNAVAILABLE: no backup was taken (TargetRoot did not exist at deploy time). Manual recovery required.' `
                     -Data @{runId = $runId; stage = $stageName } -LogFile $LogFile
-                return $VES_EXIT_NOBASE
+                $script:onFailExitCode = $VES_EXIT_NOBASE
+                return
             }
             Write-VesLog WARN "AUTO-ROLLBACK: restoring $backupDir after '$stageName' failed (exit $stageCode)" `
                 -Data @{runId = $runId; stage = $stageName; stageExitCode = $stageCode; backupDir = $backupDir } -LogFile $LogFile
@@ -479,10 +503,19 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 -Data @{runId = $runId; stage = $stageName; stageExitCode = $stageCode; rollbackExitCode = $rbCode; backupDir = $backupDir } -LogFile $LogFile
             if ($rbCode -eq 0) {
                 Write-VesLog OK "AUTO-ROLLBACK COMPLETE: prior release restored, re-verified, healthy. The deploy still FAILED (exit $stageCode)." -LogFile $LogFile
-                return $stageCode
+                $script:onFailExitCode = $stageCode
             }
-            Write-VesLog ERROR "AUTO-ROLLBACK FAILED (exit $rbCode). Production is in an INDETERMINATE state; manual recovery required." -LogFile $LogFile
-            return $VES_EXIT_NOBASE
+            elseif ($rbCode -eq $VES_EXIT_DRIFT -or $rbCode -eq $VES_EXIT_HEALTH) {
+                # The copy itself worked -- the restored release just could not be
+                # proven (drift) or is not alive (health). Say that, rather than
+                # claiming a failed restore: the two need different responses.
+                Write-VesLog ERROR "AUTO-ROLLBACK RESTORED BUT UNPROVEN (rollback exit $rbCode): the prior release is back on disk but did not pass its own verify/health check. A human must confirm production." -LogFile $LogFile
+                $script:onFailExitCode = $VES_EXIT_NOBASE
+            }
+            else {
+                Write-VesLog ERROR "AUTO-ROLLBACK FAILED (exit $rbCode). Production is in an INDETERMINATE state; manual recovery required." -LogFile $LogFile
+                $script:onFailExitCode = $VES_EXIT_NOBASE
+            }
         }
     }
 
@@ -526,7 +559,11 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
     if ($copyFailed) {
         # A /MIR that died part-way IS the case rollback exists for.
         $code = $VES_EXIT_DRIFT
-        if ($rollbackOnFail) { $code = & $rollbackOnFail 'copy' $VES_EXIT_DRIFT }
+        if ($rollbackOnFail) {
+            $script:onFailExitCode = $null
+            & $rollbackOnFail 'copy' $VES_EXIT_DRIFT
+            if ($null -ne $script:onFailExitCode) { $code = $script:onFailExitCode }
+        }
         Stop-Deploy $code
     }
 

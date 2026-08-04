@@ -55,9 +55,16 @@ BeforeAll {
     }
 
     # A target already holding a previous release, so a backup has something to take.
+    # Its logs\ dir carries a fresh log line, which is what the liveness probe reads.
+    # The staged tree has no logs\, so /MIR deletes it: the deploy then fails its
+    # health check, and a rollback that really restored the tree passes it again.
+    # (logs\ is excluded from the manifest by VES_DEFAULT_EXCLUDE, so file verify
+    # is unaffected either way.)
     function script:New-LiveTarget([string]$Name) {
         $t = New-VesTree (Join-Path $script:Root $Name) 'previous-release'
         Set-Content -Path (Join-Path $t 'only-on-this-server.txt') -Value 'server-local' -NoNewline
+        New-Item -ItemType Directory -Path (Join-Path $t 'logs') -Force | Out-Null
+        Set-Content -Path (Join-Path $t 'logs\today.log') -Value 'alive' -NoNewline
         $t
     }
 }
@@ -192,14 +199,18 @@ Describe 'running console-EXE instance' {
 }
 
 Describe '-AutoRollback' {
-    It 'is opt-in: without it a failed health check leaves the new release in place' {
-        $target = New-LiveTarget 'target-noauto'
-        $backups = Join-Path $script:Root 'backups-noauto'
-        $r = Invoke-VesScript 'Deploy-Processor.ps1' @(
-            '-Processor', 'dptest', '-StagedRoot', $script:Staged, '-TargetRoot', $target,
+    # The deploy deletes the target's logs\ dir (the staged tree has none), so the
+    # liveness probe fails after the copy and passes again once the tree is restored.
+    function script:New-AutoArgs([string]$Target, [string]$Backups, [string[]]$Extra = @()) {
+        @('-Processor', 'dptest', '-StagedRoot', $script:Staged, '-TargetRoot', $Target,
             '-StagedCommit', 'abc1234', '-ManifestPath', $script:ManifestPath,
             '-TrustParam', '/ves/dptest/baseline-hash', '-ApprovedCommitParam', '/ves/dptest/approved-commit',
-            '-BackupRoot', $backups, '-FreshLogDir', $script:DeadLogs)
+            '-BackupRoot', $Backups, '-FreshLogDir', (Join-Path $Target 'logs')) + $Extra
+    }
+
+    It 'is opt-in: without it a failed health check leaves the new release in place' {
+        $target = New-LiveTarget 'target-noauto'
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-AutoArgs $target (Join-Path $script:Root 'backups-noauto'))
         $r.ExitCode | Should -Be 3
         $r.Output | Should -Not -Match 'AUTO-ROLLBACK'
         # the new release is still there: nothing was reverted
@@ -208,12 +219,7 @@ Describe '-AutoRollback' {
 
     It 'restores the prior release on a health failure, and still reports the deploy as failed' {
         $target = New-LiveTarget 'target-auto'
-        $backups = Join-Path $script:Root 'backups-auto'
-        $r = Invoke-VesScript 'Deploy-Processor.ps1' @(
-            '-Processor', 'dptest', '-StagedRoot', $script:Staged, '-TargetRoot', $target,
-            '-StagedCommit', 'abc1234', '-ManifestPath', $script:ManifestPath,
-            '-TrustParam', '/ves/dptest/baseline-hash', '-ApprovedCommitParam', '/ves/dptest/approved-commit',
-            '-BackupRoot', $backups, '-FreshLogDir', $script:DeadLogs, '-AutoRollback')
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-AutoArgs $target (Join-Path $script:Root 'backups-auto') @('-AutoRollback'))
         # the failing stage's code, never 0: rolling back is remediation, not success
         $r.ExitCode | Should -Be 3
         $r.Output | Should -Match 'AUTO-ROLLBACK COMPLETE'
@@ -222,23 +228,43 @@ Describe '-AutoRollback' {
         Test-Path (Join-Path $target 'only-on-this-server.txt') | Should -BeTrue
         # and no restore-point bookkeeping leaked into production
         Test-Path (Join-Path $target 'rollback-record.json') | Should -BeFalse
+        Test-Path (Join-Path $target 'backup-manifest.json') | Should -BeFalse
     }
 
-    It 'exits 2 with INDETERMINATE when the restore itself cannot succeed' {
-        $target = New-LiveTarget 'target-auto-broken'
-        $backups = Join-Path $script:Root 'backups-auto-broken'
-        # Point the restore at a backup root the deploy cannot use: BackupRoot under
-        # TargetRoot means the mirror would eat its own source, so rollback refuses.
-        $nested = Join-Path $target 'BackUp'
+    It 'says RESTORED BUT UNPROVEN (exit 2) when the restore lands but cannot prove itself' {
+        $target = New-LiveTarget 'target-auto-unproven'
+        # health probe points at a directory that stays empty whatever we restore,
+        # so the rollback's own health check fails after a good copy
+        $dead = Join-Path $script:Root 'logs-empty'
         $r = Invoke-VesScript 'Deploy-Processor.ps1' @(
             '-Processor', 'dptest', '-StagedRoot', $script:Staged, '-TargetRoot', $target,
             '-StagedCommit', 'abc1234', '-ManifestPath', $script:ManifestPath,
             '-TrustParam', '/ves/dptest/baseline-hash', '-ApprovedCommitParam', '/ves/dptest/approved-commit',
-            '-BackupRoot', $nested, '-FreshLogDir', $script:DeadLogs, '-AutoRollback')
+            '-BackupRoot', (Join-Path $script:Root 'backups-unproven'), '-FreshLogDir', $dead, '-AutoRollback')
         $r.ExitCode | Should -Be 2
-        $r.Output | Should -Match 'AUTO-ROLLBACK FAILED'
-        $r.Output | Should -Match 'INDETERMINATE'
-        $backups | Should -Not -BeNullOrEmpty
+        $r.Output | Should -Match 'AUTO-ROLLBACK RESTORED BUT UNPROVEN'
+        # the copy DID happen -- that is the distinction the message draws
+        (Get-Content -LiteralPath (Join-Path $target 'app.txt') -Raw) | Should -Be 'previous-release'
+    }
+
+    It 'exits 2 when there was no backup to restore from' {
+        # brand-new target: nothing to back up, so auto-rollback has no restore point
+        $target = Join-Path $script:Root 'target-auto-nobackup-taken'
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' @(
+            '-Processor', 'dptest', '-StagedRoot', $script:Staged, '-TargetRoot', $target,
+            '-StagedCommit', 'abc1234', '-ManifestPath', $script:ManifestPath,
+            '-TrustParam', '/ves/dptest/baseline-hash', '-ApprovedCommitParam', '/ves/dptest/approved-commit',
+            '-BackupRoot', (Join-Path $script:Root 'backups-none'), '-FreshLogDir', $script:DeadLogs, '-AutoRollback')
+        $r.ExitCode | Should -Be 2
+        $r.Output | Should -Match 'AUTO-ROLLBACK UNAVAILABLE'
+    }
+
+    It 'refuses a BackupRoot nested inside TargetRoot before it can eat its own restore point' {
+        $target = New-LiveTarget 'target-nested-backup'
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $target @('-BackupRoot', (Join-Path $target 'BackUp')))
+        $r.ExitCode | Should -Be 10
+        $r.Output | Should -Match 'overlap'
+        $r.Output | Should -Not -Match 'pre-deploy gate'
     }
 
     It 'refuses -AutoRollback without -BackupRoot, before the gate runs' {
