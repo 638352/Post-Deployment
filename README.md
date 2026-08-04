@@ -21,6 +21,7 @@ Start-DriftRunner.ps1        scheduled re-verify, writes per-target JSONL logs
 Test-DriftHeartbeat.ps1      independent missed-run watchdog
 Install-DriftTask.ps1        registers the runner + watchdog scheduled tasks
 Deploy-Processor.ps1         gate -> stop -> backup -> copy -> restart -> verify -> health
+Invoke-Rollback.ps1          restore a backup, prove it, optionally re-pin trust
 processors/                  one thin deploy script per system (template inside)
 targets.json                 fail-closed server/Citrix inventory starter
 sample.config.json           example config contract
@@ -74,6 +75,16 @@ three tools. Replaces the older Verify-Deployment.ps1.
 10 usage or unsafe configuration. These map to the brief's three outcomes:
 `PASS` (0), `FAIL` (1 or 3), and `ERROR` (2 or 10). A missing baseline,
 incomplete inventory, dead check, or unconfigured health probe is never a pass.
+
+Severity is not numeric order: `2` (ERROR) outranks `3` (FAIL), so a script
+combining several stage results ranks them `10 > 2 > 3 > 1 > 0`
+(`Get-VesWorstExitCode`).
+
+Rollback uses the same contract, read as: `2` means **production state is not
+proven** — no usable backup, a partial one, a failed restore copy, or no
+baseline to verify the restored release against. A deploy that auto-rolls-back
+exits with the code of the stage that failed (`1` or `3`), never `0`: rolling
+back is remediation, not success.
 
 ## Trust model
 
@@ -181,6 +192,92 @@ only, no copy:
 
 Deploy-Processor.ps1 can still be called directly with the full parameter set
 when scripting something one-off.
+
+## Rollback
+
+Every deploy that is given `-BackupRoot` writes its restore point first:
+
+```
+<BackupRoot>\<yyyyMMddTHHmmss>_<Initials>_<Processor>\
+    <the whole pre-deploy tree>
+    backup-manifest.json     SHA-256 of the tree that was replaced
+    rollback-record.json     what replaced it, the config stashed, the SSM
+                             values in force at the time (written LAST, so its
+                             absence means the backup may be incomplete)
+    _ves-config\             a config living outside TargetRoot, which the
+                             mirror would otherwise leave unrecoverable
+```
+
+The folder name carries a **time**, not just a date: with date-only names a
+second deploy on the same day by the same operator backed up the
+already-overwritten tree into the same folder and destroyed the true pre-deploy
+state. Older date-only folders are still restorable.
+
+Look before you leap — this is read-only and touches nothing:
+
+```powershell
+.\Invoke-Rollback.ps1 -Processor <system> -BackupRoot <BackupRoot> -ListBackups
+```
+
+Then dry-run, then restore. `-Reason` is required and goes in the audit log:
+
+```powershell
+.\Invoke-Rollback.ps1 -Processor <system> -TargetRoot <live tree> `
+  -BackupRoot <BackupRoot> -Reason 'VEMS-1234 bad release' `
+  -BaselineRepo D:\ves-verify -ReleaseTag <system>/v1.3.0 `
+  -TrustParam /ves/<system>/baseline-hash -FreshLogDir <logs> -WhatIf
+```
+
+`Deploy-Processor.ps1 -Rollback -RollbackReason '...'` is an alias for the same
+thing, for an operator already holding the deploy command line.
+
+A rollback proves itself. After the restore it re-runs verification and the
+health check, choosing the baseline for the **restored** release, strongest
+source first:
+
+1. `-BaselineRepo` + the prior release tag (the archived manifest, cross-checked
+   against SSM). Configure `-BaselineRepo` on production boxes so this rung is
+   available — it is the only one that proves the restored release was approved.
+2. an explicit `-ManifestPath` for the prior release.
+3. the backup's own `backup-manifest.json`. This proves the restore matches
+   pre-deploy production; it does **not** prove that state was approved, and the
+   run says so.
+4. nothing → exit 2. A restore whose result cannot be checked is not a pass;
+   `-AllowUnverifiedRollback` downgrades that to a warning when no manifest for
+   the prior release exists.
+
+Verifying a restored old tree against the *new* release's manifest is the
+likeliest way to make a good rollback look like a bad one, which is what that
+ladder prevents. Note `-ManifestPath` on the box normally holds the new release.
+
+**Re-pinning the trust anchor is a separate, deliberate step.** `-RepinTrust`
+is off by default and only fires when all of: the backup recorded the prior SSM
+values, `-Reason` is present, and the post-rollback verification passed. It
+re-pins the baseline hash **and** the approved commit together — doing one
+without the other leaves the gate and the verifier disagreeing about which
+release is approved. It is never available on the automatic path.
+
+Automatic rollback is opt-in per deploy:
+
+```powershell
+.\Deploy-Processor.ps1 ... -BackupRoot <BackupRoot> -AutoRollback
+```
+
+It restores when the post-deploy verify or the health check fails, and the
+deploy still exits with that stage's code. `-AutoRollback` without `-BackupRoot`
+is refused before the gate runs. Three outcomes are distinguished in the log and
+the exit code: `AUTO-ROLLBACK COMPLETE` (restored and proven; exit = the failing
+stage), `AUTO-ROLLBACK RESTORED BUT UNPROVEN` (the tree is back but did not pass
+its own verify/health; exit 2), and `AUTO-ROLLBACK FAILED` / `UNAVAILABLE`
+(exit 2, production indeterminate). A machine-readable `ROLLBACK OUTCOME` record
+carries the stage, both exit codes, and the backup folder.
+
+Refusals, all before anything is touched: an empty backup (mirroring it would
+wipe production), a backup with fewer files than its own manifest claims, a
+`BackupRoot` that overlaps `TargetRoot` (the mirror would delete the restore
+source — the deploy refuses this too), a missing `-Reason`, and `-RepinTrust`
+with no recorded prior value. A live instance under `TargetRoot` blocks the
+restore unless `-KillProcesses` is passed, exactly as it blocks a deploy.
 
 Scheduled drift check, every 30 min or whatever cadence fits. Register it once
 (elevated) and it runs as SYSTEM from Task Scheduler. The installer creates

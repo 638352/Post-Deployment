@@ -133,6 +133,17 @@ try {
             $manifest = Get-VesManifest -ReleaseRoot $ReleaseRoot -ExcludePattern $ExcludePattern
             $hash = Export-VesManifest -Manifest $manifest -Path $ManifestPath -CommitSha $CommitSha -Processor $Processor
             Write-VesLog OK "Manifest written: $($manifest.Count) files, hash=$hash" -LogFile $LogFile
+            # What the trust anchor pointed at BEFORE this capture. Read it now,
+            # while it is still the previous release's hash: the put-parameter
+            # below overwrites it, and without this the release record has no link
+            # back to the baseline it supersedes. Never fatal -- a first capture
+            # has nothing to read, and Get-VesTrustedHash cannot tell that apart
+            # from a permissions failure.
+            $priorManifestHash = $null
+            if ($TrustParam) {
+                try { $priorManifestHash = Get-VesTrustedHash -ParameterName $TrustParam -Region $Region }
+                catch { Write-VesLog WARN "No prior trusted hash at $TrustParam (first capture, or unreadable): $($_.Exception.Message)" -LogFile $LogFile }
+            }
             # Audit layer: commit the release record (manifest + contract) to Git and
             # tag it BEFORE updating the active SSM trust pin. If archival fails,
             # the currently approved baseline remains active instead of pointing
@@ -153,17 +164,20 @@ try {
                 # The tag commit already contains the verification scripts; this
                 # record ties those scripts to the captured manifest and approval.
                 $releaseRecord = [ordered]@{
-                    schema       = 'ves.release-record.v1'
-                    processor    = $Processor
-                    environment  = $Environment
-                    releaseTag   = $ReleaseTag
-                    sourceCommit = $CommitSha
-                    manifestHash = $hash
-                    fileCount    = $manifest.Count
-                    capturedUtc  = (Get-Date).ToUniversalTime().ToString('o')
-                    capturedBy   = "$env:USERNAME@$env:COMPUTERNAME"
-                    trustParam   = $TrustParam
-                    note         = 'Tagged rollback points begin with the first verified release; anything shipped before that still needs a safe baseline determined manually.'
+                    schema               = 'ves.release-record.v1'
+                    processor            = $Processor
+                    environment          = $Environment
+                    releaseTag           = $ReleaseTag
+                    sourceCommit         = $CommitSha
+                    manifestHash         = $hash
+                    # the baseline this release supersedes, so the tagged records
+                    # chain and a rollback target can be identified from the archive
+                    previousManifestHash = $priorManifestHash
+                    fileCount            = $manifest.Count
+                    capturedUtc          = (Get-Date).ToUniversalTime().ToString('o')
+                    capturedBy           = "$env:USERNAME@$env:COMPUTERNAME"
+                    trustParam           = $TrustParam
+                    note                 = 'Tagged rollback points begin with the first verified release; anything shipped before that still needs a safe baseline determined manually.'
                 }
                 ($releaseRecord | ConvertTo-Json -Depth 5) |
                 Out-File -FilePath (Join-Path $dest 'release-record.json') -Encoding utf8
@@ -195,6 +209,12 @@ try {
             }
             # Activate only after the Git release record is durable.
             if ($TrustParam) {
+                # Name the value being replaced before replacing it: this write is
+                # what a rollback would have to undo.
+                if ($priorManifestHash -and $priorManifestHash -ne $hash) {
+                    Write-VesLog WARN "Replacing the trust pin at $TrustParam" `
+                        -Data @{priorManifestHash = $priorManifestHash; newManifestHash = $hash } -LogFile $LogFile
+                }
                 Set-VesTrustedHash -ParameterName $TrustParam -Value $hash -Region $Region
                 Write-VesLog OK "Trusted hash pinned to SSM $TrustParam" -LogFile $LogFile
             }

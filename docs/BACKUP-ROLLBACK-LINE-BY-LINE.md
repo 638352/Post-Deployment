@@ -2,8 +2,8 @@
 
 **Audience:** reviewers and leadership who need to point at the exact code that protects production before a deploy and restores it after a bad one.
 **Date:** 2026-08-04
-**Line numbers are pinned to commit `d1f58d74`.** The working tree has seen several same-day commits; re-check anchors against `git blame` if you are reading this against a later commit.
-**Scope:** `Deploy-Processor.ps1` (the deploy/rollback entry point), `module/VesVerify.psm1` (shared backup/rollback library), and the per-system wrappers in `processors/` that say **which production instances get backed up and to where**.
+**Line numbers are pinned to commit `7cd3a7a3`.** This tree sees frequent same-day commits; re-check anchors against `git blame` when reading against a later commit.
+**Scope:** `Deploy-Processor.ps1` (deploy-time backup, auto-rollback), `Invoke-Rollback.ps1` (the restore engine), `module/VesVerify.psm1` (shared backup/rollback library), and the per-system wrappers in `processors/` that say **which production instances get backed up and to where**.
 
 ---
 
@@ -11,162 +11,205 @@
 
 | Capability | Where it lives | What it does |
 | --- | --- | --- |
-| **Backup of prod before overwrite** | `Deploy-Processor.ps1:360-373` (Stage 2) | Copies the live tree to a dated folder before the new release is mirrored in |
-| **Backup retention (prune)** | `Deploy-Processor.ps1:541-557` | After a fully green deploy only, keeps the newest N backups per processor |
-| **Rollback (restore a backup)** | `Deploy-Processor.ps1:128-238` (`-Rollback` switch) | Quiesces the processor, mirrors the chosen backup over the live tree, restarts |
-| **Backup picker** | `Deploy-Processor.ps1:107-126` (`Get-RollbackSourcePath`) | Chooses the newest backup for the processor, or an explicitly named one |
-| **Shared library support** | `module/VesVerify.psm1:607-921` | `Get-VesBackupSet`, `Stop-VesProcessorTarget`, `Start-VesProcessorTarget` |
+| **Backup of prod before overwrite** | `Deploy-Processor.ps1:312-452` (Stage 2) | Snapshots the live tree to a timestamped folder before the new release is mirrored in |
+| **Restore-point evidence (sidecars)** | `Deploy-Processor.ps1:334-447` | `backup-manifest.json` (hash of what was replaced), `_ves-config` stash, prior SSM values, `rollback-record.json` |
+| **Auto-rollback on a failed deploy** | `Deploy-Processor.ps1:459-520` (`-AutoRollback`) | Restores the backup automatically when the copy, verify, or health stage fails |
+| **Operator rollback (the restore engine)** | `Invoke-Rollback.ps1` (entire script) | Picks a backup, safety-gates it, quiesces, mirrors it back, restores config, **proves** the restore, optionally re-pins trust |
+| **`-Rollback` alias** | `Deploy-Processor.ps1:143-166` | Thin delegation to `Invoke-Rollback.ps1` so an operator holding the deploy command line can reverse it |
+| **Backup retention (prune)** | `Deploy-Processor.ps1:622-636` | After a fully green deploy only, keeps the newest N backups per processor |
+| **Shared library** | `module/VesVerify.psm1:607-921` | `Get-VesBackupSet`, `Stop-VesProcessorTarget`, `Start-VesProcessorTarget` — one definition of "what counts as a backup" and one quiesce/restart implementation |
 | **Which prod instances, which paths** | `processors/Deploy-*.ps1` | Per-system wrapper pins `TargetRoot` (what is backed up) and `BackupRoot` (where it goes) |
 
-**Backup folder naming convention** (runbook convention, built at `Deploy-Processor.ps1:362`):
+**Backup folder naming convention** (built at `Deploy-Processor.ps1:322`):
 
 ```
-<BackupRoot>\<yyyyMMdd>_<Initials>_<Processor>
-e.g.  C:\VLER_Test\Processors\BackUp\20260804_RH_SYSTEM_NAME
+<BackupRoot>\<yyyyMMddTHHmmss>_<Initials>_<Processor>
+e.g.  C:\VLER_TEST_OUTBOUND\Processors\BackUp\20260804T143255_RH_OutboundDBQ
 ```
 
-The design rule throughout: **a backup failure aborts the deploy before production is touched, and a failed deploy never deletes its own restore point.**
+Timestamped, not date-only, on purpose (lines 317–321): with date-only names, a second deploy on the same day by the same operator robocopied the *already-overwritten* tree into the same folder, destroying the true pre-deploy state. Older `yyyyMMdd_...` folders remain restorable (`Get-VesBackupSet` accepts both shapes).
+
+The design rules throughout: **a backup failure aborts the deploy before production is touched; a failed deploy never deletes its own restore point; and a rollback is never reported as a success of the deploy — it is remediation.**
 
 ---
 
 ## 1. Where prod instances are backed up — `Deploy-Processor.ps1` Stage 2
 
-**In one sentence:** immediately after the pre-deploy gate passes and before anything stops or overwrites production, the entire live tree (`TargetRoot`) is copied to a dated backup folder.
+**In one sentence:** immediately after the pre-deploy gate passes and before anything stops or overwrites production, the live tree (`TargetRoot`) is copied into a timestamped backup folder along with everything a future rollback will need to prove itself.
 
-**Why it matters:** this backup *is* the rollback point. If it cannot be taken, the deploy stops with production still untouched and still running.
+**Why it matters:** this backup *is* the restore point. The copy itself is load-bearing and aborts the deploy on failure; everything after it is best-effort evidence that degrades gracefully but never blocks a deploy (line 312–315 states this rule).
 
-| Lines | What happens |
-| --- | --- |
-| 67–69 | `-BackupRoot` parameter: dated backup of the current target before overwrite. **Skipped entirely if not set** — the wrapper configs are what guarantee it is always set for real systems. |
-| 70–72 | `-KeepBackups` (default **5**): how many backups to retain per processor. `0` keeps everything. |
-| 357–358 | `-WhatIf` guard: the real work (including backup) only runs inside `ShouldProcess`. |
-| 360–361 | Stage 2 begins; only runs when `-BackupRoot` was supplied. |
-| 362 | Builds the dated folder name: `<BackupRoot>\<yyyyMMdd>_<Initials>_<Processor>`. `<Initials>` defaults to `$env:USERNAME` (line 75), so every backup names who took it. |
-| 363 | Only backs up if `TargetRoot` actually exists (first-ever deploy has nothing to save). |
-| 364–366 | Logs `Backup <TargetRoot> -> <backupDir>`, creates the folder, then `robocopy /E` — a full recursive copy including empty dirs. **Not** `/MIR`: the backup only ever adds, never deletes. |
-| 367 | **Fail-closed:** robocopy exit code ≥ 8 means the copy failed → log ERROR, abort the whole deploy with exit `1` (DRIFT) **before the live tree is stopped or overwritten**. |
-| 368 | Clears robocopy's 1–7 "success variant" codes so later stage checks don't trip on them. |
-| 370–372 | If `TargetRoot` doesn't exist yet: WARN "nothing to back up" and continue (fresh install path). |
-| 490–494 | `-WhatIf` path: logs `WhatIf: skipping stop/backup/copy, gate only` and exits 0. A rehearsal never writes a backup. |
+### The parameters (lines 75–94)
 
-**Sequencing guarantee:** backup (Stage 2, lines 360–373) completes *before* the stop/copy phase (Stage 3, lines 375+) begins. The processor is still running and its files are still intact while the backup is taken.
+| Lines | Parameter | What it does |
+| --- | --- | --- |
+| 75–79 | `-BackupRoot` | Where the dated backup goes. **Skipped if not set — and then there is nothing to roll back to**, so the wrappers set it on every real deploy. |
+| 80–82 | `-KeepBackups` (default **5**) | Newest N backups kept per processor; pruned after a *successful* deploy only. `0` keeps everything. |
+| 83–87 | `-AutoRollback` | Opt-in: restore the backup automatically when post-deploy verify or health fails. Requires `-BackupRoot`. Never re-pins the SSM trust anchor. |
+| 88–90 | `-Rollback` | Run a restore instead of a deploy (delegates to `Invoke-Rollback.ps1`). |
+| 91–94 | `-RollbackBackup`, `-RollbackReason` | Rollback-only: a specific backup folder to restore, and the audited reason. |
 
-### Backup retention — prune after green deploys only
+### Validation before anything runs (lines 177–229)
 
 | Lines | What happens |
 | --- | --- |
-| 541–544 | Runs **last, and only after all five stages passed** (gate → backup → copy → verify → health). The comment states the rule: "a failed deploy must never eat its own restore point." |
-| 545 | Three conditions: `-BackupRoot` set, `-KeepBackups > 0`, and the backup root exists. |
-| 546 | Regex `^\d{8}_.+_<Processor>$` — matches only **this processor's** dated folders; the processor name is regex-escaped so it can't accidentally match other systems' backups. |
-| 547–549 | Sorts folder names descending (names start `yyyyMMdd`, so name order *is* date order) and skips the newest `KeepBackups` — what's left is the deletion list. |
-| 550–556 | Deletes each old backup with a log line per folder. A prune failure is only a **WARN** — retention housekeeping must never fail an otherwise green deploy. |
+| 178–186 | `-RollbackBackup`/`-RollbackReason` without `-Rollback` → exit `10`. The comment at 178–180 records the rule explicitly: **`-BackupRoot` is NOT rollback-only** — a deploy needs it to create the restore point. |
+| 187–192 | `-AutoRollback` without `-BackupRoot` → exit `10` **now**, not at stage 4: "finding out there is nothing to restore from only once the deploy has already overwritten prod is the worst moment." |
+| 217–229 | **Overlap gate:** a `BackupRoot` inside `TargetRoot` (or vice versa) → exit `10`. The `/E` backup would recurse into its own destination and the `/MIR` that follows would delete the restore point it just made — "measured, not theoretical." |
+
+### The backup itself (lines 312–452)
+
+| Lines | What happens |
+| --- | --- |
+| 316–322 | Only with `-BackupRoot`. Builds `<BackupRoot>\<yyyyMMddTHHmmss>_<Initials>_<Processor>` — local time for operator readability; `createdUtc` in the sidecar is the unambiguous value. |
+| 323 | Only backs up if `TargetRoot` exists (first-ever deploy has nothing to save; WARN at 449–451). |
+| 325–328 | If the destination folder already exists and is non-empty, WARNs that `/E` will merge two releases into it. |
+| 329–332 | **The load-bearing copy:** `robocopy /E` (recursive, add-only — never deletes). Exit ≥ 8 → ERROR, abort the whole deploy with exit `1` **before production is stopped or overwritten**. |
+| 334–354 | **(a) `backup-manifest.json`:** hashes the tree being replaced (hashes `$TargetRoot`, not the backup copy, so the sidecars stay out of the manifest) via `Get-VesManifest`/`Export-VesManifest`. A hashing failure (e.g. >260-char paths under PS 5.1) degrades the evidence with a WARN — never the deploy. |
+| 356–382 | **(b) out-of-tree config stash:** config living outside `TargetRoot` is not in the `/E` copy and would be unrecoverable, so it is copied into `<backup>\_ves-config\`. |
+| 384–404 | **(c) prior SSM values:** reads the trust hash and approved commit *currently* pinned in Parameter Store, recording read-success explicitly (a `$null` can't distinguish ParameterNotFound from AccessDenied). Without this, a rollback has no way to say what the trust anchor used to point at. |
+| 406–415 | **Free drift signal:** compares the pre-deploy tree's hash against the pinned baseline. `OK` = the backup is a *trusted* restore point; `DRIFT` = "the backup restores production as it actually was, not as approved." |
+| 417–447 | **(d) `rollback-record.json` — written LAST, on purpose:** its presence is how a rollback knows the backup finished rather than dying part-way. Schema `ves.rollback-record.v1`: who/when, what tree, what release replaced it, the manifest hash and file count, config location, SSM parameter names and prior values, and any evidence-gathering errors. Ends with `Restore point ready: <dir>`. |
+
+### Backup retention — prune after green deploys only (lines 622–636)
+
+| Lines | What happens |
+| --- | --- |
+| 622–627 | Runs **last, only after all five stages passed** — "unreachable on a failed deploy, so a failure can never eat its own restore point." Conditions: `-BackupRoot` set, `-KeepBackups > 0`, root exists. |
+| 628 | Enumerates through **`Get-VesBackupSet`** — the same function the restore picker uses, so the two can never disagree about what counts as a backup (both name shapes included). Skips the newest N. |
+| 629–635 | Deletes the rest, one log line each. A prune failure is a **WARN** — housekeeping never fails a green deploy. |
 
 ---
 
 ## 2. Which prod instances are backed up, and to where — `processors/` wrappers
 
-**In one sentence:** `Deploy-Processor.ps1` is generic; the per-system wrapper scripts pin the real paths, so the wrapper is the authoritative answer to "where is *this* instance backed up."
+**In one sentence:** `Deploy-Processor.ps1` is generic; the per-system wrapper pins the real paths, so the wrapper is the authoritative answer to "where is *this* instance backed up." Each wrapper's config block now says so in its own comments ("TargetRoot is the live processor tree that will be backed up before deploy / BackupRoot is the folder where dated restore points are stored for rollback").
 
 | Wrapper | Instance (what is backed up) | Backup destination | Lines |
 | --- | --- | --- | --- |
-| `processors/Deploy-SYSTEM_NAME.ps1` | `TargetRoot = C:\VLER_Test\Processors\SYSTEM_NAME` | `BackupRoot = C:\VLER_Test\Processors\BackUp` | 66, 73 |
-| `processors/Deploy-OutboundDBQ-uat.ps1` | `TargetRoot = C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor` | `BackupRoot = C:\VLER_TEST_OUTBOUND\Processors\BackUp` | 49, 55 |
+| `processors/Deploy-SYSTEM_NAME.ps1` | `TargetRoot = C:\VLER_Test\Processors\SYSTEM_NAME` | `BackupRoot = C:\VLER_Test\Processors\BackUp` | 69, 76 |
+| `processors/Deploy-OutboundDBQ-uat.ps1` | `TargetRoot = C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor` | `BackupRoot = C:\VLER_TEST_OUTBOUND\Processors\BackUp` | 52, 58 |
 
-Two caveats, both stated in `Deploy-Processor.ps1`'s own header:
+Two caveats, both from `Deploy-Processor.ps1`'s own header:
 
-- **These are QA/UAT paths, not confirmed PROD paths.** Lines 33–34: "The actual in-scope system list is unconfirmed as of 2026-07; do not assume VLER or vemsoutbound naming." The template (`SYSTEM_NAME`) is the placeholder to be cloned per real system.
-- **PROD is server-split.** Lines 28–31: PROD runs the outbound processors across `VESEMSEGRESS01/02/03` (VEMS-5346), whereas UAT runs all three on one box — so in PROD each server gets its own wrapper with only *its* tasks and paths. Backups land on the **local disk of the server being deployed to**; there is no central/offbox backup share configured in the current scripts.
-
----
-
-## 3. Rollback — `Deploy-Processor.ps1 -Rollback`
-
-**In one sentence:** `-Rollback` reuses the deploy's own stop/restart machinery, but instead of copying a staged release in, it mirrors a chosen backup folder back over the live tree.
-
-**Why it matters:** the restore path exercises the exact same quiesce logic as a deploy, so a rollback can't corrupt the tree in a way a deploy couldn't — and it never leaves production stopped, even when the restore fails.
-
-### 3a. Choosing the restore source — `Get-RollbackSourcePath` (lines 107–126)
-
-| Lines | What happens |
-| --- | --- |
-| 109–113 | If `-RollbackBackup <path>` was given explicitly, that exact folder is used — after proving it exists. Missing path → throw. |
-| 115–117 | Otherwise `-BackupRoot` is required; neither present → throw ("Rollback requires -BackupRoot or -RollbackBackup"). |
-| 118–121 | Auto-pick: matches only `^\d{8}_.+_<Processor>$` folders (same convention Stage 2 writes, processor name regex-escaped), sorts by name descending, takes the first — **the newest backup for this processor**. |
-| 122–125 | No matching folder → throw ("No rollback backup found"). You can never silently "restore" from nothing. |
-
-### 3b. The rollback execution block (lines 128–238)
-
-| Lines | What happens |
-| --- | --- |
-| 128–135 | Resolves the restore source via `Get-RollbackSourcePath`; any of the throws above becomes a logged ERROR and exit `10` (USAGE). |
-| 137–138 | Trackers: which tasks we disabled (so `finally` can re-enable exactly those), and a `stopFailed` flag. |
-| 140–151 | **Quiesce step 1:** disable each `-ScheduledTasks` entry. First failure sets `stopFailed` and stops trying. |
-| 152–164 | **Quiesce step 2:** stop the Windows service (`-ServiceName`), for Java-service targets. |
-| 165–198 | **Quiesce step 3:** find running console-EXE instances whose `ExecutablePath` is under `TargetRoot` (that path prefix is the instance identity — the same exe name runs from several folders per box). Without `-KillProcesses` a found instance **blocks** the rollback; with it, each PID is force-stopped with an audit line (PID + full command line), then a 30-second wait (lines 185–196) confirms the handles were actually released. |
-| 199–205 | **The restore:** only if fully quiesced — `robocopy <backup> <TargetRoot> /MIR`. `/MIR` makes the live tree *exactly* match the backup, deleting files the bad deploy added. Robocopy exit ≥ 8 → ERROR, exit `1`. |
-| 207–234 | **`finally` — production always comes back up:** restart the service (208–217), re-enable every task we disabled (218–224), and with `-StartTasksAfter` trigger them now rather than waiting for the next schedule (225–233). Runs even when the quiesce or copy failed. |
-| 235 | If the processor could not be quiesced, exit `1` — the tree was never touched. |
-| 236–237 | Success: logs `Rollback complete: <Processor> restored from <source>` and exits `0`. |
-
-### 3c. Rollback/deploy parameter validation (lines 248–293)
-
-| Lines | What happens |
-| --- | --- |
-| 249 | `$rollbackOnlyProvided` = `-BackupRoot` or `-RollbackBackup` was supplied. |
-| 250–263 | Rollback mode must not carry deploy-only params (`StagedRoot`, `StagedCommit`, `ManifestPath`, `TrustParam`, `ApprovedCommitParam`, `ReleaseTag`, `BaselineRepo`), and requires `-TargetRoot` plus a backup source. Violations exit `10`. |
-| 264–293 | Deploy mode: rejects rollback-only params without `-Rollback` (265–268), then requires the six deploy essentials. |
-
-> ⚠️ See **Known issues** below — at commit `d1f58d74` this validation block sits *after* the rollback execution block, and line 249 misclassifies `-BackupRoot`.
+- **These are QA/UAT paths, not confirmed PROD paths.** Lines 41–42: the actual in-scope system list is unconfirmed as of 2026-07; `SYSTEM_NAME` is the placeholder template to be cloned per real system.
+- **PROD is server-split.** Lines 36–39: PROD runs the outbound processors across `VESEMSEGRESS01/02/03` (VEMS-5346); UAT runs all three on one box. In PROD each server gets its own wrapper with only *its* tasks and paths. Backups land on the **local disk of the server being deployed to** — there is no central/offbox backup share in the current scripts.
 
 ---
 
-## 4. Shared library support — `module/VesVerify.psm1` (lines 607–921)
+## 3. Auto-rollback — `Deploy-Processor.ps1 -AutoRollback`
 
-**In one sentence:** the module carries one canonical definition of "what counts as a backup" plus the quiesce/restart pair, so deploy, rollback, and any future tooling can never disagree.
+**In one sentence:** when a stage *after* the copy fails — production is already carrying the new bits — the deploy restores its own Stage-2 backup by shelling `Invoke-Rollback.ps1`, then still exits with the failing stage's code, because rolling back is remediation, not success.
 
 | Lines | What happens |
 | --- | --- |
-| 607–611 | The section contract: Deploy-Processor backs up to `<BackupRoot>\<stamp>_<Initials>_<Processor>`; both the restore picker and the deploy's prune are meant to enumerate through `Get-VesBackupSet` "so they can never disagree about what counts as a backup." |
-| 633–652 | **`Get-VesBackupSet`** — enumerate a processor's backups, newest first. Accepts **both** folder shapes: current `yyyyMMddTHHmmss_<Initials>_<Processor>` and older date-only `yyyyMMdd_...`. Date-only sorts at midnight, so a same-day timestamped backup correctly outranks it. |
-| 654 | Missing backup root → empty array (not an error): "no backups yet" is a valid state. |
-| 656–660 | One regex with named groups covers both shapes; the processor name is regex-escaped so metacharacters can't widen the match to other systems. |
-| 662–683 | Parses each folder's stamp (timestamp → date → fall back to the folder's own `LastWriteTime` for unparseable names, so nothing silently drops out of the set). |
-| 685–699 | Reads the `rollback-record.json` sidecar. It is written **last** by the deploy, so `HasRecord = $false` also means "this backup may be incomplete" — callers warn on it rather than trusting the folder blindly. A malformed sidecar is reported as "no record", never a crash. |
-| 701–702 | Detects the `backup-manifest.json` sidecar (per-backup integrity manifest). |
-| 704–718 | Counts/sizes the **payload only** — the two sidecars and the `_ves-config` stash are excluded so they never inflate the numbers. `FileCount = -1` means "could not enumerate", distinct from a genuinely empty backup. |
-| 720–738 | Emits `{Name, FullName, Stamp, StampKind, Initials, HasRecord, Record, HasManifest, ManifestPath, FileCount, SizeBytes}` sorted newest-first; the leading comma keeps a single backup from unrolling to a scalar. |
-| 741–859 | **`Stop-VesProcessorTarget`** — the deploy's quiesce phase lifted verbatim into the module so deploy and rollback stop production identically: disable tasks (782–791), stop service (793–806), detect/kill exe instances under `TargetRoot` with audit lines and a handle-release wait (808–849). **Never throws**; returns `{Stopped, DisabledTasks, ServiceStopped, KilledPids, BlockingPids, Errors}` — `Stopped = $false` means "do not touch the tree." |
-| 861–921 | **`Start-VesProcessorTarget`** — the mirror image, meant to run in a `finally`: service first (884–896), then re-enable exactly the tasks that were disabled (897–906), optionally trigger them now (907–919). Never throws — a restart failure is logged and collected because there is nothing left to unwind. |
-
-**Current wiring status:** `Deploy-Processor.ps1` at `d1f58d74` still uses its own inline copies of the quiesce/restart logic and its own backup enumeration regex; it does not yet call `Get-VesBackupSet` / `Stop-VesProcessorTarget` / `Start-VesProcessorTarget`, and it does not yet write the `rollback-record.json` / `backup-manifest.json` sidecars or the timestamped (`yyyyMMddTHHmmss`) folder shape the module already understands. The module side of the refactor landed first (tests: `tests/VesVerify.Backup.Tests.ps1`); the script side is still inline.
+| 125–128 | `$script:rolledBack` / `$script:rollbackExitCode` — every terminal `RUN END` record states whether a rollback was attempted and how it went. "A rollback must never be silent." |
+| 261–289 | `Step` gained an optional `$onFail` handler: on a stage failure it gets a chance to remediate and to substitute the final exit code (read back via a script-scoped variable so the child process's stdout can't corrupt it). |
+| 454–458 | The handler's ground rules: shells `Invoke-Rollback.ps1` with this run's own `-LogFile` (both runs interleave in one JSONL stream) and **deliberately never passes `-RepinTrust`** — "an automated write to the trust anchor, triggered by a failing deploy, is the most dangerous thing this suite could do." |
+| 462–467 | No backup was taken (fresh target)? `AUTO-ROLLBACK UNAVAILABLE`, exit `2` — manual recovery, never a silent no-op. |
+| 468–497 | Builds the full `Invoke-Rollback` argument set — the same target/tasks/service/probes as the deploy, plus `-Reason "auto-rollback: deploy stage '<name>' failed with exit <code>"` — and runs it. |
+| 504–507 | Rollback exited `0` → `AUTO-ROLLBACK COMPLETE: prior release restored, re-verified, healthy. The deploy still FAILED.` Final exit = the failing stage's code. |
+| 508–514 | Rollback exited `1`/`3` → `RESTORED BUT UNPROVEN`: the bits are back on disk but didn't pass their own verify/health. Exit `2` — a human must confirm production. |
+| 515–518 | Anything else → `AUTO-ROLLBACK FAILED… INDETERMINATE state`, exit `2`. |
+| 559–568 | A `/MIR` that died part-way through the copy triggers the same handler — "the case rollback exists for." |
+| 600, 620 | The handler is wired to the two post-copy stages: `post-deploy verify` and `health check`. |
 
 ---
 
-## 5. How it fails
+## 4. The restore engine — `Invoke-Rollback.ps1`
+
+**In one sentence:** one script owns every restore (operator-driven, `-Rollback` alias, and auto-rollback): pick the backup, refuse the unsafe ones, quiesce, mirror it back, restore config, restart, then **prove** the restore by re-running verification and the health check.
+
+**Why it matters:** a rollback that cannot prove itself is treated as an ERROR (`2`), not a pass — the same fail-closed rule as everywhere else in the suite. Its exit codes (header, lines 26–32): `0` restored + proven + healthy, `1` restored but drifted, `2` not proven / indeterminate, `3` restored but unhealthy, `10` usage.
+
+### Mode selection and safety gates — everything before the first mutation
+
+| Lines | What happens |
+| --- | --- |
+| 41–44 | No `ConfirmImpact='High'`: a confirm prompt would hang scheduled and child-process runs. The mandatory `-Reason` and the audit record are the deliberate friction instead. |
+| 136–164 | **`-ListBackups`** (read-only): prints every restorable backup for the processor, newest first — file count, size, whether the sidecar exists (`NO (may be incomplete)`), what release replaced it, and whether its hash matched the SSM pin at backup time. |
+| 167–177 | Restore mode requires `-TargetRoot`, `-Reason` (validated in-body: a `Mandatory` attribute would prompt on stdin under `powershell.exe -File` and hang), and `-BackupRoot` or `-BackupDir`. |
+| 179–190 | **Nesting gate first:** a `/MIR` whose source lives under its own destination deletes the restore source mid-flight → exit `10`. |
+| 192–224 | **Backup selection:** `-BackupDir` restores a specific folder (with an escape hatch at 203–210 for a backup moved to another volume); otherwise the newest entry from `Get-VesBackupSet`. No backup at all → exit `2`. |
+| 226–228 | No `rollback-record.json` → WARN: the backup predates the sidecar or was left incomplete; config restore and trust re-pin are unavailable. |
+| 230–242 | **Empty-backup gate:** counts the payload exactly the way `Get-VesBackupSet` does (sidecars and `_ves-config` excluded). Zero files → "Mirroring it would wipe production", exit `10`. |
+| 244–264 | **Partial-backup gate:** compares files on disk against the `fileCount` the deploy's own `backup-manifest.json` recorded. Fewer → "the backup copy died part-way", exit `2`. Read raw from JSON, not through `Import-VesManifest` — a manifest too damaged to load is exactly when this guard matters most. |
+| 276–285 | `-RepinTrust` preconditions: refuses without a recorded prior SSM value ("re-pinning to a blank anchor would break every later verify"). |
+| 287–316 | Builds the robocopy exclusions: the two sidecars by name, the `_ves-config` stash by full path, any operator `-PreservePaths` (with a WARN if a preserved path is hash-verified and will therefore show as drift), and the live config when `-NoConfigRestore` asked to keep it. |
+| 318–325 | `-WhatIf`: block-level `ShouldProcess` (robocopy is native and gets no automatic `-WhatIf`) — reports exactly what would be restored, changes nothing, exits `0`. |
+
+### The restore (lines 327–402)
+
+| Lines | What happens |
+| --- | --- |
+| 327–338 | **Concurrency lock:** `%ProgramData%\ves-verify\<processor>.rollback.lock` opened `CreateNew` — two concurrent `/MIR` runs into one tree corrupt it; a second rollback refuses with exit `2`. |
+| 340–344 | Quiesce via the module's **`Stop-VesProcessorTarget`** — the same disable-tasks / stop-service / detect-and-kill-instances sequence a deploy uses. |
+| 345–355 | **The restore copy:** `robocopy <backup> <TargetRoot> /MIR` with the exclusion lists. `/MIR`, not `/E`, deliberately: `/E` would leave the bad release's files behind and every one would surface as EXTRA in the post-rollback verify. Exit ≥ 8 → restore failed. |
+| 357–379 | **Out-of-tree config restore:** copies the stashed config back — after first stashing the *current* config to `_ves-config\pre-rollback\`, so the rollback is itself reversible. |
+| 382–391 | `finally`: **`Start-VesProcessorTarget`** restarts the service and re-enables exactly the tasks that were disabled, even on failure — production is never left down. Tasks are *started* after a clean restore by default (`-NoStartTasksAfter` opts out) — a rollback that leaves the processor down fails its own health check. The lock is always released. |
+| 393–401 | Could not quiesce → exit `2` (tree untouched). Restore copy failed → exit `2`: "a half-mirrored tree is an ERROR (indeterminate), not a clean FAIL." |
+| 402 | `Rollback complete: <Processor> restored from <backup>`. |
+
+### Prove it (lines 404–530)
+
+| Lines | What happens |
+| --- | --- |
+| 404–425 | **Baseline ladder, strongest first:** `-BaselineRepo`+`-ReleaseTag` (the archived tag) → `-ManifestPath` (a manifest for the restored release) → the backup's own `backup-manifest.json` (proves the restore is byte-identical to pre-deploy production, but **not** that that state was approved — WARNed as such). "Verifying a restored old tree against the new release's manifest is the likeliest way to make a good rollback look like a bad one, which is what this ladder prevents." |
+| 427–435 | No baseline at all → exit `2`, unless the operator explicitly accepts the risk with `-AllowUnverifiedRollback`. |
+| 436–454 | Runs `Invoke-Verification.ps1` against the chosen baseline; a non-zero verify becomes the rollback's own outcome. |
+| 456–466 | Informational pin check: `OK` (restored tree matches the SSM-pinned prior baseline) or `DRIFT` (it matches pre-deploy production, which itself had drifted). |
+| 468–493 | **Health check runs even when the verify failed** — "an operator looking at a half-restored box needs the whole picture in one run." Skippable with `-SkipHealth`. |
+| 495–527 | **Trust re-pin — last, opt-in, and only on a proven restore:** skipped with an ERROR if verify didn't pass ("pinning the anchor to an unproven tree is exactly what the anchor exists to prevent"). The audit line is written *before* the SSM write so intent is on record even if it fails; one switch drives **both** the baseline hash and the approved commit, because re-pinning only one leaves the gate and the verifier disagreeing. |
+| 529–530 | Final exit = `Get-VesWorstExitCode` over verify + health — severity order, not numeric (`2` outranks `3`). |
+
+---
+
+## 5. Shared library — `module/VesVerify.psm1` (lines 607–921)
+
+| Lines | What happens |
+| --- | --- |
+| 607–611 | The section contract: the deploy backs up to `<BackupRoot>\<stamp>_<Initials>_<Processor>`; `Invoke-Rollback` restores from it; both enumerate through the same function "so they can never disagree about what counts as a backup." |
+| 633–740 | **`Get-VesBackupSet`** — enumerates a processor's backups, newest first. Accepts both the timestamped and legacy date-only shapes; parses the stamp (falling back to the folder's own `LastWriteTime` rather than dropping it); reads both sidecars defensively; counts/sizes the payload with sidecars and `_ves-config` excluded; `FileCount = -1` means "could not enumerate", distinct from empty. Used by the deploy's prune (`Deploy-Processor.ps1:628`), the restore picker, and `-ListBackups`. |
+| 742–860 | **`Stop-VesProcessorTarget`** — the one quiesce implementation: disable tasks, stop service, detect console-EXE instances by ExecutablePath-under-TargetRoot, kill with audit lines only under `-KillProcesses`, wait for handles to release. Never throws; `Stopped=$false` means "do not touch the tree." Called by both the deploy (`Deploy-Processor.ps1:531`) and the rollback (`Invoke-Rollback.ps1:343`). |
+| 862–921 | **`Start-VesProcessorTarget`** — the mirror image, designed for a `finally`: service first, re-enable exactly the tasks that were disabled, optionally trigger them now. Never throws. Called from both scripts' `finally` blocks. |
+
+---
+
+## 6. How it fails
 
 | Scenario | Behavior | Exit |
 | --- | --- | --- |
-| Backup robocopy fails (exit ≥ 8) | Deploy aborts **before** stop/copy; production untouched and running | `1` |
-| No `-BackupRoot` supplied on deploy | No backup is taken (by design — wrappers are responsible for always supplying it) | n/a |
-| Rollback: no backup found / bad path | Nothing is stopped or copied | `10` |
-| Rollback: processor won't quiesce (task/service/PID) | Tree untouched; service/tasks restored by `finally` | `1` |
-| Rollback: restore robocopy fails | Service/tasks still restarted by `finally` | `1` |
-| Prune fails after a green deploy | WARN only — never fails the deploy | `0` |
-| `-WhatIf` | Gate only; no backup, no stop, no copy | `0` |
+| Backup robocopy fails during a deploy | Deploy aborts **before** stop/copy; production untouched and running | `1` |
+| Sidecar/evidence gathering fails during a deploy | WARN only; recorded in `recordErrors` — evidence degrades, the deploy proceeds | (stage codes) |
+| `BackupRoot` nested in `TargetRoot` (either script) | Refused before any mutation | `10` |
+| `-AutoRollback` without `-BackupRoot` | Refused before the gate even runs | `10` |
+| Auto-rollback restores + proves the prior release | Deploy still exits with the **failing stage's** code | `1`/`3` |
+| Auto-rollback restores but cannot prove/health-check it | `RESTORED BUT UNPROVEN` | `2` |
+| Auto-rollback unavailable (no backup taken) or failed | Manual recovery required | `2` |
+| Rollback: empty backup folder | Refused — "mirroring it would wipe production" | `10` |
+| Rollback: partial backup (fewer files than its manifest recorded) | Refused | `2` |
+| Rollback: cannot quiesce / restore copy fails | Tree untouched, or declared INDETERMINATE; processor restarted either way | `2` |
+| Rollback restored but verify reports drift / health fails | Restored, not proven / not alive | `1` / `3` |
+| Rollback with no baseline for the restored release | ERROR unless `-AllowUnverifiedRollback` | `2` / `0` |
+| Concurrent rollback for the same processor | Second run refuses (lock file) | `2` |
+| Prune fails after a green deploy | WARN only | `0` |
+| `-WhatIf` (either script) | Reports, changes nothing | `0` |
 
 ---
 
-## 6. Known issues at commit `d1f58d74` (flagged, not yet fixed)
+## 7. Changelog note — issues from the previous revision of this document
 
-1. **Rollback validation is dead code.** The rollback *execution* block (lines 128–238) runs and exits before the rollback *validation* block (lines 250–263) is ever reached. Consequence: `-Rollback` combined with deploy-only params (e.g. `-StagedRoot`) is **not** rejected — the rollback just runs; and a missing `-TargetRoot` produces a raw failure instead of the clean usage error at line 256. The validation block needs to move above line 128.
-2. **`$rollbackOnlyProvided` blocks legitimate deploys.** Line 249 counts `-BackupRoot` as a rollback-only parameter, but `-BackupRoot` is exactly what a normal deploy needs for its Stage 2 backup — and both wrappers pass it. As written, any deploy that supplies `-BackupRoot` exits `10` at line 267 ("Rollback-only parameters require -Rollback") and never runs. The check should test `-RollbackBackup` only. (Unreachable in rollback mode for the same ordering reason as issue 1, but deploy mode hits it every time.)
-3. **Module comment references a script that doesn't exist.** `VesVerify.psm1:609` says "Invoke-Rollback restores from that folder" — there is no `Invoke-Rollback.ps1`; rollback is only reachable via `Deploy-Processor.ps1 -Rollback`.
-4. **Sidecar/shape gap.** `Get-VesBackupSet` understands timestamped folders and the two sidecar files, but the deploy currently writes neither — every backup it takes today reports `HasRecord = $false` ("may be incomplete") by the module's own definition.
+The 2026-08-04 review of commit `d1f58d74` flagged four defects. All four are resolved at `7cd3a7a3`:
+
+1. ~~Rollback validation was dead code (execution ran before validation)~~ — the inline rollback block is gone; `-Rollback` now delegates immediately to `Invoke-Rollback.ps1`, which validates before mutating.
+2. ~~`$rollbackOnlyProvided` counted `-BackupRoot` and blocked every deploy that supplied it~~ — now only `-RollbackBackup`/`-RollbackReason` (`Deploy-Processor.ps1:178-181`), with a comment recording why, and a regression test (`tests/Deploy-Processor.Tests.ps1:93-99`).
+3. ~~Module comment referenced a non-existent `Invoke-Rollback`~~ — the script now exists and owns the restore path.
+4. ~~Deploy wrote neither the sidecars nor the timestamped folder shape the module expected~~ — Stage 2 now writes `backup-manifest.json`, the `_ves-config` stash, and `rollback-record.json` (last), under `yyyyMMddTHHmmss` names; the deploy's quiesce/restart and prune now go through the module functions.
 
 ---
 
 ## Related files
 
-- Tests: `tests/Deploy-Processor.Tests.ps1` (rollback CLI behavior), `tests/VesVerify.Backup.Tests.ps1` (module backup-set functions)
+- Tests: `tests/Deploy-Processor.Tests.ps1` (backup, sidecars, prune across both shapes, `-AutoRollback`, `-Rollback` alias), `tests/VesVerify.Backup.Tests.ps1` (module backup-set functions)
 - Runbook: `docs/RUNBOOK.md`
 - Full-suite walkthrough: `docs/SCRIPT-GUIDE-LINE-BY-LINE.md`
