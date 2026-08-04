@@ -40,6 +40,6 @@ Describe 'Deploy-Processor rollback mode' {
       '-LogFile', $script:LogFile)
 
     $result.ExitCode | Should -Not -Be 0
-    $result.Output | Should -Match 'Rollback mode does not accept deploy-only parameters'
+    $result.Output | Should -Match 'Rollback-only parameters require -Rollback'
   }
 }
