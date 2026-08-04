@@ -604,6 +604,322 @@ function Get-VesManifestFromTag {
     }
 }
 
+# --- Backup / rollback support ------------------------------------------------
+# Deploy-Processor backs the live tree up to <BackupRoot>\<stamp>_<Initials>_<Processor>
+# before it mirrors the staged tree in. Invoke-Rollback restores from that folder.
+# Both the restore picker and the deploy's prune enumerate through the same
+# function below so they can never disagree about what counts as a backup.
+
+function Get-VesWorstExitCode {
+    <#
+    .SYNOPSIS Reduce several stage exit codes to the most severe one.
+    .NOTES
+      Severity is NOT numeric order. Get-VesOutcome maps 2 to ERROR and 3 to
+      FAIL, so 2 outranks 3 even though 3 -gt 2. Ranking: 10 > 2 > 3 > 1 > 0.
+      An unknown code is treated as maximally severe rather than ignored.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][int[]]$ExitCode)
+    $rank = @{ 0 = 0; 1 = 1; 3 = 2; 2 = 3; 10 = 4 }
+    $worst = $Global:VES_EXIT_OK
+    $worstRank = 0
+    foreach ($code in $ExitCode) {
+        $r = if ($rank.ContainsKey($code)) { $rank[$code] } else { 5 }
+        if ($r -gt $worstRank) { $worstRank = $r; $worst = $code }
+    }
+    return $worst
+}
+
+function Get-VesBackupSet {
+    <#
+    .SYNOPSIS Enumerate a processor's deploy backups, newest first.
+    .DESCRIPTION
+      Accepts BOTH folder shapes: the current <yyyyMMddTHHmmss>_<Initials>_<Processor>
+      and the older date-only <yyyyMMdd>_<Initials>_<Processor>. Date-only folders
+      sort at midnight, so a same-day timestamped backup correctly outranks them.
+
+      rollback-record.json is written LAST by the deploy, so HasRecord=$false also
+      means "this backup may be incomplete" -- callers warn on it rather than
+      trusting the folder blindly.
+    .OUTPUTS
+      Array of {Name, FullName, Stamp, StampKind, Initials, HasRecord, Record,
+                HasManifest, ManifestPath, FileCount, SizeBytes}
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [Parameter(Mandatory)][string]$Processor
+    )
+    $out = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $BackupRoot)) { return , ($out.ToArray()) }
+
+    # Named groups keep the two shapes in one pattern; the processor is escaped so a
+    # name containing regex metacharacters cannot widen the match to other systems.
+    $pattern = '^(?<stamp>\d{8}T\d{6}|\d{8})_(?<initials>.+)_' + [regex]::Escape($Processor) + '$'
+    $dirs = @(Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $pattern })
+
+    foreach ($dir in $dirs) {
+        # -match above already populated $Matches, but re-match explicitly: the
+        # foreach body may clobber it before we read the groups.
+        $null = $dir.Name -match $pattern
+        $stampText = $Matches['stamp']
+        $initials = $Matches['initials']
+
+        $stamp = $null
+        $stampKind = 'unknown'
+        $culture = [Globalization.CultureInfo]::InvariantCulture
+        $parsed = [datetime]::MinValue
+        if ([datetime]::TryParseExact($stampText, 'yyyyMMddTHHmmss', $culture, [Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+            $stamp = $parsed; $stampKind = 'timestamp'
+        }
+        elseif ([datetime]::TryParseExact($stampText, 'yyyyMMdd', $culture, [Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+            $stamp = $parsed; $stampKind = 'date'
+        }
+        else {
+            # Unparseable stamp: fall back to the folder's own timestamp so it still
+            # sorts sanely instead of being dropped from the set.
+            $stamp = $dir.LastWriteTime
+        }
+
+        $recordPath = Join-Path $dir.FullName 'rollback-record.json'
+        $record = $null
+        $hasRecord = $false
+        if (Test-Path -LiteralPath $recordPath) {
+            try {
+                $record = Get-Content -LiteralPath $recordPath -Raw -Encoding utf8 | ConvertFrom-Json
+                $hasRecord = $true
+            }
+            catch {
+                # A malformed sidecar must not take out the whole listing; report it
+                # as "no record" and let the caller decide.
+                $record = $null
+                $hasRecord = $false
+            }
+        }
+
+        $manifestPath = Join-Path $dir.FullName 'backup-manifest.json'
+        $hasManifest = Test-Path -LiteralPath $manifestPath
+
+        # Count/size the payload only -- the sidecars and the config stash are ours,
+        # not part of the restored tree, so they must not inflate either number.
+        $fileCount = 0
+        $sizeBytes = [long]0
+        try {
+            $configStash = Join-Path $dir.FullName '_ves-config'
+            $files = @(Get-ChildItem -LiteralPath $dir.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.Name -ne 'rollback-record.json' -and $_.Name -ne 'backup-manifest.json' -and
+                        -not $_.FullName.StartsWith(($configStash + '\'), [StringComparison]::OrdinalIgnoreCase)
+                    })
+            $fileCount = $files.Count
+            foreach ($f in $files) { $sizeBytes += $f.Length }
+        }
+        catch { $fileCount = -1 }   # -1 == "could not enumerate", distinct from a genuinely empty backup
+
+        $out.Add([PSCustomObject]@{
+                Name         = $dir.Name
+                FullName     = $dir.FullName
+                Stamp        = $stamp
+                StampKind    = $stampKind
+                Initials     = $initials
+                HasRecord    = $hasRecord
+                Record       = $record
+                HasManifest  = $hasManifest
+                ManifestPath = $(if ($hasManifest) { $manifestPath } else { $null })
+                FileCount    = $fileCount
+                SizeBytes    = $sizeBytes
+            })
+    }
+
+    # Newest first. LastWriteTimeUtc then Name break ties between two same-day
+    # date-only folders (both parse to midnight). Leading comma so a single
+    # backup does not unroll to a scalar in the caller.
+    return , (@($out | Sort-Object -Property @{Expression = 'Stamp'; Descending = $true }, @{Expression = 'Name'; Descending = $true }))
+}
+
+function Stop-VesProcessorTarget {
+    <#
+    .SYNOPSIS Quiesce a processor so its target tree can be safely mirrored over.
+    .DESCRIPTION
+      Lifted verbatim from Deploy-Processor's stop phase so the deploy and the
+      rollback quiesce production the same way. Disables the given scheduled
+      tasks, stops the service if one is named, then deals with console-EXE
+      instances: a running exe under TargetRoot keeps its files locked even after
+      its task is disabled and would corrupt the mirror. ExecutablePath-under-
+      TargetRoot is the instance identity (the same exe name runs from several
+      folders per box); working dir is not exposed by WMI.
+
+      Never throws. Stopped=$false means "do not touch the tree"; the caller's
+      finally still hands DisabledTasks to Start-VesProcessorTarget so anything
+      we disabled comes back up.
+    .OUTPUTS
+      {Stopped, DisabledTasks, ServiceStopped, KilledPids, BlockingPids, Errors}
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TargetRoot,
+        # Task Scheduler jobs on THIS server to disable. Empty for service-only systems.
+        [string[]]$ScheduledTasks = @(),
+        [string]$ServiceName,
+        # Force-stop instances whose exe lives under TargetRoot. Without it a
+        # detected instance blocks the operation instead of fighting a file lock.
+        [switch]$KillProcesses,
+        # How long to wait for killed instances to release their handles.
+        [int]$HandleWaitSeconds = 30,
+        # Audit context only; carried into the kill log lines.
+        [string]$Processor = 'unknown',
+        [string]$LogFile
+    )
+    $disabled = New-Object System.Collections.Generic.List[string]
+    $killed = New-Object System.Collections.Generic.List[int]
+    $blocking = New-Object System.Collections.Generic.List[int]
+    $errors = New-Object System.Collections.Generic.List[string]
+    $serviceStopped = $false
+    $stopFailed = $false
+
+    # disable the scheduled tasks that hold the target files open
+    foreach ($tn in $ScheduledTasks) {
+        try {
+            Disable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
+            $disabled.Add($tn); Write-VesLog INFO "Disabled task: $tn" -LogFile $LogFile
+        }
+        catch {
+            $msg = "Could not disable task $tn -> $($_.Exception.Message)"
+            Write-VesLog ERROR $msg -LogFile $LogFile; $errors.Add($msg); $stopFailed = $true; break
+        }
+    }
+    # stop the Windows service too, for Java-service targets
+    if (-not $stopFailed -and $ServiceName) {
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($svc) {
+            try {
+                Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+                $serviceStopped = $true
+                Write-VesLog INFO "Stopped service: $ServiceName" -LogFile $LogFile
+            }
+            catch {
+                $msg = "Could not stop service $ServiceName -> $($_.Exception.Message)"
+                Write-VesLog ERROR $msg -LogFile $LogFile; $errors.Add($msg); $stopFailed = $true
+            }
+        }
+    }
+    # Console-EXE instances holding the tree open.
+    if (-not $stopFailed) {
+        $targetItem = Get-Item -LiteralPath $TargetRoot -ErrorAction SilentlyContinue
+        if ($targetItem) {
+            $targetPrefix = $targetItem.FullName.TrimEnd('\') + '\'
+            $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ExecutablePath -and
+                        $_.ExecutablePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) })
+            foreach ($p in $running) {
+                if ($KillProcesses) {
+                    # audit line BEFORE the kill: which instance (mode arg visible in CommandLine)
+                    Write-VesLog WARN ("Killing running instance PID {0}: {1}" -f $p.ProcessId, $p.CommandLine) `
+                        -Data @{processor = $Processor; pid = $p.ProcessId; commandLine = $p.CommandLine } -LogFile $LogFile
+                    try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; $killed.Add([int]$p.ProcessId) }
+                    catch {
+                        $msg = "Could not kill PID $($p.ProcessId) -> $($_.Exception.Message)"
+                        Write-VesLog ERROR $msg -LogFile $LogFile; $errors.Add($msg); $stopFailed = $true
+                    }
+                }
+                else {
+                    $blocking.Add([int]$p.ProcessId)
+                    $msg = ("Running instance holds {0}: PID {1} {2}. Re-run with -KillProcesses to stop it." -f `
+                            $TargetRoot, $p.ProcessId, $p.CommandLine)
+                    Write-VesLog ERROR $msg -LogFile $LogFile; $errors.Add($msg); $stopFailed = $true
+                }
+            }
+            # wait for killed instances to actually exit and release handles
+            if ($KillProcesses -and -not $stopFailed -and $running.Count) {
+                $ids = @($running | ForEach-Object { $_.ProcessId })
+                $deadline = (Get-Date).AddSeconds($HandleWaitSeconds)
+                while ((Get-Date) -lt $deadline -and (Get-Process -Id $ids -ErrorAction SilentlyContinue)) {
+                    Start-Sleep -Milliseconds 250
+                }
+                # Filter nulls: @($null).Count is 1, which would read as "still alive"
+                # on a host where the lookup yields a null rather than nothing.
+                $alive = @(Get-Process -Id $ids -ErrorAction SilentlyContinue | Where-Object { $_ })
+                if ($alive.Count) {
+                    $msg = "Instance(s) still alive after kill: $(($alive | ForEach-Object Id) -join ', ')"
+                    Write-VesLog ERROR $msg -LogFile $LogFile; $errors.Add($msg); $stopFailed = $true
+                }
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        Stopped        = (-not $stopFailed)
+        DisabledTasks  = $disabled.ToArray()
+        ServiceStopped = $serviceStopped
+        KilledPids     = $killed.ToArray()
+        BlockingPids   = $blocking.ToArray()
+        Errors         = $errors.ToArray()
+    }
+}
+
+function Start-VesProcessorTarget {
+    <#
+    .SYNOPSIS Bring a processor back up after Stop-VesProcessorTarget.
+    .DESCRIPTION
+      Reverse order: service first, then re-enable exactly the tasks we disabled.
+      Call this from a finally so a failed copy still leaves production running.
+      -StartTasks additionally triggers each re-enabled task now instead of
+      waiting for its next scheduled trigger; the caller decides whether the tree
+      is fit to run. Never throws -- a restart failure is logged at ERROR and
+      collected, because there is nothing useful left to unwind.
+    .OUTPUTS {StartedTasks, Errors}
+    #>
+    [CmdletBinding()]
+    param(
+        # Exactly the tasks Stop-VesProcessorTarget reported disabling.
+        [string[]]$DisabledTasks = @(),
+        [string]$ServiceName,
+        [switch]$StartTasks,
+        [string]$LogFile
+    )
+    $started = New-Object System.Collections.Generic.List[string]
+    $errors = New-Object System.Collections.Generic.List[string]
+
+    if ($ServiceName) {
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($svc) {
+            try {
+                Start-Service -Name $ServiceName -ErrorAction Stop
+                Write-VesLog INFO "Started service: $ServiceName" -LogFile $LogFile
+            }
+            catch {
+                $msg = "FAILED to restart service $ServiceName -> $($_.Exception.Message)"
+                Write-VesLog ERROR $msg -LogFile $LogFile; $errors.Add($msg)
+            }
+        }
+    }
+    foreach ($tn in $DisabledTasks) {
+        try {
+            Enable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
+            Write-VesLog INFO "Re-enabled task: $tn" -LogFile $LogFile
+        }
+        catch {
+            $msg = "FAILED to re-enable task $tn -> $($_.Exception.Message)"
+            Write-VesLog ERROR $msg -LogFile $LogFile; $errors.Add($msg)
+        }
+    }
+    if ($StartTasks) {
+        foreach ($tn in $DisabledTasks) {
+            try {
+                Start-ScheduledTask -TaskName $tn -ErrorAction Stop
+                $started.Add($tn)
+                Write-VesLog INFO "Started task: $tn" -LogFile $LogFile
+            }
+            catch {
+                $msg = "Could not start task $tn -> $($_.Exception.Message)"
+                Write-VesLog WARN $msg -LogFile $LogFile; $errors.Add($msg)
+            }
+        }
+    }
+    return [PSCustomObject]@{ StartedTasks = $started.ToArray(); Errors = $errors.ToArray() }
+}
+
 # --- DATADOG DISABLED ---------------------------------------------------------
 # Telemetry emit is commented out in place. Every call site across the entry
 # scripts is disabled to match; uncomment both sides together to restore.
@@ -733,5 +1049,7 @@ Export-ModuleMember -Function `
     Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
     Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash, `
     Invoke-VesAwsCli, Invoke-VesGit, Test-VesReleaseTag, Get-VesManifestFromTag, `
+    Get-VesWorstExitCode, Get-VesBackupSet, `
+    Stop-VesProcessorTarget, Start-VesProcessorTarget, `
     Get-VesAlertType
 # DATADOG DISABLED: Send-VesDatadogMetric, Send-VesDatadogEvent, Get-VesDatadogEnvTag

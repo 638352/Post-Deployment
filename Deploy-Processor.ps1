@@ -36,12 +36,12 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$Processor,
-    [Parameter(Mandatory)][string]$StagedRoot,
-    [Parameter(Mandatory)][string]$TargetRoot,
-    [Parameter(Mandatory)][string]$StagedCommit,
-    [Parameter(Mandatory)][string]$ManifestPath,
-    [Parameter(Mandatory)][string]$TrustParam,
-    [Parameter(Mandatory)][string]$ApprovedCommitParam,
+    [string]$StagedRoot,
+    [string]$TargetRoot,
+    [string]$StagedCommit,
+    [string]$ManifestPath,
+    [string]$TrustParam,
+    [string]$ApprovedCommitParam,
     # Release tag of the approved baseline (e.g. OutboundDBQ/v1.4.0). Threaded
     # through the gate, verification, and health stages so every stage's run log
     # names the release it checked. With -BaselineRepo the gate and verification
@@ -70,6 +70,8 @@ param(
     # newest N backups to keep for this processor; older ones get pruned after a
     # successful deploy only. 0 keeps everything.
     [int]$KeepBackups = 5,
+    [switch]$Rollback,
+    [string]$RollbackBackup,
     [string]$Initials = $env:USERNAME,
     [string]$HealthUrl,
     # liveness for endpoint-less .exe processors; passed through to the health check
@@ -86,16 +88,8 @@ $here = $PSScriptRoot
 if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("deploy-{0}-{1}" -f $Processor, $StagedCommit) }
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: deployment' `
-    -Data @{runId=$runId; script='Deploy-Processor.ps1'; processor=$Processor; environment=$Environment; release=$StagedCommit; releaseTag=$ReleaseTag; target=$TargetRoot} `
+    -Data @{runId = $runId; script = 'Deploy-Processor.ps1'; processor = $Processor; environment = $Environment; release = $StagedCommit; releaseTag = $ReleaseTag; target = $TargetRoot } `
     -LogFile $LogFile
-
-# A tag source needs both halves; fail closed before any stage runs.
-if ($BaselineRepo -and [string]::IsNullOrWhiteSpace($ReleaseTag)) {
-    Write-VesLog ERROR '-BaselineRepo requires -ReleaseTag.' -LogFile $LogFile
-    Write-VesLog ERROR 'RUN END: deployment outcome=ERROR exit=10' `
-        -Data @{runId=$runId; outcome='ERROR'; exitCode=10; processor=$Processor; release=$StagedCommit} -LogFile $LogFile
-    exit $VES_EXIT_USAGE
-}
 
 # --- DATADOG DISABLED ---------------------------------------------------------
 # Low-cardinality tags shared by every deploy event emitted to Datadog.
@@ -104,13 +98,194 @@ if ($BaselineRepo -and [string]::IsNullOrWhiteSpace($ReleaseTag)) {
 
 function Stop-Deploy([int]$code) {
     $outcome = Get-VesOutcome -ExitCode $code
-    Write-VesLog ($(if ($outcome -eq 'PASS') {'OK'} elseif ($outcome -eq 'FAIL') {'ERROR'} else {'ERROR'})) `
+    Write-VesLog ($(if ($outcome -eq 'PASS') { 'OK' } elseif ($outcome -eq 'FAIL') { 'ERROR' } else { 'ERROR' })) `
         "RUN END: deployment outcome=$outcome exit=$code" `
-        -Data @{runId=$runId; outcome=$outcome; exitCode=$code; processor=$Processor; release=$StagedCommit; releaseTag=$ReleaseTag} -LogFile $LogFile
+        -Data @{runId = $runId; outcome = $outcome; exitCode = $code; processor = $Processor; release = $StagedCommit; releaseTag = $ReleaseTag } -LogFile $LogFile
     exit $code
 }
 
+function Get-RollbackSourcePath {
+    param([string]$BackupRootPath, [string]$RequestedPath, [string]$TargetProcessor)
+    if ($RequestedPath) {
+        if (-not (Test-Path -LiteralPath $RequestedPath)) {
+            throw "Rollback backup path not found: $RequestedPath"
+        }
+        return (Get-Item -LiteralPath $RequestedPath).FullName
+    }
+    if ([string]::IsNullOrWhiteSpace($BackupRootPath)) {
+        throw 'Rollback requires -BackupRoot or -RollbackBackup.'
+    }
+    $pattern = '^\d{8}_.+_' + [regex]::Escape($TargetProcessor) + '$'
+    $latest = @(Get-ChildItem -LiteralPath $BackupRootPath -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $pattern } |
+        Sort-Object Name -Descending | Select-Object -First 1)
+    if (-not $latest) {
+        throw "No rollback backup found under $BackupRootPath for $TargetProcessor"
+    }
+    return $latest[0].FullName
+}
+
+if ($Rollback) {
+    try {
+        $rollbackSource = Get-RollbackSourcePath -BackupRootPath $BackupRoot -RequestedPath $RollbackBackup -TargetProcessor $Processor
+    }
+    catch {
+        Write-VesLog ERROR $_.Exception.Message -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+
+    $disabled = New-Object System.Collections.Generic.List[string]
+    $stopFailed = $false
+    try {
+        foreach ($tn in $ScheduledTasks) {
+            try {
+                Disable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
+                $disabled.Add($tn)
+                Write-VesLog INFO "Disabled task: $tn" -LogFile $LogFile
+            }
+            catch {
+                Write-VesLog ERROR "Could not disable task $tn -> $($_.Exception.Message)" -LogFile $LogFile
+                $stopFailed = $true
+                break
+            }
+        }
+        if (-not $stopFailed -and $ServiceName) {
+            $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if ($svc) {
+                try {
+                    Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+                    Write-VesLog INFO "Stopped service: $ServiceName" -LogFile $LogFile
+                }
+                catch {
+                    Write-VesLog ERROR "Could not stop service $ServiceName -> $($_.Exception.Message)" -LogFile $LogFile
+                    $stopFailed = $true
+                }
+            }
+        }
+        if (-not $stopFailed) {
+            $targetItem = Get-Item -LiteralPath $TargetRoot -ErrorAction SilentlyContinue
+            if ($targetItem) {
+                $targetPrefix = $targetItem.FullName.TrimEnd('\') + '\'
+                $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) })
+                foreach ($p in $running) {
+                    if ($KillProcesses) {
+                        Write-VesLog WARN ("Killing running instance PID {0}: {1}" -f $p.ProcessId, $p.CommandLine) -Data @{processor = $Processor; pid = $p.ProcessId; commandLine = $p.CommandLine } -LogFile $LogFile
+                        try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop }
+                        catch {
+                            Write-VesLog ERROR "Could not kill PID $($p.ProcessId) -> $($_.Exception.Message)" -LogFile $LogFile
+                            $stopFailed = $true
+                        }
+                    }
+                    else {
+                        Write-VesLog ERROR ("Running instance holds {0}: PID {1} {2}. Re-run with -KillProcesses to stop it." -f $TargetRoot, $p.ProcessId, $p.CommandLine) -LogFile $LogFile
+                        $stopFailed = $true
+                    }
+                }
+                if ($KillProcesses -and -not $stopFailed -and $running.Count) {
+                    $ids = @($running | ForEach-Object { $_.ProcessId })
+                    $deadline = (Get-Date).AddSeconds(30)
+                    while ((Get-Date) -lt $deadline -and (Get-Process -Id $ids -ErrorAction SilentlyContinue)) {
+                        Start-Sleep -Milliseconds 250
+                    }
+                    $alive = @(Get-Process -Id $ids -ErrorAction SilentlyContinue)
+                    if ($alive.Count) {
+                        Write-VesLog ERROR "Instance(s) still alive after kill: $(($alive | ForEach-Object Id) -join ', ')" -LogFile $LogFile
+                        $stopFailed = $true
+                    }
+                }
+            }
+        }
+        if (-not $stopFailed) {
+            Write-VesLog INFO "Rollback $rollbackSource -> $TargetRoot" -LogFile $LogFile
+            New-Item -ItemType Directory -Path $TargetRoot -Force | Out-Null
+            robocopy $rollbackSource $TargetRoot /MIR /NP /R:2 /W:5 | Out-Null
+            if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "Rollback copy failed ($LASTEXITCODE)" -LogFile $LogFile; Stop-Deploy $VES_EXIT_DRIFT }
+            $global:LASTEXITCODE = 0
+        }
+    }
+    finally {
+        if ($ServiceName) {
+            $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if ($svc) {
+                try {
+                    Start-Service -Name $ServiceName -ErrorAction Stop
+                    Write-VesLog INFO "Started service: $ServiceName" -LogFile $LogFile
+                }
+                catch { Write-VesLog ERROR "FAILED to restart service $ServiceName -> $($_.Exception.Message)" -LogFile $LogFile }
+            }
+        }
+        foreach ($tn in $disabled) {
+            try {
+                Enable-ScheduledTask -TaskName $tn -ErrorAction Stop | Out-Null
+                Write-VesLog INFO "Re-enabled task: $tn" -LogFile $LogFile
+            }
+            catch { Write-VesLog ERROR "FAILED to re-enable task $tn -> $($_.Exception.Message)" -LogFile $LogFile }
+        }
+        if ($StartTasksAfter -and -not $stopFailed) {
+            foreach ($tn in $disabled) {
+                try {
+                    Start-ScheduledTask -TaskName $tn -ErrorAction Stop
+                    Write-VesLog INFO "Started task: $tn" -LogFile $LogFile
+                }
+                catch { Write-VesLog WARN "Could not start task $tn -> $($_.Exception.Message)" -LogFile $LogFile }
+            }
+        }
+    }
+    if ($stopFailed) { Write-VesLog ERROR 'Rollback stopped because the processor could not be quiesced.' -LogFile $LogFile; Stop-Deploy $VES_EXIT_DRIFT }
+    Write-VesLog OK "Rollback complete: $Processor restored from $rollbackSource" -LogFile $LogFile
+    Stop-Deploy $VES_EXIT_OK
+}
+
+# A tag source needs both halves; fail closed before any stage runs.
+if ($BaselineRepo -and [string]::IsNullOrWhiteSpace($ReleaseTag)) {
+    Write-VesLog ERROR '-BaselineRepo requires -ReleaseTag.' -LogFile $LogFile
+    Write-VesLog ERROR 'RUN END: deployment outcome=ERROR exit=10' `
+        -Data @{runId = $runId; outcome = 'ERROR'; exitCode = 10; processor = $Processor; release = $StagedCommit } -LogFile $LogFile
+    exit $VES_EXIT_USAGE
+}
+
 $gateRequired = New-Object System.Collections.Generic.List[string]
+if ($Rollback) {
+    if (-not [string]::IsNullOrWhiteSpace($StagedRoot) -or -not [string]::IsNullOrWhiteSpace($StagedCommit) -or -not [string]::IsNullOrWhiteSpace($ManifestPath) -or -not [string]::IsNullOrWhiteSpace($TrustParam) -or -not [string]::IsNullOrWhiteSpace($ApprovedCommitParam) -or -not [string]::IsNullOrWhiteSpace($ReleaseTag) -or -not [string]::IsNullOrWhiteSpace($BaselineRepo)) {
+        Write-VesLog ERROR 'Rollback mode does not accept deploy-only parameters (StagedRoot, StagedCommit, ManifestPath, TrustParam, ApprovedCommitParam, ReleaseTag, BaselineRepo).' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+    if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
+        Write-VesLog ERROR '-TargetRoot is required for rollback.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+    if ([string]::IsNullOrWhiteSpace($BackupRoot) -and [string]::IsNullOrWhiteSpace($RollbackBackup)) {
+        Write-VesLog ERROR 'Rollback requires -BackupRoot or -RollbackBackup.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+}
+else {
+    if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
+        Write-VesLog ERROR '-TargetRoot is required for deploy.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+    if ([string]::IsNullOrWhiteSpace($StagedRoot)) {
+        Write-VesLog ERROR '-StagedRoot is required for deploy.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+    if ([string]::IsNullOrWhiteSpace($StagedCommit)) {
+        Write-VesLog ERROR '-StagedCommit is required for deploy.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+    if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
+        Write-VesLog ERROR '-ManifestPath is required for deploy.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+    if ([string]::IsNullOrWhiteSpace($TrustParam)) {
+        Write-VesLog ERROR '-TrustParam is required for deploy.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+    if ([string]::IsNullOrWhiteSpace($ApprovedCommitParam)) {
+        Write-VesLog ERROR '-ApprovedCommitParam is required for deploy.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+}
 foreach ($path in $RequiredArtifactPaths) {
     if (-not [string]::IsNullOrWhiteSpace($path) -and -not $gateRequired.Contains($path)) {
         $gateRequired.Add($path)
@@ -129,7 +304,8 @@ if ($ConfigContract) {
     if ($configFull.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         $relativeConfig = $configFull.Substring($targetPrefix.Length)
         if (-not $gateRequired.Contains($relativeConfig)) { $gateRequired.Add($relativeConfig) }
-    } elseif ($gateRequired.Count -eq 0) {
+    }
+    elseif ($gateRequired.Count -eq 0) {
         Write-VesLog ERROR 'ConfigPath is outside TargetRoot; supply -RequiredArtifactPaths with its staged relative path.' -LogFile $LogFile
         Stop-Deploy $VES_EXIT_USAGE
     }
@@ -167,7 +343,7 @@ Step 'pre-deploy gate' {
         '-ManifestPath', $ManifestPath, '-Processor', $Processor,
         '-Environment', $Environment, '-Region', $Region)
     foreach ($requiredPath in $gateRequired) { $gateArgs += '-RequiredArtifactPaths', $requiredPath }
-    if ($ReleaseTag)   { $gateArgs += '-ReleaseTag', $ReleaseTag }
+    if ($ReleaseTag) { $gateArgs += '-ReleaseTag', $ReleaseTag }
     if ($BaselineRepo) { $gateArgs += '-BaselineRepo', $BaselineRepo }
     if ($LogFile) { $gateArgs += '-LogFile', $LogFile }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-PreDeployGate.ps1') @gateArgs
@@ -227,20 +403,21 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 $targetPrefix = $targetItem.FullName.TrimEnd('\') + '\'
                 $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                     Where-Object { $_.ExecutablePath -and
-                                   $_.ExecutablePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) })
+                        $_.ExecutablePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) })
                 foreach ($p in $running) {
                     if ($KillProcesses) {
                         # audit line BEFORE the kill: which instance (mode arg visible in CommandLine)
                         Write-VesLog WARN ("Killing running instance PID {0}: {1}" -f $p.ProcessId, $p.CommandLine) `
-                            -Data @{processor=$Processor; pid=$p.ProcessId; commandLine=$p.CommandLine} -LogFile $LogFile
+                            -Data @{processor = $Processor; pid = $p.ProcessId; commandLine = $p.CommandLine } -LogFile $LogFile
                         try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop }
                         catch {
                             Write-VesLog ERROR "Could not kill PID $($p.ProcessId) -> $($_.Exception.Message)" -LogFile $LogFile
                             $stopFailed = $true
                         }
-                    } else {
+                    }
+                    else {
                         Write-VesLog ERROR ("Running instance holds {0}: PID {1} {2}. Re-run with -KillProcesses to stop it." -f `
-                            $TargetRoot, $p.ProcessId, $p.CommandLine) -LogFile $LogFile
+                                $TargetRoot, $p.ProcessId, $p.CommandLine) -LogFile $LogFile
                         $stopFailed = $true
                     }
                 }
@@ -329,7 +506,7 @@ Step 'post-deploy verify' {
         '-Environment', $Environment,
         '-Region', $Region
     )
-    if ($ReleaseTag)   { $verArgs += '-ReleaseTag', $ReleaseTag }
+    if ($ReleaseTag) { $verArgs += '-ReleaseTag', $ReleaseTag }
     if ($BaselineRepo) { $verArgs += '-BaselineRepo', $BaselineRepo }
     if ($LogFile) { $verArgs += '-LogFile', $LogFile }
     if ($ConfigContract) { $verArgs += '-ConfigContract', $ConfigContract, '-ConfigPath', $ConfigPath }

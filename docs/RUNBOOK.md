@@ -253,6 +253,11 @@ egress first** before any PROD use.
 .\processors\Deploy-<system>.ps1 -StagedRoot D:\stage\<system> -StagedCommit <sha>
 ```
 
+**Rollback mode:** use `-Rollback` with `-TargetRoot` and either `-BackupRoot`
+or `-RollbackBackup`. Deploy mode uses the staged-release parameters
+(`-StagedRoot`, `-StagedCommit`, `-ManifestPath`, `-TrustParam`,
+`-ApprovedCommitParam`) and does not use rollback-only parameters.
+
 Each system's thin wrapper in `processors/` pins the fixed per-server values
 (`TargetRoot`, `ScheduledTasks`, paths) and calls `Deploy-Processor.ps1`. Copy
 `processors/Deploy-SYSTEM_NAME.ps1` to onboard a new system.
