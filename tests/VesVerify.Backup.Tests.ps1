@@ -31,8 +31,8 @@ Describe 'Get-VesBackupSet' {
         New-VesBackupFolder -BackupRoot $script:BackupRoot -Processor 'p1' -Stamp '20260802T131500' -SourceTree $script:Src | Out-Null
         $set = @(Get-VesBackupSet -BackupRoot $script:BackupRoot -Processor 'p1')
         $set.Count | Should -Be 2
-        ($set | Where-Object { $_.StampKind -eq 'date' }).Count | Should -Be 1
-        ($set | Where-Object { $_.StampKind -eq 'timestamp' }).Count | Should -Be 1
+        @($set | Where-Object { $_.StampKind -eq 'date' }).Count | Should -Be 1
+        @($set | Where-Object { $_.StampKind -eq 'timestamp' }).Count | Should -Be 1
     }
 
     It 'orders newest first across both shapes' {
@@ -87,11 +87,12 @@ Describe 'Get-VesBackupSet' {
         $set[0].HasRecord | Should -BeFalse
     }
 
-    It 'does not unroll a single backup into a scalar' {
+    It 'yields exactly one entry for a single backup when wrapped in @()' {
         $root = Join-Path $script:Root 'single'
         New-VesBackupFolder -BackupRoot $root -Processor 'p6' -Stamp '20260804T140000' -SourceTree $script:Src | Out-Null
-        $set = Get-VesBackupSet -BackupRoot $root -Processor 'p6'
+        $set = @(Get-VesBackupSet -BackupRoot $root -Processor 'p6')
         $set.Count | Should -Be 1
+        $set[0].Name | Should -Be '20260804T140000_TT_p6'
     }
 
     It 'reads the record back for a backup that has one' {

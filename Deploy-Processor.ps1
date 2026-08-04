@@ -82,6 +82,10 @@ param(
     [string]$Region = 'us-gov-west-1',
     [string]$LogFile
 )
+# Backup and rollback capabilities:
+# - Deploy mode creates a dated backup of the live TargetRoot before overwriting it.
+# - Rollback mode restores a previously created backup tree back into TargetRoot.
+# - Each processor wrapper supplies the live target path and backup root used here.
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -104,6 +108,8 @@ function Stop-Deploy([int]$code) {
     exit $code
 }
 
+# Rollback capability: resolve the backup folder to restore, either from an
+# explicit -RollbackBackup path or from the latest dated backup under BackupRoot.
 function Get-RollbackSourcePath {
     param([string]$BackupRootPath, [string]$RequestedPath, [string]$TargetProcessor)
     if ($RequestedPath) {
@@ -125,6 +131,8 @@ function Get-RollbackSourcePath {
     return $latest[0].FullName
 }
 
+# Rollback mode: stop the processor, restore the selected backup tree into
+# TargetRoot, and restart the processor so the prior release is live again.
 if ($Rollback) {
     try {
         $rollbackSource = Get-RollbackSourcePath -BackupRootPath $BackupRoot -RequestedPath $RollbackBackup -TargetProcessor $Processor
@@ -357,7 +365,9 @@ Step 'pre-deploy gate' {
 # Past the gate. -WhatIf short-circuits to the else branch; the real work runs here.
 if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
 
-    # Stage 2: dated backup of the current prod files before we overwrite them
+    # Deploy backup capability: snapshot the current live tree into a dated backup
+    # folder before overwriting it with the staged release, creating the restore
+    # point used by rollback.
     if ($BackupRoot) {
         $backupDir = Join-Path $BackupRoot ("{0}_{1}_{2}" -f (Get-Date).ToString('yyyyMMdd'), $Initials, $Processor)
         if (Test-Path -LiteralPath $TargetRoot) {
@@ -538,10 +548,8 @@ Step 'health check' {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-HealthCheck.ps1') @hcArgs
 }
 
-# all five stages passed
-# backup cleanup, last and only after a fully green deploy: a failed deploy must
-# never eat its own restore point. Keep the newest N dated folders for THIS
-# processor (name sorts by date because it starts yyyyMMdd), drop the rest.
+# Backup retention capability: after a fully green deploy, keep only the newest
+# N dated backup folders for this processor and prune the older restore points.
 if ($BackupRoot -and $KeepBackups -gt 0 -and (Test-Path -LiteralPath $BackupRoot)) {
     $pattern = '^\d{8}_.+_' + [regex]::Escape($Processor) + '$'
     $old = @(Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |

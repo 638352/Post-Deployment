@@ -44,6 +44,9 @@ $logDir = if ($AuditLogDir) { $AuditLogDir } elseif ($env:VES_AUDIT_LOG_DIR) { $
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 $log = Join-Path $logDir ('deploy_OutboundDBQ_{0}.jsonl' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))
 
+# Backup and rollback wiring for this processor:
+# - TargetRoot is the live processor tree that will be backed up before deploy.
+# - BackupRoot is the folder where dated restore points are stored for rollback.
 $fixed = @{
     Processor           = 'OutboundDBQ'
     TargetRoot          = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor'

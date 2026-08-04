@@ -643,7 +643,8 @@ function Get-VesBackupSet {
       trusting the folder blindly.
     .OUTPUTS
       Array of {Name, FullName, Stamp, StampKind, Initials, HasRecord, Record,
-                HasManifest, ManifestPath, FileCount, SizeBytes}
+                HasManifest, ManifestPath, FileCount, SizeBytes}, newest first.
+      Wrap the call in @(): a single backup arrives as a scalar otherwise.
     #>
     [CmdletBinding()]
     param(
@@ -651,7 +652,7 @@ function Get-VesBackupSet {
         [Parameter(Mandatory)][string]$Processor
     )
     $out = New-Object System.Collections.Generic.List[object]
-    if (-not (Test-Path -LiteralPath $BackupRoot)) { return , ($out.ToArray()) }
+    if (-not (Test-Path -LiteralPath $BackupRoot)) { return @() }
 
     # Named groups keep the two shapes in one pattern; the processor is escaped so a
     # name containing regex metacharacters cannot widen the match to other systems.
@@ -732,10 +733,10 @@ function Get-VesBackupSet {
             })
     }
 
-    # Newest first. LastWriteTimeUtc then Name break ties between two same-day
-    # date-only folders (both parse to midnight). Leading comma so a single
-    # backup does not unroll to a scalar in the caller.
-    return , (@($out | Sort-Object -Property @{Expression = 'Stamp'; Descending = $true }, @{Expression = 'Name'; Descending = $true }))
+    # Newest first. Name breaks ties between two same-day date-only folders (both
+    # parse to midnight). Emitted to the pipeline normally, so callers must wrap
+    # in @() -- a single backup otherwise arrives as a scalar with no .Count.
+    return @($out | Sort-Object -Property @{Expression = 'Stamp'; Descending = $true }, @{Expression = 'Name'; Descending = $true })
 }
 
 function Stop-VesProcessorTarget {

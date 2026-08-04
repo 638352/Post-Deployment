@@ -60,6 +60,9 @@ if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Forc
 $log = Join-Path $logDir ('deploy_SYSTEM_NAME_{0}.jsonl' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))
 
 # ---- fixed per system: edit these when copying the template -----------------
+# Backup and rollback wiring for this processor:
+# - TargetRoot is the live processor tree that will be backed up before deploy.
+# - BackupRoot is the folder where dated restore points are stored for rollback.
 # Values below are shaped for an outbound .exe processor on an egress server.
 $fixed = @{
     Processor           = 'SYSTEM_NAME'                                   # e.g. OutboundDBQProcessor
