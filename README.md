@@ -26,6 +26,7 @@ processors/                  one thin deploy script per system (template inside)
 targets.json                 fail-closed server/Citrix inventory starter
 sample.config.json           example config contract
 SERVERS.md                   authoritative server + processor path map
+docs/                        operator runbooks (start at docs/README.md)
 Invoke-Tests.ps1             dev-time Pester runner (see Testing)
 tests/                       Pester test suite + fixtures
 ```
