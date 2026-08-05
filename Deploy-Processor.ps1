@@ -94,6 +94,15 @@ param(
     [string]$RollbackBackup,
     # rollback only: why this restore is happening. Recorded in the audit log.
     [string]$RollbackReason,
+    # Rollback only, and deliberately separate from -ReleaseTag/-ManifestPath:
+    # every other release parameter on this script names the release being
+    # DEPLOYED, so forwarding them to a restore would verify the restored old tree
+    # against the new release's baseline -- the likeliest way to make a good
+    # rollback look like a bad one. These name the PRIOR release instead, and are
+    # what let the alias reach Invoke-Rollback's strong proof rungs (1 and 2)
+    # rather than always degrading to the backup's own manifest.
+    [string]$RollbackReleaseTag,
+    [string]$RollbackManifestPath,
     [string]$Initials = $env:USERNAME,
     [string]$HealthUrl,
     # liveness for endpoint-less .exe processors; passed through to the health check
@@ -143,8 +152,28 @@ function Stop-Deploy([int]$code) {
 # already holding the deploy command line can reverse it without a second script,
 # but the restore itself has exactly one implementation.
 if ($Rollback) {
+    # Validate BEFORE building the argument array. PS 5.1 drops empty-string
+    # arguments to native commands (the same trap called out at the gate below),
+    # so a blank -TargetRoot here would silently let '-BackupRoot' bind as
+    # -TargetRoot's value and shift every later argument by one.
+    if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
+        Write-VesLog ERROR '-TargetRoot is required for -Rollback.' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
+    if ([string]::IsNullOrWhiteSpace($Initials)) {
+        Write-VesLog ERROR '-Initials is required (it defaults to $env:USERNAME, which is empty in this context).' -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_USAGE
+    }
     $rbArgs = @('-Processor', $Processor, '-TargetRoot', $TargetRoot)
     if ($BackupRoot) { $rbArgs += '-BackupRoot', $BackupRoot }
+    # Prior-release baseline, so the alias can reach the proof rungs that actually
+    # show the restored release was approved. Never -ReleaseTag/-ManifestPath:
+    # those name the incoming release.
+    if ($RollbackReleaseTag) { $rbArgs += '-ReleaseTag', $RollbackReleaseTag }
+    if ($RollbackManifestPath) { $rbArgs += '-ManifestPath', $RollbackManifestPath }
+    if ($BaselineRepo) { $rbArgs += '-BaselineRepo', $BaselineRepo }
+    if ($TrustParam) { $rbArgs += '-TrustParam', $TrustParam }
+    if ($ApprovedCommitParam) { $rbArgs += '-ApprovedCommitParam', $ApprovedCommitParam }
     if ($RollbackBackup) { $rbArgs += '-BackupDir', $RollbackBackup }
     if ($RollbackReason) { $rbArgs += '-Reason', $RollbackReason }
     if ($ConfigPath) { $rbArgs += '-ConfigPath', $ConfigPath }
@@ -180,7 +209,10 @@ $gateRequired = New-Object System.Collections.Generic.List[string]
 # -BackupRoot is NOT rollback-only: a deploy needs it to create the restore point
 # in the first place, and both processor wrappers set it. Only -RollbackBackup and
 # -RollbackReason are meaningless outside rollback mode.
-$rollbackOnlyProvided = (-not [string]::IsNullOrWhiteSpace($RollbackBackup)) -or (-not [string]::IsNullOrWhiteSpace($RollbackReason))
+$rollbackOnlyProvided = (-not [string]::IsNullOrWhiteSpace($RollbackBackup)) -or
+                        (-not [string]::IsNullOrWhiteSpace($RollbackReason)) -or
+                        (-not [string]::IsNullOrWhiteSpace($RollbackReleaseTag)) -or
+                        (-not [string]::IsNullOrWhiteSpace($RollbackManifestPath))
 if (-not $Rollback) {
     if ($rollbackOnlyProvided) {
         Write-VesLog ERROR 'Rollback-only parameters require -Rollback.' -LogFile $LogFile
@@ -330,11 +362,13 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             }
             New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
             robocopy $TargetRoot $backupDir /E /NP /R:2 /W:5 | Out-Null
-            # Robocopy 8+ is a hard copy failure. There is no dedicated "backup
-            # failed" exit code; use DRIFT (1) so the deploy aborts as FAIL rather
-            # than USAGE/NOBASE — production was not changed, but the restore
-            # point could not be taken.
-            if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "Backup failed ($LASTEXITCODE); aborting before copy" -LogFile $LogFile; Stop-Deploy $VES_EXIT_DRIFT }
+            # Robocopy 8+ is a hard copy failure. NOBASE (2), not DRIFT (1): nothing
+            # was compared and production did not change, so "drift" is the wrong
+            # word -- the honest statement is that we could not take a restore point,
+            # which is the ERROR class (2 outranks 3; see Get-VesOutcome). This is
+            # the same code Invoke-Rollback uses for its equivalent could-not-proceed
+            # cases, so monitoring reads both the same way.
+            if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "Backup failed ($LASTEXITCODE); aborting before copy. No restore point was taken, so production state is unproven." -LogFile $LogFile; Stop-Deploy $VES_EXIT_NOBASE }
             $global:LASTEXITCODE = 0
 
             $recordErrors = New-Object System.Collections.Generic.List[string]
@@ -409,14 +443,19 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 catch { Write-VesLog WARN "No prior approved-commit readable at $ApprovedCommitParam." -LogFile $LogFile }
             }
 
-            # Free, high-value signal: did the tree we are replacing actually match
-            # the pinned baseline, or had prod already drifted before this deploy?
+            # Free signal -- but it has to be read the right way round. The anchor is
+            # pinned at capture (UAT sign-off), so during a normal deploy it already
+            # names the INCOMING release, not the one currently on disk. A mismatch
+            # here is therefore the expected case on every healthy deploy and must
+            # not be logged as DRIFT: doing so trains operators to ignore the one
+            # word that is supposed to mean "production is wrong".
             if ($backupHash -and $priorSsm.trustHashRead) {
                 if ($backupHash -eq $priorSsm.trustHash) {
-                    Write-VesLog OK 'Pre-deploy tree matches the SSM-pinned baseline; the backup is a trusted restore point.' -LogFile $LogFile
+                    Write-VesLog WARN 'Pre-deploy tree already matches the SSM-pinned incoming release; this deploy is re-copying bits production is already carrying.' -LogFile $LogFile
                 }
                 else {
-                    Write-VesLog DRIFT 'Pre-deploy tree does NOT match the SSM-pinned baseline; the backup restores production as it actually was, not as approved.' -LogFile $LogFile
+                    Write-VesLog INFO 'Pre-deploy tree differs from the SSM-pinned incoming release, as expected before a deploy. Its hash is recorded in backup-manifest.json so this restore point can be identified later.' `
+                        -Data @{preDeployManifestHash = $backupHash; pinnedIncomingHash = $priorSsm.trustHash } -LogFile $LogFile
                 }
             }
 
@@ -559,8 +598,11 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
     if (-not $stop -or -not $stop.Stopped) {
         # Nothing was copied, so the tree is untouched: an auto-rollback here would
         # be pointless churn against the same file locks that blocked the stop.
-        Write-VesLog ERROR "Stop phase failed; processor state restored, no copy performed." -LogFile $LogFile
-        Stop-Deploy $VES_EXIT_DRIFT
+        # NOBASE (2), not DRIFT (1): no comparison ran and production was not
+        # touched, so this is "we could not proceed", not "production is wrong".
+        # Invoke-Rollback returns 2 for the identical could-not-quiesce case.
+        Write-VesLog ERROR "Stop phase failed; processor state restored, no copy performed. Production is unchanged but unverified." -LogFile $LogFile
+        Stop-Deploy $VES_EXIT_NOBASE
     }
     if ($copyFailed) {
         # A /MIR that died part-way IS the case rollback exists for.

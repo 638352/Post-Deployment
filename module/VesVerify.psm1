@@ -43,6 +43,12 @@ $Global:VES_EXIT_USAGE = 10     # Caller passed bad/missing parameters.
 #                                     Verify-Config.ps1, not by byte-hash.
 $Global:VES_DEFAULT_EXCLUDE = '(?i)(^|\\)(logs|temp|cache|\.git)\\|\.(log|tmp|config)$'
 
+# BOM-less UTF-8 for the JSONL audit logs. Out-File -Encoding utf8 under 5.1 emits a
+# BOM when it CREATES a file, so the first line of every log arrived as
+# <EF BB BF>{"ts":... and a strict per-line parse (jq, most log shippers) failed on
+# line 1 of every audit file. Module-scoped and reused: the encoder is stateless.
+$script:VesUtf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
+
 # PowerShell 5.1 defaults to SSL3/TLS1.0, which ddog-gov and AWS endpoints reject.
 # OR the existing protocol set with Tls12 (rather than replacing) so we add, not remove, protocols.
 [Net.ServicePointManager]::SecurityProtocol = `
@@ -81,7 +87,13 @@ function Write-VesLog {
         if ($logDir -and -not (Test-Path -LiteralPath $logDir)) {
             New-Item -ItemType Directory -Path $logDir -Force | Out-Null
         }
-        ($record | ConvertTo-Json -Compress -Depth 6) | Out-File -FilePath $LogFile -Append -Encoding utf8
+        # Resolve through the PowerShell provider, not [IO.Path]::GetFullPath: a
+        # relative -LogFile must anchor to the session's location, not the process CWD.
+        $fullLogPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogFile)
+        [IO.File]::AppendAllText(
+            $fullLogPath,
+            ($record | ConvertTo-Json -Compress -Depth 6) + [Environment]::NewLine,
+            $script:VesUtf8NoBom)
     }
 }
 
@@ -346,20 +358,30 @@ function Export-VesManifest {
         # Git commit of the release captured; 'unknown' if capture ran outside a checkout.
         [string]$CommitSha = 'unknown',
         # Logical processor/system name for traceability.
-        [string]$Processor = 'unknown'
+        [string]$Processor = 'unknown',
+        # The exclude regex this manifest was captured with. Recorded so verify and
+        # the gate can PROVE they are comparing under the same rules instead of
+        # assuming it -- see the excludePattern field below.
+        [string]$ExcludePattern = $Global:VES_DEFAULT_EXCLUDE
     )
     # Derive the content hash first so it can be embedded inside the document.
     $manifestHash = Get-VesManifestHash -Manifest $Manifest
     # Ordered document: schema version first enables future format migrations.
+    #
+    # Adding excludePattern does NOT change any existing manifest's hash:
+    # Get-VesManifestHash digests only the sorted 'relpath|sha256|bytes' lines, not
+    # the JSON around them. Existing SSM pins therefore stay valid and no re-capture
+    # is required to adopt this field.
     $doc = [ordered]@{
-        schema       = 'ves.manifest.v1'                                            # Format identifier for forward compatibility.
-        processor    = $Processor                                                   # Which system this baseline belongs to.
-        commitSha    = $CommitSha                                                   # Release commit -- ties baseline to Git history.
-        capturedUtc  = (Get-Date).ToUniversalTime().ToString('o')                   # Capture moment (round-trip ISO format).
-        capturedBy   = "$env:USERNAME@$env:COMPUTERNAME"                            # Who/where captured -- audit field.
-        manifestHash = $manifestHash                                                # Self-hash; verified on load to detect tamper/corruption.
-        fileCount    = $Manifest.Count                                              # Quick sanity number for humans.
-        files        = $Manifest                                                    # The per-file entries themselves.
+        schema         = 'ves.manifest.v1'                                          # Format identifier for forward compatibility.
+        processor      = $Processor                                                 # Which system this baseline belongs to.
+        commitSha      = $CommitSha                                                 # Release commit -- ties baseline to Git history.
+        capturedUtc    = (Get-Date).ToUniversalTime().ToString('o')                 # Capture moment (round-trip ISO format).
+        capturedBy     = "$env:USERNAME@$env:COMPUTERNAME"                          # Who/where captured -- audit field.
+        manifestHash   = $manifestHash                                              # Self-hash; verified on load to detect tamper/corruption.
+        excludePattern = $ExcludePattern                                            # Rules this snapshot was taken under; compare-time must match.
+        fileCount      = $Manifest.Count                                            # Quick sanity number for humans.
+        files          = $Manifest                                                  # The per-file entries themselves.
     }
     # Ensure the destination directory exists before writing.
     $dir = Split-Path -Parent $Path
@@ -391,6 +413,44 @@ function Import-VesManifest {
         StoredHash     = $doc.manifestHash                       # Hash recorded at capture time.
         RecomputedHash = $recomputed                             # Hash derived from current file contents.
         Consistent     = ($doc.manifestHash -eq $recomputed)     # Internal integrity verdict.
+    }
+}
+
+function Test-VesExcludePattern {
+    <#
+    .SYNOPSIS Confirm a loaded manifest was captured under the exclude rules in force now.
+    .DESCRIPTION
+      Capture and compare MUST agree on the exclude regex. If they disagree, files
+      excluded at capture time resurface as "Extra" at verify time and every check
+      reports drift forever -- the exact failure $Global:VES_DEFAULT_EXCLUDE exists
+      to prevent. But Invoke-Verification exposes -ExcludePattern as a caller-settable
+      parameter, so agreement cannot be assumed; it has to be checked against what the
+      manifest actually recorded.
+
+      Known=$false means the manifest predates the excludePattern field. Callers WARN
+      rather than fail on that: such a baseline is still legitimately trusted, and
+      failing it would break every pin captured before this field existed.
+    .OUTPUTS {Known, Recorded, Effective, Match}
+    #>
+    [CmdletBinding()]
+    param(
+        # Parsed manifest document (the .Doc of Import-VesManifest / Get-VesManifestFromTag).
+        [Parameter(Mandatory)][AllowNull()]$ManifestDoc,
+        # The pattern this run would compare with.
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ExcludePattern
+    )
+    $recorded = $null
+    if ($ManifestDoc -and $ManifestDoc.PSObject.Properties['excludePattern']) {
+        $recorded = "$($ManifestDoc.excludePattern)"
+    }
+    $known = -not [string]::IsNullOrWhiteSpace($recorded)
+    return [PSCustomObject]@{
+        Known     = $known
+        Recorded  = $recorded
+        Effective = $ExcludePattern
+        # Ordinal comparison: this is regex SOURCE, not prose. A case-insensitive
+        # match would treat (?i)foo and (?-i)FOO as the same rule set.
+        Match     = ($known -and [string]::Equals($recorded, $ExcludePattern, [StringComparison]::Ordinal))
     }
 }
 
@@ -1074,7 +1134,8 @@ function Get-VesAlertType {
 Export-ModuleMember -Function `
     Write-VesLog, New-VesLogFile, Get-VesOutcome, Import-VesTargetInventory, `
     Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
-    Import-VesManifest, Compare-VesFiles, Get-VesTrustedHash, Set-VesTrustedHash, `
+    Import-VesManifest, Test-VesExcludePattern, Compare-VesFiles, `
+    Get-VesTrustedHash, Set-VesTrustedHash, `
     Invoke-VesAwsCli, Invoke-VesGit, Test-VesReleaseTag, Get-VesManifestFromTag, `
     Get-VesWorstExitCode, Get-VesBackupSet, `
     Stop-VesProcessorTarget, Start-VesProcessorTarget, `

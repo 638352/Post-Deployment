@@ -26,9 +26,29 @@ BeforeAll {
     if ($cap.ExitCode -ne 0) { throw "v1 capture failed: $($cap.Output)" }
     $script:V1Hash = (Get-Content -LiteralPath $script:V1Manifest -Raw | ConvertFrom-Json).manifestHash
 
+    # Manifest of v2 as well, purely so the stub can pin what production would pin.
+    $script:V2Manifest = Join-Path $script:Root 'v2-baseline.json'
+    $cap2 = Invoke-VesScript 'Invoke-Verification.ps1' @(
+        '-Mode', 'Capture', '-ReleaseRoot', $script:V2, '-ManifestPath', $script:V2Manifest,
+        '-Processor', 'rbtest', '-AllowUntrustedCapture', '-AllowUnarchivedCapture')
+    if ($cap2.ExitCode -ne 0) { throw "v2 capture failed: $($cap2.Output)" }
+    $script:V2Hash = (Get-Content -LiteralPath $script:V2Manifest -Raw | ConvertFrom-Json).manifestHash
+
+    # The anchor pins V2 -- the release being rolled AWAY from. That is what
+    # production actually looks like at rollback time: capture pins at UAT sign-off,
+    # before the deploy, and nothing re-pins on the way back down.
+    #
+    # This fixture used to pin V1 (the release being restored), which is the inverse.
+    # That inversion hid a real deadlock: with the pin naming V2, passing -TrustParam
+    # to the post-rollback verify failed the restored V1 manifest against the wrong
+    # anchor and returned exit 2 on a byte-perfect restore -- which then permanently
+    # blocked -RepinTrust, since that is gated on the same verify passing.
     New-VesAwsStub -Path (Join-Path $TestDrive 'awsstub-rb') -CallLog $script:CallLog -Parameters @{
-        '/ves/rbtest/baseline-hash'   = $script:V1Hash
-        '/ves/rbtest/approved-commit' = 'oldcommit'
+        '/ves/rbtest/baseline-hash'   = $script:V2Hash
+        '/ves/rbtest/approved-commit' = 'newcommit'
+        # A second anchor that DOES name the restored release, for the case where a
+        # rollback is run after the pin has already been moved back.
+        '/ves/rbtest/prior-baseline-hash' = $script:V1Hash
     } | Out-Null
 
     # Fresh target (holding the bad v2) + a backup of v1, per test.
@@ -224,6 +244,33 @@ Describe 'post-rollback proof' {
         $r.Output | Should -Match 'Post-rollback verify failed'
     }
 
+    It 'proves a good restore even though the live pin still names the release being rolled back' {
+        # The regression this guards: -TrustParam was passed to the post-rollback
+        # verify unconditionally, so the restored release's manifest was compared
+        # against an anchor naming the FAILED release and a byte-perfect restore
+        # exited 2. This is the README's documented operator command shape.
+        $c = New-Case 'anchor-stale' -Record @{
+            priorSsm = @{ trustHash = $script:V1Hash; trustHashRead = $true; approvedCommit = 'oldcommit'; approvedCommitRead = $true }
+        }
+        $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c @(
+                '-ManifestPath', $script:V1Manifest, '-TrustParam', '/ves/rbtest/baseline-hash'))
+        $r.ExitCode | Should -Be 0
+        # and it says so, rather than quietly dropping the anchor
+        $r.Output | Should -Match 'NOT SSM-anchored'
+        $r.Output | Should -Match 'release being rolled back'
+    }
+
+    It 'still cross-checks SSM when the anchor genuinely names the restored release' {
+        $c = New-Case 'anchor-fresh' -Record @{
+            priorSsm = @{ trustHash = $script:V1Hash; trustHashRead = $true; approvedCommit = 'oldcommit'; approvedCommitRead = $true }
+        }
+        $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c @(
+                '-ManifestPath', $script:V1Manifest, '-TrustParam', '/ves/rbtest/prior-baseline-hash'))
+        $r.ExitCode | Should -Be 0
+        $r.Output | Should -Match 'SSM-anchored'
+        $r.Output | Should -Match 'Manifest trust verified against SSM'
+    }
+
     It 'exits 3 when the restore is clean but the processor is not healthy' {
         $c = New-Case 'health'
         $emptyLogs = Join-Path $c.Case 'logs-empty'
@@ -309,9 +356,12 @@ Describe 'trust re-pin' {
         Remove-Item -LiteralPath $script:CallLog -Force -ErrorAction SilentlyContinue
         $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c @(
                 '-ManifestPath', $v2Manifest, '-RepinTrust', '-TrustParam', '/ves/rbtest/baseline-hash'))
-        # exit 2, not 1: the v2 manifest also fails the SSM trust check, which
-        # outranks plain drift. Either way the verify did not pass, so no re-pin.
-        $r.ExitCode | Should -Be 2
+        # Exit 1: the restored v1 tree genuinely differs from the v2 manifest it was
+        # verified against. The live pin names v2 (the release being rolled away
+        # from), so it is correctly NOT used as the anchor -- the failure reported is
+        # the real drift, not a trust error standing in for one.
+        $r.ExitCode | Should -Be 1
+        $r.Output | Should -Match 'NOT SSM-anchored'
         $r.Output | Should -Match 'TRUST RE-PIN SKIPPED'
         (Get-VesStubCalls $script:CallLog) | Should -Not -Match 'put-parameter'
     }

@@ -82,18 +82,45 @@ function Get-FlatConfig([string]$path, [string]$format) {
             function Walk($o, $prefix) {
                 foreach ($p in $o.PSObject.Properties) {
                     $key = if ($prefix) { "$prefix`:$($p.Name)" } else { $p.Name }
-                    if ($p.Value -is [psobject] -and $p.Value.PSObject.Properties.Count) { Walk $p.Value $key }
+                    if ($p.Value -is [System.Array]) {
+                        # Index array elements instead of letting "$($p.Value)" collapse
+                        # them to a space-joined string, where ["a b"] and ["a","b"] are
+                        # indistinguishable and either could compare equal to "a b".
+                        for ($i = 0; $i -lt $p.Value.Count; $i++) {
+                            if ($p.Value[$i] -is [psobject] -and $p.Value[$i].PSObject.Properties.Count) {
+                                Walk $p.Value[$i] ("{0}:{1}" -f $key, $i)
+                            }
+                            else { $script:__m[("{0}:{1}" -f $key, $i)] = "$($p.Value[$i])" }
+                        }
+                    }
+                    elseif ($p.Value -is [psobject] -and $p.Value.PSObject.Properties.Count) { Walk $p.Value $key }
                     else { $script:__m[$key] = "$($p.Value)" }
                 }
             }
             $script:__m = @{}; Walk $obj ''; $map = $script:__m
         }
-        # Java .properties style: key=value per line, skipping comments
+        # Java .properties, per the format spec rather than just "key=value":
+        #   '!' opens a comment exactly like '#'
+        #   ':' separates key from value exactly like '='  (first unescaped one wins)
+        #   an odd number of trailing backslashes continues the logical line
+        # Getting these wrong is not cosmetic: an undeclared '!'-commented line
+        # parsed as a real key, and the exhaustive-contract rule then reported it as
+        # UNDECLARED-KEY drift on a config that was never wrong.
         'keyvalue' {
-            foreach ($line in (Get-Content -LiteralPath $path)) {
-                if ($line -match '^\s*#') { continue }
-                if ($line -match '^\s*([^=]+?)\s*=\s*(.*)$') { $map[$Matches[1]] = $Matches[2] }
+            $pending = $null
+            foreach ($raw in (Get-Content -LiteralPath $path)) {
+                # a continued line's leading whitespace is not part of the value
+                $line = if ($null -ne $pending) { $pending + $raw.TrimStart() } else { $raw }
+                $pending = $null
+                if ([string]::IsNullOrWhiteSpace($line) -or $line -match '^\s*[#!]') { continue }
+                # count trailing backslashes: odd = continuation, even = escaped literals
+                $trailing = 0
+                for ($i = $line.Length - 1; $i -ge 0 -and $line[$i] -eq '\'; $i--) { $trailing++ }
+                if ($trailing % 2 -eq 1) { $pending = $line.Substring(0, $line.Length - 1); continue }
+                if ($line -match '^\s*([^=:]+?)\s*[=:]\s*(.*)$') { $map[$Matches[1]] = $Matches[2] }
             }
+            # a file ending mid-continuation still contributes its partial line
+            if ($null -ne $pending -and $pending -match '^\s*([^=:]+?)\s*[=:]\s*(.*)$') { $map[$Matches[1]] = $Matches[2] }
         }
         default { throw "Unknown contract format: $format" }
     }

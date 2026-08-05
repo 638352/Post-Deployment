@@ -78,7 +78,7 @@ function Stop-Gate([int]$code) {
 }
 
 # central block path: log the reason, honor an audited break-glass override, else block the deploy
-function Fail-Gate([string]$msg) {
+function Deny-Gate([string]$msg) {
     Write-VesLog ERROR "GATE FAIL: $msg" -Data @{processor = $Processor; staged = $StagedCommit } -LogFile $LogFile
     if ($AllowOverride) {
         if ([string]::IsNullOrWhiteSpace($OverrideReason)) {
@@ -123,7 +123,7 @@ try {
     Write-VesLog INFO "Approved commit (SSM): $approved" -LogFile $LogFile
 
     if ($StagedCommit -ne $approved) {
-        Fail-Gate "Staged commit $StagedCommit != approved $approved"
+        Deny-Gate "Staged commit $StagedCommit != approved $approved"
     }
     Write-VesLog OK 'Commit gate PASS.' -LogFile $LogFile
 
@@ -134,15 +134,21 @@ try {
         $stagedFull = [IO.Path]::GetFullPath((Get-Item -LiteralPath $StagedRoot -ErrorAction Stop).FullName).TrimEnd('\')
         $stagedPrefix = $stagedFull + '\'
         foreach ($relativePath in $RequiredArtifactPaths) {
+            # Stop-Gate USAGE, not Deny-Gate: a malformed or rooted path is a caller
+            # error, not a property of the artifact. Routing it through Deny-Gate put
+            # it behind the break-glass path, where -AllowOverride would turn a typo
+            # in -RequiredArtifactPaths into a gate PASS.
             if ([string]::IsNullOrWhiteSpace($relativePath) -or [IO.Path]::IsPathRooted($relativePath)) {
-                Fail-Gate "Invalid required artifact path '$relativePath'; paths must be non-empty and relative to StagedRoot."
+                Write-VesLog ERROR "Invalid required artifact path '$relativePath'; paths must be non-empty and relative to StagedRoot." -LogFile $LogFile
+                Stop-Gate $VES_EXIT_USAGE
             }
             $candidate = [IO.Path]::GetFullPath((Join-Path $stagedFull $relativePath))
             if (-not $candidate.StartsWith($stagedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                Fail-Gate "Invalid required artifact path '$relativePath'; path escapes StagedRoot."
+                Write-VesLog ERROR "Invalid required artifact path '$relativePath'; path escapes StagedRoot." -LogFile $LogFile
+                Stop-Gate $VES_EXIT_USAGE
             }
             if (-not (Test-Path -LiteralPath $candidate)) {
-                Fail-Gate "Deployment blocked: $relativePath is missing from the artifact."
+                Deny-Gate "Deployment blocked: $relativePath is missing from the artifact."
             }
             Write-VesLog OK "Required artifact path present: $relativePath" -LogFile $LogFile
         }
@@ -177,6 +183,15 @@ try {
             if (-not $tagManifest.Consistent) {
                 throw "Tag-archived manifest is internally inconsistent (tampered or corrupt): $($tagManifest.Source)"
             }
+            # This script has no -ExcludePattern: it always hashes StagedRoot with the
+            # module default. A baseline captured under different rules therefore can
+            # never match here, and the resulting hash mismatch would be reported as a
+            # blocked deploy rather than as the misconfiguration it is.
+            $tagPattern = Test-VesExcludePattern -ManifestDoc $tagManifest.Doc -ExcludePattern $Global:VES_DEFAULT_EXCLUDE
+            if ($tagPattern.Known -and -not $tagPattern.Match) {
+                throw ("Tag-archived manifest was captured under a different exclude pattern ('{0}') than this gate compares with ('{1}'); the comparison would be meaningless. Re-capture and re-pin." -f `
+                        $tagPattern.Recorded, $tagPattern.Effective)
+            }
             Write-VesLog OK ("Baseline manifest read from Git release tag {0} ({1})." -f $ReleaseTag, $tagManifest.Source) -LogFile $LogFile
             if ($ssmHash -and $tagManifest.RecomputedHash -ne $ssmHash) {
                 throw ("Tag-archived manifest hash {0} does not match the SSM-trusted hash {1}; a rewritten tag cannot relax the gate. Refusing." -f `
@@ -202,7 +217,13 @@ try {
             if ($ManifestPath) {
                 try {
                     $m = Import-VesManifest -Path $ManifestPath
-                    if ($m.Consistent -and $m.RecomputedHash -eq $trustedHash) {
+                    $localPattern = Test-VesExcludePattern -ManifestDoc $m.Doc -ExcludePattern $Global:VES_DEFAULT_EXCLUDE
+                    if ($localPattern.Known -and -not $localPattern.Match) {
+                        # Naming files off a manifest built under other rules would
+                        # invent missing/extra entries that are only pattern artefacts.
+                        Write-VesLog WARN ("Baseline manifest at $ManifestPath was captured under a different exclude pattern ('{0}'); not naming files from it." -f $localPattern.Recorded) -LogFile $LogFile
+                    }
+                    elseif ($m.Consistent -and $m.RecomputedHash -eq $trustedHash) {
                         $namingFiles = $m.Doc.files
                     }
                     else {
@@ -231,7 +252,7 @@ try {
                     $msg = "Deployment blocked: staged artifact does not match the approved release ($counts)"
                 }
             }
-            Fail-Gate $msg
+            Deny-Gate $msg
         }
         Write-VesLog OK 'Content gate PASS.' -LogFile $LogFile
     }
