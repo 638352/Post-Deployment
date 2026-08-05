@@ -200,9 +200,13 @@ function Import-VesTargetInventory {
     }
 
     if ($targets.Count -eq 0) { $errors.Add('Inventory contains no targets.') }
+    # 'trustParam' was an AWS SSM parameter path. There is no AWS in this
+    # environment, so requiring it made every inventory invalid for a value nothing
+    # could read. The anchor is now 'releaseTag' -- already required above, and the
+    # field the manifest is actually verified against.
     $requiredFields = @(
         'processor', 'server', 'environment', 'inventoryStatus', 'releaseTag', 'releaseRoot',
-        'manifestPath', 'trustParam', 'configContract', 'configPath'
+        'manifestPath', 'configContract', 'configPath'
     )
     $seen = @{}
     foreach ($target in $targets) {
@@ -515,114 +519,21 @@ function Compare-VesFiles {
     }
 }
 
-# --- Trust anchor: manifest hash pinned in SSM Parameter Store ----------------
-# The manifest file lives next to the artifacts (mutable). The *trusted* hash
-# lives in SSM (write-gated). Verify reads the trusted hash from SSM, not the
-# file, so an attacker who edits prod files + manifest still fails the check.
-
-function Invoke-VesAwsCli {
-    <#
-    .SYNOPSIS Run the AWS CLI and return StdOut/StdErr/ExitCode without throwing.
-    .NOTES
-      Exists because of two Windows PowerShell 5.1 traps that silently broke every
-      caller here:
-
-      1. Under $ErrorActionPreference='Stop', a native command writing to stderr
-         becomes a *terminating* NativeCommandError -- with '2>&1' AND with '2>$null'.
-         Callers' own "if ($LASTEXITCODE -ne 0) { throw <useful message> }" lines
-         therefore never ran, and the raw CLI text escaped instead. We scope the
-         preference to 'Continue' around the call so control returns to the caller.
-
-      2. Merging streams with '2>&1' splices stderr into the value. The AWS CLI can
-         emit warnings to stderr on a *successful* call, which would corrupt a
-         parameter value. We split the merged stream back apart by object type, so
-         StdOut carries only real output.
-    #>
-    [CmdletBinding()]
-    param(
-        # Arguments passed through to the aws executable.
-        [Parameter(Mandatory)][string[]]$Arguments
-    )
-    # Missing CLI is a clean non-zero result, not a CommandNotFoundException that
-    # would blow past the caller's error handling.
-    if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
-        return [PSCustomObject]@{ StdOut = ''; StdErr = 'AWS CLI not found on PATH'; ExitCode = 127 }
-    }
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $out = & aws @Arguments 2>&1
-        $code = $LASTEXITCODE
-    }
-    finally {
-        # Restore even if the call blows up, so we never leak 'Continue' to the caller.
-        $ErrorActionPreference = $prev
-    }
-    # Split the merged stream: ErrorRecords came from stderr, everything else is stdout.
-    $stdout = @($out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
-    $stderr = @($out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
-        ForEach-Object { $_.ToString() }) -join ' '
-    return [PSCustomObject]@{ StdOut = $stdout; StdErr = $stderr; ExitCode = $code }
-}
-
-function Get-VesTrustedHash {
-    <#
-    .SYNOPSIS Read the SSM-pinned trust value (manifest hash or approved commit SHA).
-    .DESCRIPTION
-      Throws on CLI failure or empty value. Callers must map that to exit 2
-      (NOBASE / trust failure), never to a pass — a missing anchor is unverified.
-      The same helper serves both baseline-hash and approved-commit pins; both
-      are SecureString parameters in Parameter Store.
-    #>
-    [CmdletBinding()]
-    param(
-        # SSM parameter name holding the pinned value, e.g. /ves/vemsoutbound/baseline-hash.
-        [Parameter(Mandatory)][string]$ParameterName,
-        # GovCloud region; default matches the VES deployment.
-        [string]$Region = 'us-gov-west-1'
-    )
-    # Call the AWS CLI directly (no AWSPowerShell module dependency on legacy hosts).
-    # --with-decryption handles SecureString; failure detected via exit code.
-    $r = Invoke-VesAwsCli -Arguments @(
-        'ssm', 'get-parameter', '--name', $ParameterName, '--with-decryption',
-        '--region', $Region, '--query', 'Parameter.Value', '--output', 'text')
-    # Treat CLI failure OR empty value as a trust failure -- never proceed on a blank anchor.
-    if ($r.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($r.StdOut)) {
-        throw ("SSM read failed for $ParameterName (region $Region). aws exit=$($r.ExitCode). $($r.StdErr)").Trim()
-    }
-    # Trim the trailing newline the CLI text output includes.
-    return $r.StdOut.Trim()
-}
-
-function Set-VesTrustedHash {
-    <#
-    .SYNOPSIS Pin a trust value to SSM (SecureString, overwrite).
-    .DESCRIPTION
-      This is the live trust write used by Capture and operator-driven Rollback
-      (-RepinTrust). Deploy auto-rollback must never call it: an automated
-      rewrite of the anchor after a failed deploy is the most dangerous action
-      in the suite. Throws on CLI failure so an unpinned baseline cannot look
-      like success.
-    #>
-    [CmdletBinding()]
-    param(
-        # SSM parameter to write.
-        [Parameter(Mandatory)][string]$ParameterName,
-        # The hash (or commit SHA) to pin as trusted.
-        [Parameter(Mandatory)][string]$Value,
-        # GovCloud region.
-        [string]$Region = 'us-gov-west-1'
-    )
-    # SecureString type gates reads behind kms:Decrypt; --overwrite allows re-pinning on each release.
-    $r = Invoke-VesAwsCli -Arguments @(
-        'ssm', 'put-parameter', '--name', $ParameterName, '--value', $Value,
-        '--type', 'SecureString', '--overwrite', '--region', $Region)
-    # Surface CLI failure as a hard error -- an unpinned baseline must not look like success.
-    if ($r.ExitCode -ne 0) {
-        throw ("SSM write failed for $ParameterName. aws exit=$($r.ExitCode). $($r.StdErr)").Trim()
-    }
-}
-
+# --- Trust anchor -------------------------------------------------------------
+# The trust anchor was AWS SSM Parameter Store: the manifest lived next to the
+# artifacts (mutable) while the trusted hash lived in SSM (write-gated), so an
+# attacker who edited prod files AND the manifest still failed the check.
+#
+# There is no AWS in this environment and there never was, so that anchor was
+# always vacant -- Set-VesTrustedHash never once succeeded, and every verify ran
+# unanchored. Invoke-VesAwsCli / Get-VesTrustedHash / Set-VesTrustedHash are
+# removed rather than left as dead code that documents a control we do not have.
+#
+# The anchor is now the release record archived under the Git release tag, read
+# back by Get-VesManifestFromTag below. It is weaker in one specific way and that
+# must not be glossed: SSM read/write was gated by IAM, whereas the tag is only
+# as immutable as the archive remote makes it. Whoever can move a tag can author
+# an approval.
 # --- Git archive readback: baseline from the release tag ---------------------
 # Capture commits the manifest under baselines/<processor>/ in the archive repo
 # and tags the commit. These helpers read that record back at a given tag so
@@ -1146,8 +1057,7 @@ Export-ModuleMember -Function `
     Write-VesLog, New-VesLogFile, Get-VesOutcome, Import-VesTargetInventory, `
     Get-VesManifest, Get-VesManifestHash, Export-VesManifest, `
     Import-VesManifest, Test-VesExcludePattern, Compare-VesFiles, `
-    Get-VesTrustedHash, Set-VesTrustedHash, `
-    Invoke-VesAwsCli, Invoke-VesGit, Test-VesReleaseTag, Get-VesManifestFromTag, `
+    Invoke-VesGit, Test-VesReleaseTag, Get-VesManifestFromTag, `
     Get-VesWorstExitCode, Get-VesBackupSet, `
     Stop-VesProcessorTarget, Start-VesProcessorTarget, `
     Get-VesAlertType

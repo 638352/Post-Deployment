@@ -41,9 +41,8 @@ param(
     [string]$ManifestPath,
     [string]$ConfigContract,
     [string]$ConfigPath,
-    [string]$TrustParam,
-    # Capture only: git checkout to commit the manifest/contract into, and an
-    # optional release tag to pin the record under (audit layer; see header)
+    # Capture only: git checkout to commit the manifest/contract into, and the
+    # release tag to archive the record under. This IS the trust anchor.
     [string]$ArchiveRepo,
     [string]$ReleaseTag,
     # Verify only: read the baseline manifest out of -ReleaseTag in this git
@@ -56,7 +55,6 @@ param(
     [string]$Processor = 'unknown',
     [string]$CommitSha = 'unknown',
     [string]$Environment = 'prod',
-    [string]$Region = 'us-gov-west-1',
     # Defaults to $Global:VES_DEFAULT_EXCLUDE, resolved after the module import
     # below. It cannot be the param default: defaults bind BEFORE the script body
     # runs, so the module constant does not exist yet at binding time and would
@@ -64,10 +62,16 @@ param(
     # notably .config is excluded by design and checked by Verify-Config.ps1.
     [string]$ExcludePattern,
     [string]$LogFile,
-    # Explicit exceptions for local development only. Normal capture fails
-    # closed unless the manifest is trust-pinned and archived under a release tag.
-    [switch]$AllowUntrustedCapture,
+    # Explicit exception for local development only. Normal capture fails closed
+    # unless the manifest is archived under a release tag.
     [switch]$AllowUnarchivedCapture,
+    # Explicit, logged exception: compare against a local manifest file with no
+    # release-tag anchor. This is a REAL reduction in what a pass means -- the
+    # manifest sits next to the tree it describes, so an edit that rewrote both
+    # is undetectable. Verification refuses without it rather than emitting a
+    # green result that proves only "these two files agree with each other".
+    # Use for local drift scans, never as evidence that production is approved.
+    [switch]$AllowUnanchoredVerify,
     [switch]$Json
 )
 
@@ -112,12 +116,13 @@ try {
         'Capture' {
             if (-not $ReleaseRoot) { Write-VesLog ERROR '-ReleaseRoot required for Capture' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
             if (-not $ManifestPath) { Write-VesLog ERROR '-ManifestPath required for Capture' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
-            if (-not $TrustParam -and -not $AllowUntrustedCapture) {
-                Write-VesLog ERROR 'Capture requires -TrustParam so the baseline is tamper-anchored. Use -AllowUntrustedCapture only for local development.' -LogFile $LogFile
+            # The commitSha recorded here becomes the approved commit the gate
+            # compares against, so a capture that does not record one produces a
+            # release record that can never authorize a deploy. Refuse up front
+            # rather than let the gate discover it later.
+            if ([string]::IsNullOrWhiteSpace($CommitSha) -or $CommitSha -eq 'unknown') {
+                Write-VesLog ERROR 'Capture requires a real -CommitSha: it is recorded in the release record and is what the pre-deploy gate accepts as the approved commit.' -LogFile $LogFile
                 Out-Result $VES_EXIT_USAGE
-            }
-            elseif (-not $TrustParam) {
-                Write-VesLog WARN 'No -TrustParam given; baseline is NOT trust-anchored because -AllowUntrustedCapture was supplied.' -LogFile $LogFile
             }
             if ((-not $ArchiveRepo -or -not $ReleaseTag) -and -not $AllowUnarchivedCapture) {
                 Write-VesLog ERROR 'Capture requires -ArchiveRepo and -ReleaseTag so the approved baseline has a Git release record. Use -AllowUnarchivedCapture only for local development.' -LogFile $LogFile
@@ -139,21 +144,16 @@ try {
             $hash = Export-VesManifest -Manifest $manifest -Path $ManifestPath -CommitSha $CommitSha `
                 -Processor $Processor -ExcludePattern $ExcludePattern
             Write-VesLog OK "Manifest written: $($manifest.Count) files, hash=$hash" -LogFile $LogFile
-            # What the trust anchor pointed at BEFORE this capture. Read it now,
-            # while it is still the previous release's hash: the put-parameter
-            # below overwrites it, and without this the release record has no link
-            # back to the baseline it supersedes. Never fatal -- a first capture
-            # has nothing to read, and Get-VesTrustedHash cannot tell that apart
-            # from a permissions failure.
+            # The baseline this release supersedes. Read from the release record
+            # already in the archive, BEFORE this capture overwrites it -- that is
+            # what chains the tagged records together. Formerly read from the SSM
+            # pin, which never existed in this environment, so the chain has been
+            # null for every release so far. Never fatal: a first capture has no
+            # predecessor, which is indistinguishable from an unreadable one.
             $priorManifestHash = $null
-            if ($TrustParam) {
-                try { $priorManifestHash = Get-VesTrustedHash -ParameterName $TrustParam -Region $Region }
-                catch { Write-VesLog WARN "No prior trusted hash at $TrustParam (first capture, or unreadable): $($_.Exception.Message)" -LogFile $LogFile }
-            }
-            # Audit layer: commit the release record (manifest + contract) to Git and
-            # tag it BEFORE updating the active SSM trust pin. If archival fails,
-            # the currently approved baseline remains active instead of pointing
-            # at an unrecorded manifest.
+            # Audit layer: commit the release record (manifest + contract) to Git
+            # and tag it. The tag IS the trust anchor now, so a capture that
+            # cannot archive has produced nothing the gate can ever accept.
             if ($ArchiveRepo) {
                 if (-not (Test-Path -LiteralPath (Join-Path $ArchiveRepo '.git'))) {
                     throw "-ArchiveRepo is not a git checkout: $ArchiveRepo"
@@ -161,10 +161,29 @@ try {
                 $destRel = Join-Path 'baselines' $Processor
                 $dest = Join-Path $ArchiveRepo $destRel
                 if (-not (Test-Path -LiteralPath $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+                $priorRecordPath = Join-Path $dest 'release-record.json'
+                if (Test-Path -LiteralPath $priorRecordPath) {
+                    try {
+                        $priorRecord = Get-Content -LiteralPath $priorRecordPath -Raw | ConvertFrom-Json
+                        $priorManifestHash = $priorRecord.manifestHash
+                    }
+                    catch {
+                        Write-VesLog WARN "Prior release record at $priorRecordPath is unreadable; the release chain will have a gap: $($_.Exception.Message)" -LogFile $LogFile
+                    }
+                }
                 Copy-Item -LiteralPath $ManifestPath -Destination $dest -Force
+                # Touch what we copied: Copy-Item preserves the SOURCE mtime, and
+                # git on Windows compares index mtimes at whole-second granularity.
+                # A same-length manifest landing with a same-second mtime is
+                # stat-invisible to `git add` -- the commit below would then
+                # "succeed" at archiving nothing (observed under test as the old
+                # release being served under the new tag). Current time makes the
+                # change unmissable.
+                (Get-Item -LiteralPath (Join-Path $dest (Split-Path -Leaf $ManifestPath))).LastWriteTimeUtc = [DateTime]::UtcNow
                 if ($ConfigContract) {
                     if (-not (Test-Path -LiteralPath $ConfigContract)) { throw "Config contract to archive not found: $ConfigContract" }
                     Copy-Item -LiteralPath $ConfigContract -Destination $dest -Force
+                    (Get-Item -LiteralPath (Join-Path $dest (Split-Path -Leaf $ConfigContract))).LastWriteTimeUtc = [DateTime]::UtcNow
                 }
                 # Human- and machine-readable release note stored under the tag.
                 # The tag commit already contains the verification scripts; this
@@ -182,8 +201,7 @@ try {
                     fileCount            = $manifest.Count
                     capturedUtc          = (Get-Date).ToUniversalTime().ToString('o')
                     capturedBy           = "$env:USERNAME@$env:COMPUTERNAME"
-                    trustParam           = $TrustParam
-                    note                 = 'Tagged rollback points begin with the first verified release; anything shipped before that still needs a safe baseline determined manually.'
+                    note                 = 'Tagged rollback points begin with the first verified release; anything shipped before that still needs a safe baseline determined manually. This record IS the trust anchor: its integrity depends on who can move the tag.'
                 }
                 ($releaseRecord | ConvertTo-Json -Depth 5) |
                 Out-File -FilePath (Join-Path $dest 'release-record.json') -Encoding utf8
@@ -213,16 +231,12 @@ try {
                     $result['detail']['pushedTo'] = $Remote
                 }
             }
-            # Activate only after the Git release record is durable.
-            if ($TrustParam) {
-                # Name the value being replaced before replacing it: this write is
-                # what a rollback would have to undo.
-                if ($priorManifestHash -and $priorManifestHash -ne $hash) {
-                    Write-VesLog WARN "Replacing the trust pin at $TrustParam" `
-                        -Data @{priorManifestHash = $priorManifestHash; newManifestHash = $hash } -LogFile $LogFile
-                }
-                Set-VesTrustedHash -ParameterName $TrustParam -Value $hash -Region $Region
-                Write-VesLog OK "Trusted hash pinned to SSM $TrustParam" -LogFile $LogFile
+            # Name the baseline being superseded. There is no separate pin to
+            # activate any more -- committing and tagging the record above IS the
+            # activation, which is why archival failure aborts the capture.
+            if ($priorManifestHash -and $priorManifestHash -ne $hash) {
+                Write-VesLog WARN 'This capture supersedes the previous approved baseline.' `
+                    -Data @{priorManifestHash = $priorManifestHash; newManifestHash = $hash } -LogFile $LogFile
             }
             $result.status = 'captured'; $result.detail['fileCount'] = $manifest.Count; $result.detail['manifestHash'] = $hash
             Out-Result $VES_EXIT_OK
@@ -278,21 +292,25 @@ try {
                 Write-VesLog WARN 'Baseline records no exclude pattern (captured before that field existed); assuming it matches the pattern in use. Re-capture to make this provable.' -LogFile $LogFile
             }
 
-            # trust anchor: confirm the baseline still matches the hash pinned in SSM
-            if ($TrustParam) {
-                $trusted = Get-VesTrustedHash -ParameterName $TrustParam -Region $Region
-                if ($m.RecomputedHash -ne $trusted) {
-                    Write-VesLog ERROR "Manifest not trusted: SSM=$trusted manifest=$($m.RecomputedHash)" -LogFile $LogFile
-                    $result.status = 'no-baseline'; Out-Result $VES_EXIT_NOBASE
-                }
-                Write-VesLog OK 'Manifest trust verified against SSM.' -LogFile $LogFile
+            # Trust anchor. Reading the baseline out of the release tag IS the
+            # anchor: it comes from a separate git object the deployer cannot edit
+            # without moving the tag. A local manifest file is NOT an anchor -- it
+            # lives beside the tree it describes, so the documented attack (edit
+            # prod, re-capture the manifest) defeats it. That case must therefore
+            # be opted into explicitly, not warned about and passed.
+            if ($useTag) {
+                $result['anchored'] = $true
+                Write-VesLog OK ("Baseline anchored to release tag {0}." -f $ReleaseTag) -LogFile $LogFile
+            }
+            elseif ($AllowUnanchoredVerify) {
+                $result['anchored'] = $false
+                Write-VesLog WARN 'UNANCHORED verify: comparing against a local manifest with no release-tag anchor. A pass here does NOT prove the tree matches the approved release.' `
+                    -Data @{runId = $runId; anchored = $false } -LogFile $LogFile
             }
             else {
-                # Verify may continue without SSM (WARN): useful for local drift
-                # scans. Capture fails closed without -TrustParam unless
-                # -AllowUntrustedCapture is set — pinning is part of the release
-                # record, not an optional verify nicety.
-                Write-VesLog WARN 'No -TrustParam; skipping trust anchor (drift-only check).' -LogFile $LogFile
+                $result['anchored'] = $false
+                Write-VesLog ERROR 'No anchor: supply -BaselineRepo/-ReleaseTag to verify against the archived release record, or pass -AllowUnanchoredVerify to accept a local-manifest-only comparison (logged, not evidence of approval).' -LogFile $LogFile
+                $result.status = 'no-baseline'; Out-Result $VES_EXIT_NOBASE
             }
 
             # compare live tree vs baseline and record the missing/changed/extra breakdown
@@ -325,7 +343,7 @@ try {
             Out-Result $VES_EXIT_USAGE
         }
         # delegate the structural config check to Verify-Config.ps1 and capture its pass/fail
-        $cfg = & (Join-Path $PSScriptRoot 'Verify-Config.ps1') -ContractPath $ConfigContract -ConfigPath $ConfigPath -Region $Region -LogFile $LogFile
+        $cfg = & (Join-Path $PSScriptRoot 'Verify-Config.ps1') -ContractPath $ConfigContract -ConfigPath $ConfigPath -LogFile $LogFile
         $result['detail']['config'] = $cfg
         $configOk = [bool]$cfg.pass
         # config-only mode returns on config alone; All mode requires BOTH files and config to pass

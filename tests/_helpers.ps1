@@ -51,47 +51,104 @@ function New-VesTree {
     $Path
 }
 
-function New-VesAwsStub {
-    # Fake `aws` on PATH. Answers ssm get-parameter for the names in -Parameters,
-    # accepts any put-parameter, and fails like a real ParameterNotFound otherwise.
-    # Every invocation is appended to -CallLog so a test can assert that no write
-    # was issued -- "we did not touch the trust anchor" has to be provable, not
-    # inferred from the absence of an error.
+# New-VesAwsStub / Get-VesStubCalls used to fabricate an `aws.cmd` on PATH so the
+# SSM trust anchor could be exercised. There is no AWS in this environment, so
+# those tests were asserting against the stub rather than against any real
+# behaviour. They are gone; the anchor is now a real git archive built by
+# New-VesBaselineArchive below, which needs no faking.
+
+function New-VesBaselineArchive {
+    # A real baseline archive repo: the manifest committed under a release tag.
+    # This IS the trust anchor the gate, verification, preflight and the drift
+    # runner all read, so tests exercise the true mechanism end to end.
+    # Returns the repo path; pass it as -BaselineRepo.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Path,
-        # @{ '/ves/x/baseline-hash' = '<hash>' }
-        [hashtable]$Parameters = @{},
-        [string]$CallLog
+        [Parameter(Mandatory)][string]$Processor,
+        # Manifest file to archive (the capture output).
+        [Parameter(Mandatory)][string]$ManifestPath,
+        [Parameter(Mandatory)][string]$Tag
     )
-    New-Item -ItemType Directory -Path $Path -Force | Out-Null
-    $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add('@echo off')
-    # %* keeps the whole command line; the caller greps it for 'put-parameter'
-    $lines.Add('if not "%VES_STUB_LOG%"=="" echo %*>>"%VES_STUB_LOG%"')
-    # writes always succeed -- the point of the log is proving whether we called it
-    $lines.Add('if "%~2"=="put-parameter" exit /b 0')
-    foreach ($name in $Parameters.Keys) {
-        # %~4 is the value of --name in `ssm get-parameter --name <x> ...`
-        $lines.Add(('if "%~4"=="{0}" echo {1}& exit /b 0' -f $name, $Parameters[$name]))
+    $dest = Join-Path $Path ("baselines\{0}" -f $Processor)
+    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+    $leaf = Join-Path $dest ("{0}.json" -f $Processor)
+    # Checked copy, and then TOUCH the leaf. The flake this kills: Copy-Item
+    # preserves the SOURCE's mtime, two fixture manifests are the same byte
+    # length and were captured within the same wall-clock second, and git on
+    # Windows compares index mtimes at whole-second granularity -- so replacing
+    # the leaf between archive calls looked stat-identical, `git add` staged
+    # nothing, commit said "working tree clean", and the OLD release got tagged
+    # with the NEW tag. Bumping the mtime to now forces git to re-read the file.
+    $srcHash = (Get-FileHash -LiteralPath $ManifestPath -Algorithm SHA256).Hash
+    $tries = 0
+    while ($true) {
+        try {
+            Copy-Item -LiteralPath $ManifestPath -Destination $leaf -Force -ErrorAction Stop
+            if ((Get-FileHash -LiteralPath $leaf -Algorithm SHA256).Hash -eq $srcHash) { break }
+        } catch {}
+        if (++$tries -ge 10) { throw "New-VesBaselineArchive: could not copy $ManifestPath into the archive after $tries tries" }
+        Start-Sleep -Milliseconds 200
     }
-    $lines.Add('echo An error occurred (ParameterNotFound) 1>&2')
-    $lines.Add('exit /b 254')
-    $lines | Set-Content -Path (Join-Path $Path 'aws.cmd') -Encoding ascii
-
-    if ($CallLog) {
-        if (Test-Path -LiteralPath $CallLog) { Remove-Item -LiteralPath $CallLog -Force }
-        $env:VES_STUB_LOG = $CallLog
+    (Get-Item -LiteralPath $leaf).LastWriteTimeUtc = [DateTime]::UtcNow
+    if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) {
+        & git -C $Path init -q . 2>&1 | Out-Null
+        & git -C $Path config user.email 'test@ves.local'
+        & git -C $Path config user.name 'ves tests'
+        # No background maintenance in a test fixture: a post-commit gc can hold
+        # index.lock just long enough to make the NEXT archive call's `git add`
+        # fail, which silently tags the wrong commit (observed as a flake).
+        & git -C $Path config gc.auto 0
+        & git -C $Path config maintenance.auto false
     }
-    $env:PATH = "$Path;$env:PATH"
+    # Every step checked. A helper that can fail partway produces a tag pointing
+    # at the wrong baseline -- the exact corruption the anchor exists to catch --
+    # so retry the lock-prone steps briefly and then fail LOUDLY, never quietly.
+    foreach ($step in @(
+            @('add', '-A'),
+            @('commit', '-qm', ("baseline {0}" -f $Tag)),
+            @('tag', $Tag))) {
+        $tries = 0
+        do {
+            $out = & git -C $Path @step 2>&1
+            if ($LASTEXITCODE -eq 0) { break }
+            $tries++
+            Start-Sleep -Milliseconds 200
+        } while ($tries -lt 5)
+        if ($LASTEXITCODE -ne 0) {
+            # Dump enough state to diagnose: what git thinks changed, what is
+            # committed at HEAD for this leaf, and the bytes on disk right now.
+            $siblings = Get-ChildItem -LiteralPath (Split-Path -Parent $ManifestPath) -Filter '*.json' -ErrorAction SilentlyContinue |
+                ForEach-Object { "  sibling {0}: {1}  mtime={2:o}" -f $_.Name, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.Substring(0, 12), $_.LastWriteTimeUtc }
+            $diag = @(
+                "status: " + ((& git -C $Path status --porcelain 2>&1) -join ' ; ')
+                "log: " + ((& git -C $Path log --oneline --decorate 2>&1) -join ' ; ')
+                "leaf-on-disk: " + (Get-FileHash -LiteralPath $leaf -Algorithm SHA256).Hash.Substring(0, 12)
+                "src-manifest:  " + (Get-FileHash -LiteralPath $ManifestPath -Algorithm SHA256).Hash.Substring(0, 12)
+                "src-content: " + ((Get-Content -LiteralPath $ManifestPath -Raw) -replace '\s+', ' ')
+            ) + $siblings -join "`n"
+            throw ("New-VesBaselineArchive: git {0} failed after {1} tries: {2}`n{3}" -f ($step -join ' '), $tries, ($out | Out-String), $diag)
+        }
+    }
+    # Prove the tag serves the manifest we were given, byte-for-byte semantics
+    # (compare the recorded manifestHash, which ignores BOM/EOL differences).
+    $archived = (& git -C $Path show ("{0}:baselines/{1}/{1}.json" -f $Tag, $Processor)) -join "`n"
+    $wantHash = (Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json).manifestHash
+    $gotHash = ($archived -replace '^\xEF\xBB\xBF|^﻿', '' | ConvertFrom-Json).manifestHash
+    if ($gotHash -ne $wantHash) {
+        throw ("New-VesBaselineArchive: tag {0} serves manifestHash {1}, expected {2} -- the archive is corrupt, do not run tests against it." -f $Tag, $gotHash, $wantHash)
+    }
     $Path
 }
 
-function Get-VesStubCalls {
-    # Text of every stubbed aws invocation so far ('' when none were made).
-    param([Parameter(Mandatory)][string]$CallLog)
-    if (-not (Test-Path -LiteralPath $CallLog)) { return '' }
-    (Get-Content -LiteralPath $CallLog -Raw)
+function Remove-VesBaselineArchive {
+    # git writes loose objects read-only; Pester's TestDrive teardown does a plain
+    # Delete() and fails the whole container on them even when every test passed.
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue |
+        ForEach-Object { try { $_.IsReadOnly = $false } catch {} }
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 function New-VesBackupFolder {
@@ -123,7 +180,7 @@ function New-VesBackupFolder {
             createdBy        = "test@$env:COMPUTERNAME"
             initials         = $Initials
             sourceTargetRoot = ''
-            priorSsm         = [ordered]@{ trustHash = $null; trustHashRead = $false; approvedCommit = $null; approvedCommitRead = $false; readError = $null }
+            incomingManifestHash = $null
         }
         foreach ($k in $Record.Keys) { $doc[$k] = $Record[$k] }
         ($doc | ConvertTo-Json -Depth 6) | Out-File -FilePath (Join-Path $dir 'rollback-record.json') -Encoding utf8

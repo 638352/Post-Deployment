@@ -46,14 +46,15 @@
 param(
     [Parameter(Mandatory)][string]$StagedRoot,
     [Parameter(Mandatory)][string]$StagedCommit,
-    # Release tag of the approved baseline (e.g. SYSTEM_NAME/v1.4.0); recorded
-    # in every stage's run log. With -BaselineRepo the gate/verify also
-    # cross-check the manifest archived under that tag.
-    [string]$ReleaseTag,
-    [string]$BaselineRepo,
+    # The anchor: this deploy's release tag (e.g. SYSTEM_NAME/v1.4.0) and the
+    # baseline archive checkout it is recorded in. Both mandatory here because
+    # Deploy-Processor refuses to run without them -- there is no unanchored
+    # deploy -- and a wrapper that let them default would just fail later with a
+    # less helpful message.
+    [Parameter(Mandatory)][string]$ReleaseTag,
+    [Parameter(Mandatory)][string]$BaselineRepo,
     [ValidateSet('dev', 'qa', 'uat', 'prod', 'production')][string]$Environment = 'uat',
-    [string]$AuditLogDir,
-    [string]$Region = 'us-gov-west-1'
+    [string]$AuditLogDir
 )
 $ErrorActionPreference = 'Stop'
 $core = Split-Path -Parent $PSScriptRoot
@@ -72,8 +73,6 @@ $fixed = @{
     # Per-tier install folder (SERVERS.md): not ...\Processors\SYSTEM_NAME
     TargetRoot             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor'
     ManifestPath           = 'D:\baselines\SYSTEM_NAME.json'
-    TrustParam             = '/ves/SYSTEM_NAME/baseline-hash'
-    ApprovedCommitParam    = '/ves/SYSTEM_NAME/approved-commit'
     ConfigContract         = 'D:\baselines\SYSTEM_NAME.config.json'
     ConfigPath             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe.config'
     # dated backup of the current prod files before overwrite (runbook convention)
@@ -103,8 +102,8 @@ $fixed = @{
 
 # -WhatIf propagates via $WhatIfPreference; Deploy-Processor then runs gate-only
 $passthru = @{}
-if ($ReleaseTag) { $passthru['ReleaseTag'] = $ReleaseTag }
-if ($BaselineRepo) { $passthru['BaselineRepo'] = $BaselineRepo }
+$passthru['ReleaseTag'] = $ReleaseTag
+$passthru['BaselineRepo'] = $BaselineRepo
 & (Join-Path $core 'Deploy-Processor.ps1') @fixed @passthru `
-    -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Environment $Environment -Region $Region -LogFile $log
+    -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Environment $Environment -LogFile $log
 exit $LASTEXITCODE

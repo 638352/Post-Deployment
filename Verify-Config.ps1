@@ -48,7 +48,6 @@
 param(
     [Parameter(Mandatory)][string]$ContractPath,
     [Parameter(Mandatory)][string]$ConfigPath,
-    [string]$Region = 'us-gov-west-1',
     [string]$LogFile
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
@@ -201,23 +200,37 @@ foreach ($k in $machineKeys) {
     if (-not (Test-PresentValue $k)) { Add-MissingKey $k }
 }
 
-# expected values held in Parameter Store rather than the contract file, so a
-# tampered contract can't relax them. Get-VesTrustedHash is the generic SSM
-# SecureString reader; a failed read throws and the run ends as trust failure.
+# ssmExpectedValues held the expected value of sensitive settings in AWS
+# Parameter Store so a tampered contract could not relax them. There is no AWS in
+# this environment, so that check CANNOT be performed.
+#
+# This refuses instead of skipping, deliberately. These keys were also registered
+# as "known" for the undeclared-key sweep below, so quietly dropping the loop
+# would not merely stop checking them -- it would make them invisible: present in
+# the live config, unverified, and not reported as undeclared either. A contract
+# that asks for a check this environment cannot perform is unusable, not optional.
 $ssmProps = if ($contract.PSObject.Properties['ssmExpectedValues'] -and $contract.ssmExpectedValues) {
     @($contract.ssmExpectedValues.PSObject.Properties)
 }
 else { @() }
 if ($ssmProps.Count) {
-    foreach ($p in $ssmProps) {
-        $expected = Get-VesTrustedHash -ParameterName $p.Value -Region $Region
-        if (-not (Test-PresentValue $p.Name)) { Add-MissingKey $p.Name; continue }
-        if ($live[$p.Name] -ne $expected) {
-            # actual is ALWAYS masked here: the pinned value is SecureString-gated
-            # in SSM, so the live value it diverged from is treated as sensitive too.
-            $valueMismatch.Add([PSCustomObject]@{ key = $p.Name; expected = "(ssm:$($p.Value))"; actual = '(masked)' })
-        }
+    $names = ($ssmProps | ForEach-Object { $_.Name }) -join ', '
+    Write-VesLog ERROR ("Contract declares ssmExpectedValues ({0}) but there is no Parameter Store in this environment, so those values cannot be verified. Move them to expectedValues, or remove them and cover the setting another way -- do not leave them declared and unchecked." -f $names) -LogFile $LogFile
+    Write-VesLog ERROR 'RUN END: configuration verification outcome=FAIL' `
+        -Data @{runId = $runId; outcome = 'FAIL' } -LogFile $LogFile
+    # Same shape the normal path emits, so Invoke-Verification folds it in
+    # identically instead of hitting a missing property.
+    [PSCustomObject]@{
+        pass               = $false
+        missingRequired    = @()
+        valueMismatch      = @()
+        extraKeys          = @()
+        machineKeysIgnored = $machineKeys
+        ignoredKeys        = @()
+        unverifiable       = $names
     }
+    if ($ExitWithCode) { exit $VES_EXIT_NOBASE }
+    return
 }
 
 # Every live setting must be declared. requiredKeys, expectedValues,

@@ -1,7 +1,8 @@
 #Requires -Version 5.1
-# Invoke-Verification.ps1 file-match checks only. No -TrustParam anywhere, so
-# nothing hits SSM. Checks the file verification contract:
-# 0 match, 1 drift, 2 no baseline, 10 usage.
+# Invoke-Verification.ps1 file-match checks only, run with -AllowUnanchoredVerify
+# because no tag anchor is configured here -- the anchored path is covered by the
+# Deploy-Processor, Rollback, and Preflight suites against a real archive repo.
+# Checks the file verification contract: 0 match, 1 drift, 2 no baseline, 10 usage.
 
 BeforeAll {
     . (Join-Path $PSScriptRoot '_helpers.ps1')
@@ -15,7 +16,7 @@ BeforeAll {
         '-ReleaseRoot',$script:Release,
         '-ManifestPath',$script:ManifestPath,
         '-Processor','test',
-        '-AllowUntrustedCapture',
+        '-CommitSha', 'testcommit1',
         '-AllowUnarchivedCapture',
         '-Json')
 }
@@ -29,7 +30,7 @@ Describe 'UAT-to-production file match flow' {
 
     It 'passes a matching tree' {
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
-            '-Mode','VerifyFiles','-ReleaseRoot',$script:Release,
+            '-Mode','VerifyFiles','-AllowUnanchoredVerify','-ReleaseRoot',$script:Release,
             '-ManifestPath',$script:ManifestPath,'-Json')
         $r.ExitCode    | Should -Be 0
         $r.Json.status | Should -Be 'match'
@@ -39,7 +40,7 @@ Describe 'UAT-to-production file match flow' {
         $drift = New-VesTree (Join-Path $script:Root 'drift')
         Set-Content -Path (Join-Path $drift 'app.txt') -Value 'CHANGED' -NoNewline
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
-            '-Mode','VerifyFiles','-ReleaseRoot',$drift,
+            '-Mode','VerifyFiles','-AllowUnanchoredVerify','-ReleaseRoot',$drift,
             '-ManifestPath',$script:ManifestPath,'-Json')
         $r.ExitCode    | Should -Be 1
         $r.Json.status | Should -Be 'drift'
@@ -52,7 +53,7 @@ Describe 'UAT-to-production file match flow' {
         $doc.files[0].Sha256 = ('F' * 64)
         ($doc | ConvertTo-Json -Depth 6) | Out-File -FilePath $tampered -Encoding utf8
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
-            '-Mode','VerifyFiles','-ReleaseRoot',$script:Release,
+            '-Mode','VerifyFiles','-AllowUnanchoredVerify','-ReleaseRoot',$script:Release,
             '-ManifestPath',$tampered,'-Json')
         $r.ExitCode | Should -Be 2
         $r.Output   | Should -Match 'self-hash mismatch'
@@ -60,12 +61,12 @@ Describe 'UAT-to-production file match flow' {
 
     It 'exits 10 without -ManifestPath' {
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
-            '-Mode','VerifyFiles','-ReleaseRoot',$script:Release,'-Json')
+            '-Mode','VerifyFiles','-AllowUnanchoredVerify','-ReleaseRoot',$script:Release,'-Json')
         $r.ExitCode | Should -Be 10
     }
     It 'exits 10 when file verification has no release root' {
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
-            '-Mode','VerifyFiles',
+            '-Mode','VerifyFiles','-AllowUnanchoredVerify',
             '-ManifestPath',$script:ManifestPath,
             '-Json')
         $r.ExitCode | Should -Be 10
@@ -87,7 +88,7 @@ Describe 'capture and compare must use the same exclude rules' {
             '-ManifestPath',$script:CustomManifest,
             '-ExcludePattern',$script:CustomPattern,
             '-Processor','test',
-            '-AllowUntrustedCapture','-AllowUnarchivedCapture','-Json')
+            '-CommitSha', 'testcommit1','-AllowUnarchivedCapture','-Json')
     }
 
     It 'records the pattern it captured under' {
@@ -98,7 +99,7 @@ Describe 'capture and compare must use the same exclude rules' {
 
     It 'exits 2 (not 1) when the verify pattern differs from the capture pattern' {
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
-            '-Mode','VerifyFiles','-ReleaseRoot',$script:Release,
+            '-Mode','VerifyFiles','-AllowUnanchoredVerify','-ReleaseRoot',$script:Release,
             '-ManifestPath',$script:CustomManifest,'-Json')
         # NOBASE: the baseline is unusable here, production is not wrong
         $r.ExitCode | Should -Be 2
@@ -107,7 +108,7 @@ Describe 'capture and compare must use the same exclude rules' {
 
     It 'passes when the same pattern is supplied again' {
         $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
-            '-Mode','VerifyFiles','-ReleaseRoot',$script:Release,
+            '-Mode','VerifyFiles','-AllowUnanchoredVerify','-ReleaseRoot',$script:Release,
             '-ManifestPath',$script:CustomManifest,
             '-ExcludePattern',$script:CustomPattern,'-Json')
         $r.ExitCode    | Should -Be 0

@@ -22,17 +22,17 @@
 param(
     [Parameter(Mandatory)][string]$StagedRoot,
     [Parameter(Mandatory)][string]$StagedCommit,
-    # Release tag of the approved baseline (e.g. OutboundDBQ/v1.4.0); recorded
-    # in every stage's run log. With -BaselineRepo the gate/verify also
-    # cross-check the manifest archived under that tag.
-    [string]$ReleaseTag,
-    [string]$BaselineRepo,
+    # The anchor: this deploy's release tag (e.g. OutboundDBQ/v1.4.0) and the
+    # baseline archive checkout it is recorded in. Both mandatory here because
+    # Deploy-Processor refuses to run without them -- there is no unanchored
+    # deploy -- and a wrapper that let them default would just fail later with a
+    # less helpful message.
+    [Parameter(Mandatory)][string]$ReleaseTag,
+    [Parameter(Mandatory)][string]$BaselineRepo,
     # Required until the two values marked CONFIRM below have been checked
     # against the current Outbound Deployment Steps runbook.
     [switch]$ConfirmedRunbookValues,
-    [string]$AuditLogDir,
-    # OMS SSM convention may be us-gov-east-1, not west - confirm the param path/region
-    [string]$Region = 'us-gov-west-1'
+    [string]$AuditLogDir
 )
 $ErrorActionPreference = 'Stop'
 $core = Split-Path -Parent $PSScriptRoot
@@ -53,8 +53,6 @@ $fixed = @{
     Processor              = 'OutboundDBQ'
     TargetRoot             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor'
     ManifestPath           = 'D:\baselines\OutboundDBQ.json'
-    TrustParam             = '/ves/OutboundDBQ/baseline-hash'
-    ApprovedCommitParam    = '/ves/OutboundDBQ/approved-commit'
     ConfigContract         = 'D:\baselines\OutboundDBQ.config.json'
     ConfigPath             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe.config'
     BackupRoot             = 'C:\VLER_TEST_OUTBOUND\Processors\BackUp'
@@ -71,9 +69,9 @@ $fixed = @{
 }
 
 $passthru = @{}
-if ($ReleaseTag) { $passthru['ReleaseTag'] = $ReleaseTag }
-if ($BaselineRepo) { $passthru['BaselineRepo'] = $BaselineRepo }
+$passthru['ReleaseTag'] = $ReleaseTag
+$passthru['BaselineRepo'] = $BaselineRepo
 & (Join-Path $core 'Deploy-Processor.ps1') @fixed @passthru `
-    -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Environment 'uat' -Region $Region -LogFile $log
+    -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Environment 'uat' -LogFile $log
 # Hardcoded uat: PROD paths/hosts live on VESEMSEGRESS02/03 and need a separate wrapper.
 exit $LASTEXITCODE

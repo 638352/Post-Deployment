@@ -16,21 +16,23 @@ BeforeAll {
     $script:Root = Join-Path $TestDrive 'dp'
     $script:Release = New-VesTree (Join-Path $script:Root 'release')
     $script:Staged = New-VesTree (Join-Path $script:Root 'staged')   # identical tree = same manifest hash
-    $script:ManifestPath = Join-Path $script:Root 'baseline.json'
+    # Named <Processor>.json: that is the capture convention the archive stores
+    # under, and the gate derives the archived leaf from this local name.
+    $script:ManifestPath = Join-Path $script:Root 'dptest.json'
 
     $cap = Invoke-VesScript 'Invoke-Verification.ps1' @(
         '-Mode', 'Capture', '-ReleaseRoot', $script:Release,
         '-ManifestPath', $script:ManifestPath, '-Processor', 'dptest',
-        '-AllowUntrustedCapture', '-AllowUnarchivedCapture')
+        '-CommitSha', 'abc1234', '-AllowUnarchivedCapture')
     if ($cap.ExitCode -ne 0) { throw "baseline capture failed: $($cap.Output)" }
     $script:TrustedHash = (Get-Content -LiteralPath $script:ManifestPath -Raw | ConvertFrom-Json).manifestHash
 
     $script:OrigPath = $env:PATH
-    $script:CallLog = Join-Path $TestDrive 'aws-calls-dp.txt'
-    New-VesAwsStub -Path (Join-Path $TestDrive 'awsstub-dp') -CallLog $script:CallLog -Parameters @{
-        '/ves/dptest/approved-commit' = 'abc1234'
-        '/ves/dptest/baseline-hash'   = $script:TrustedHash
-    } | Out-Null
+    # The trust anchor: the captured manifest committed under the release tag.
+    # -StagedCommit below must equal the commitSha recorded in it (abc1234) --
+    # that pairing IS the commit gate.
+    $script:Archive = New-VesBaselineArchive -Path (Join-Path $script:Root 'archive') `
+        -Processor 'dptest' -ManifestPath $script:ManifestPath -Tag 'dptest/v1.0.0'
 
     # A log dir with a file written just now: the fresh-log liveness probe passes.
     $script:FreshLogs = Join-Path $script:Root 'logs-fresh'
@@ -48,8 +50,8 @@ BeforeAll {
             '-TargetRoot', $TargetRoot,
             '-StagedCommit', 'abc1234',
             '-ManifestPath', $script:ManifestPath,
-            '-TrustParam', '/ves/dptest/baseline-hash',
-            '-ApprovedCommitParam', '/ves/dptest/approved-commit',
+            '-BaselineRepo', $script:Archive,
+            '-ReleaseTag', 'dptest/v1.0.0',
             '-FreshLogDir', $script:FreshLogs
         ) + $Extra
     }
@@ -71,7 +73,7 @@ BeforeAll {
 
 AfterAll {
     $env:PATH = $script:OrigPath
-    $env:VES_STUB_LOG = $null
+    Remove-VesBaselineArchive -Path $script:Archive
 }
 
 Describe 'clean deploy' {
@@ -142,15 +144,13 @@ Describe 'backup and rollback record' {
         $rec.processor | Should -Be 'dptest'
         $rec.replacedByCommit | Should -Be 'abc1234'
         $rec.sourceTargetRoot | Should -Be $script:BkTarget
-        $rec.trustParam | Should -Be '/ves/dptest/baseline-hash'
+        $rec.baselineRepo | Should -Be $script:Archive
     }
 
-    It 'records the SSM values that were in force before this release' {
+    It 'records the hash of the incoming release, so a rollback can tell what replaced this backup' {
         $rec = Get-Content -LiteralPath (Join-Path $script:BkDir.FullName 'rollback-record.json') -Raw | ConvertFrom-Json
-        $rec.priorSsm.trustHashRead | Should -BeTrue
-        $rec.priorSsm.trustHash | Should -Be $script:TrustedHash
-        $rec.priorSsm.approvedCommitRead | Should -BeTrue
-        $rec.priorSsm.approvedCommit | Should -Be 'abc1234'
+        $rec.incomingManifestHash | Should -Be $script:TrustedHash
+        $rec.replacedByReleaseTag | Should -Be 'dptest/v1.0.0'
     }
 
     It 'writes a backup-manifest.json of the pre-deploy tree' {
@@ -219,7 +219,7 @@ Describe '-AutoRollback' {
     function script:New-AutoArgs([string]$Target, [string]$Backups, [string[]]$Extra = @()) {
         @('-Processor', 'dptest', '-StagedRoot', $script:Staged, '-TargetRoot', $Target,
             '-StagedCommit', 'abc1234', '-ManifestPath', $script:ManifestPath,
-            '-TrustParam', '/ves/dptest/baseline-hash', '-ApprovedCommitParam', '/ves/dptest/approved-commit',
+            '-BaselineRepo', $script:Archive, '-ReleaseTag', 'dptest/v1.0.0',
             '-BackupRoot', $Backups, '-FreshLogDir', (Join-Path $Target 'logs')) + $Extra
     }
 
@@ -254,7 +254,7 @@ Describe '-AutoRollback' {
         $r = Invoke-VesScript 'Deploy-Processor.ps1' @(
             '-Processor', 'dptest', '-StagedRoot', $script:Staged, '-TargetRoot', $target,
             '-StagedCommit', 'abc1234', '-ManifestPath', $script:ManifestPath,
-            '-TrustParam', '/ves/dptest/baseline-hash', '-ApprovedCommitParam', '/ves/dptest/approved-commit',
+            '-BaselineRepo', $script:Archive, '-ReleaseTag', 'dptest/v1.0.0',
             '-BackupRoot', (Join-Path $script:Root 'backups-unproven'), '-FreshLogDir', $dead, '-AutoRollback')
         $r.ExitCode | Should -Be 2
         $r.Output | Should -Match 'AUTO-ROLLBACK RESTORED BUT UNPROVEN'
@@ -268,7 +268,7 @@ Describe '-AutoRollback' {
         $r = Invoke-VesScript 'Deploy-Processor.ps1' @(
             '-Processor', 'dptest', '-StagedRoot', $script:Staged, '-TargetRoot', $target,
             '-StagedCommit', 'abc1234', '-ManifestPath', $script:ManifestPath,
-            '-TrustParam', '/ves/dptest/baseline-hash', '-ApprovedCommitParam', '/ves/dptest/approved-commit',
+            '-BaselineRepo', $script:Archive, '-ReleaseTag', 'dptest/v1.0.0',
             '-BackupRoot', (Join-Path $script:Root 'backups-none'), '-FreshLogDir', $script:DeadLogs, '-AutoRollback')
         $r.ExitCode | Should -Be 2
         $r.Output | Should -Match 'AUTO-ROLLBACK UNAVAILABLE'

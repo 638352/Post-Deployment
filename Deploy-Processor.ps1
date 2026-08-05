@@ -50,8 +50,6 @@ param(
     [string]$TargetRoot,
     [string]$StagedCommit,
     [string]$ManifestPath,
-    [string]$TrustParam,
-    [string]$ApprovedCommitParam,
     # Release tag of the approved baseline (e.g. OutboundDBQ/v1.4.0). Threaded
     # through the gate, verification, and health stages so every stage's run log
     # names the release it checked. With -BaselineRepo the gate and verification
@@ -110,7 +108,6 @@ param(
     [int]$FreshLogMaxAgeMinutes = 60,
     [string]$ProcessArgumentPattern,
     [string]$Environment = 'prod',
-    [string]$Region = 'us-gov-west-1',
     [string]$LogFile
 )
 # Backup and rollback capabilities:
@@ -172,8 +169,6 @@ if ($Rollback) {
     if ($RollbackReleaseTag) { $rbArgs += '-ReleaseTag', $RollbackReleaseTag }
     if ($RollbackManifestPath) { $rbArgs += '-ManifestPath', $RollbackManifestPath }
     if ($BaselineRepo) { $rbArgs += '-BaselineRepo', $BaselineRepo }
-    if ($TrustParam) { $rbArgs += '-TrustParam', $TrustParam }
-    if ($ApprovedCommitParam) { $rbArgs += '-ApprovedCommitParam', $ApprovedCommitParam }
     if ($RollbackBackup) { $rbArgs += '-BackupDir', $RollbackBackup }
     if ($RollbackReason) { $rbArgs += '-Reason', $RollbackReason }
     if ($ConfigPath) { $rbArgs += '-ConfigPath', $ConfigPath }
@@ -186,7 +181,7 @@ if ($Rollback) {
     if ($HealthUrl) { $rbArgs += '-HealthUrl', $HealthUrl }
     if ($FreshLogDir) { $rbArgs += '-FreshLogDir', $FreshLogDir, '-FreshLogMaxAgeMinutes', "$FreshLogMaxAgeMinutes" }
     if ($ProcessArgumentPattern) { $rbArgs += '-ProcessArgumentPattern', $ProcessArgumentPattern }
-    $rbArgs += '-Initials', $Initials, '-Environment', $Environment, '-Region', $Region
+    $rbArgs += '-Initials', $Initials, '-Environment', $Environment
     if ($LogFile) { $rbArgs += '-LogFile', $LogFile }
     # -WhatIf does not cross a -File boundary; forward it explicitly.
     if ($WhatIfPreference) { $rbArgs += '-WhatIf' }
@@ -240,12 +235,15 @@ if (-not $Rollback) {
         Write-VesLog ERROR '-ManifestPath is required for deploy.' -LogFile $LogFile
         Stop-Deploy $VES_EXIT_USAGE
     }
-    if ([string]::IsNullOrWhiteSpace($TrustParam)) {
-        Write-VesLog ERROR '-TrustParam is required for deploy.' -LogFile $LogFile
+    # The anchor replaced -TrustParam/-ApprovedCommitParam (no AWS in this
+    # environment). Both halves are required for the same reason those were: a
+    # deploy with nothing to verify against must not start.
+    if ([string]::IsNullOrWhiteSpace($BaselineRepo)) {
+        Write-VesLog ERROR '-BaselineRepo is required for deploy (the archived release record is the trust anchor).' -LogFile $LogFile
         Stop-Deploy $VES_EXIT_USAGE
     }
-    if ([string]::IsNullOrWhiteSpace($ApprovedCommitParam)) {
-        Write-VesLog ERROR '-ApprovedCommitParam is required for deploy.' -LogFile $LogFile
+    if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
+        Write-VesLog ERROR '-ReleaseTag is required for deploy (names the approved release to verify against).' -LogFile $LogFile
         Stop-Deploy $VES_EXIT_USAGE
     }
     # A BackupRoot inside TargetRoot destroys itself twice over: the /E backup
@@ -330,12 +328,13 @@ Step 'pre-deploy gate' {
     # commands, which would leave a bare -LogFile expecting a value in the child.
     $gateArgs = @(
         '-StagedRoot', $StagedRoot, '-StagedCommit', $StagedCommit,
-        '-ApprovedCommitParam', $ApprovedCommitParam, '-TrustParam', $TrustParam,
         '-ManifestPath', $ManifestPath, '-Processor', $Processor,
-        '-Environment', $Environment, '-Region', $Region)
+        '-Environment', $Environment,
+        # Both halves of the anchor. Passed unconditionally: if either is empty the
+        # gate must refuse (exit 10), and omitting the switch here would hide that
+        # misconfiguration behind a parameter the gate never saw.
+        '-BaselineRepo', $BaselineRepo, '-ReleaseTag', $ReleaseTag)
     foreach ($requiredPath in $gateRequired) { $gateArgs += '-RequiredArtifactPaths', $requiredPath }
-    if ($ReleaseTag) { $gateArgs += '-ReleaseTag', $ReleaseTag }
-    if ($BaselineRepo) { $gateArgs += '-BaselineRepo', $BaselineRepo }
     if ($LogFile) { $gateArgs += '-LogFile', $LogFile }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-PreDeployGate.ps1') @gateArgs
 }
@@ -421,41 +420,34 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 }
             }
 
-            # (c) The SSM values in force BEFORE this release. Capture overwrites
-            # them with no read-back, so without this a rollback has no way to say
-            # what the trust anchor used to point at. Get-VesTrustedHash throws on
-            # any failure and cannot tell ParameterNotFound from AccessDenied, so
-            # record the outcome explicitly instead of inferring it from a null.
-            $priorSsm = [ordered]@{
-                trustHash = $null; trustHashRead = $false
-                approvedCommit = $null; approvedCommitRead = $false
-                readError = $null
+            # (c) The hash of the release we are about to install, read from the
+            # archived record. Formerly read from the SSM pin (which never
+            # existed here). Best-effort: the gate has already proven this record
+            # readable, so a failure now is evidence-gathering noise, not a reason
+            # to abort a deploy that passed its gate.
+            $incomingHash = $null
+            try {
+                $incomingRecord = Get-VesManifestFromTag -RepoPath $BaselineRepo -Tag $ReleaseTag -Processor $Processor `
+                    -FileName $(if ($ManifestPath) { Split-Path -Leaf $ManifestPath } else { $null })
+                $incomingHash = $incomingRecord.RecomputedHash
             }
-            if ($TrustParam) {
-                try { $priorSsm.trustHash = Get-VesTrustedHash -ParameterName $TrustParam -Region $Region; $priorSsm.trustHashRead = $true }
-                catch {
-                    $priorSsm.readError = $_.Exception.Message
-                    Write-VesLog WARN "No prior trust pin readable at $TrustParam (first deploy, or SSM denied): $($_.Exception.Message)" -LogFile $LogFile
-                }
-            }
-            if ($ApprovedCommitParam) {
-                try { $priorSsm.approvedCommit = Get-VesTrustedHash -ParameterName $ApprovedCommitParam -Region $Region; $priorSsm.approvedCommitRead = $true }
-                catch { Write-VesLog WARN "No prior approved-commit readable at $ApprovedCommitParam." -LogFile $LogFile }
+            catch {
+                $recordErrors.Add("Could not read incoming release hash from ${ReleaseTag}: $($_.Exception.Message)")
             }
 
-            # Free signal -- but it has to be read the right way round. The anchor is
-            # pinned at capture (UAT sign-off), so during a normal deploy it already
-            # names the INCOMING release, not the one currently on disk. A mismatch
-            # here is therefore the expected case on every healthy deploy and must
-            # not be logged as DRIFT: doing so trains operators to ignore the one
-            # word that is supposed to mean "production is wrong".
-            if ($backupHash -and $priorSsm.trustHashRead) {
-                if ($backupHash -eq $priorSsm.trustHash) {
-                    Write-VesLog WARN 'Pre-deploy tree already matches the SSM-pinned incoming release; this deploy is re-copying bits production is already carrying.' -LogFile $LogFile
+            # Free signal -- but it has to be read the right way round. The anchor
+            # names the INCOMING release (captured at UAT sign-off), not the one
+            # currently on disk. A mismatch here is therefore the expected case on
+            # every healthy deploy and must not be logged as DRIFT: doing so trains
+            # operators to ignore the one word that is supposed to mean
+            # "production is wrong".
+            if ($backupHash -and $incomingHash) {
+                if ($backupHash -eq $incomingHash) {
+                    Write-VesLog WARN 'Pre-deploy tree already matches the incoming release; this deploy is re-copying bits production is already carrying.' -LogFile $LogFile
                 }
                 else {
-                    Write-VesLog INFO 'Pre-deploy tree differs from the SSM-pinned incoming release, as expected before a deploy. Its hash is recorded in backup-manifest.json so this restore point can be identified later.' `
-                        -Data @{preDeployManifestHash = $backupHash; pinnedIncomingHash = $priorSsm.trustHash } -LogFile $LogFile
+                    Write-VesLog INFO 'Pre-deploy tree differs from the incoming release, as expected before a deploy. Its hash is recorded in backup-manifest.json so this restore point can be identified later.' `
+                        -Data @{preDeployManifestHash = $backupHash; incomingManifestHash = $incomingHash } -LogFile $LogFile
                 }
             }
 
@@ -478,10 +470,8 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                     configPath          = $ConfigPath
                     configInsideTarget  = $configInsideTarget
                     configBackupRelPath = $configBackupRelPath
-                    trustParam          = $TrustParam
-                    approvedCommitParam = $ApprovedCommitParam
-                    region              = $Region
-                    priorSsm            = $priorSsm
+                    baselineRepo        = $BaselineRepo
+                    incomingManifestHash = $incomingHash
                     recordErrors        = $recordErrors.ToArray()
                 }
                 ($record | ConvertTo-Json -Depth 6) | Out-File -FilePath (Join-Path $backupDir 'rollback-record.json') -Encoding utf8
@@ -499,8 +489,9 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
     # Auto-rollback handler. Runs when a stage AFTER the copy fails, i.e. once prod
     # is already carrying the new bits. Shells Invoke-Rollback with this run's own
     # -LogFile so both runs interleave in one JSONL stream, and deliberately does
-    # NOT pass -RepinTrust: an automated write to the trust anchor, triggered by a
-    # failing deploy, is the most dangerous thing this suite could do.
+    # NOT attempt to change which release the archive marks approved: an automated
+    # write to the trust anchor, triggered by a failing deploy, is the most
+    # dangerous thing this suite could do.
     if ($AutoRollback) {
         $rollbackOnFail = {
             param([string]$stageName, [int]$stageCode)
@@ -516,7 +507,7 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             try {
                 $rbArgs = @(
                     '-Processor', $Processor, '-TargetRoot', $TargetRoot, '-BackupRoot', $BackupRoot,
-                    '-BackupDir', $backupDir, '-Environment', $Environment, '-Region', $Region,
+                    '-BackupDir', $backupDir, '-Environment', $Environment,
                     '-Initials', $Initials, '-LogFile', $LogFile,
                     '-Reason', ("auto-rollback: deploy stage '$stageName' failed with exit $stageCode"))
                 # -File cannot bind arrays: repeat the named argument instead.
@@ -524,7 +515,6 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 foreach ($dll in $RequiredAssemblies) { $rbArgs += '-RequiredAssemblies', $dll }
                 if ($ServiceName) { $rbArgs += '-ServiceName', $ServiceName }
                 if ($BaselineRepo) { $rbArgs += '-BaselineRepo', $BaselineRepo }
-                if ($TrustParam) { $rbArgs += '-TrustParam', $TrustParam }
                 if ($ConfigContract) { $rbArgs += '-ConfigContract', $ConfigContract }
                 if ($ConfigPath) { $rbArgs += '-ConfigPath', $ConfigPath }
                 if ($FreshLogDir) { $rbArgs += '-FreshLogDir', $FreshLogDir, '-FreshLogMaxAgeMinutes', "$FreshLogMaxAgeMinutes" }
@@ -637,11 +627,9 @@ Step 'post-deploy verify' {
         '-Mode', $(if ($ConfigContract) { 'All' } else { 'VerifyFiles' }),
         '-ReleaseRoot', $TargetRoot,
         '-ManifestPath', $ManifestPath,
-        '-TrustParam', $TrustParam,
         '-Processor', $Processor,
         '-CommitSha', $StagedCommit,
-        '-Environment', $Environment,
-        '-Region', $Region
+        '-Environment', $Environment
     )
     if ($ReleaseTag) { $verArgs += '-ReleaseTag', $ReleaseTag }
     if ($BaselineRepo) { $verArgs += '-BaselineRepo', $BaselineRepo }

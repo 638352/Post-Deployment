@@ -1,45 +1,53 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Read-only self-check: SSM reachability and baseline integrity before a real run.
+    Read-only self-check: baseline integrity and host readiness before a real run.
 .DESCRIPTION
     Read-only. Runs a set of checks and reports PASS / WARN / FAIL per check:
 
       psversion      the host runs Windows PowerShell 5.1, not 7.x
-      aws-cli        the AWS CLI is on PATH (the module shells out to it)
-      ssm:<param>    each SSM parameter reads back (auth + KMS decrypt + path +
-                     region all exercised by a --with-decryption get-parameter)
-      manifest       baseline manifest exists, is self-consistent, and its hash
-                     matches the SSM-pinned trusted hash (tamper anchor intact)
+      manifest       baseline manifest exists, is self-consistent, and -- when a
+                     release tag is supplied -- matches the manifest archived
+                     under that tag (tamper anchor intact)
       config         config contract file parses and declares a known format
 
     Two ways to invoke:
-      -TargetsFile  : check trustParam + manifest + config for every drift target
-      per-processor : pass -ApprovedCommitParam / -TrustParam / -ManifestPath etc.
+      -TargetsFile  : check manifest + config for every drift target
+      per-processor : pass -ManifestPath / -ConfigContract / -BaselineRepo etc.
+
+    TRUST ANCHOR: this suite once pinned the approved manifest hash to AWS SSM.
+    There is no AWS in this environment and there never was, so those probes are
+    gone (they made every box report NOT READY on a missing CLI). The anchor is
+    now the manifest archived under the Git release tag: pass -BaselineRepo and
+    -ReleaseTag and a mismatch is a hard FAIL. Without them the manifest can only
+    be checked for self-consistency, which is NOT tamper evidence -- anyone who
+    can edit the manifest can also restore its self-hash -- so that case reports
+    WARN 'not anchored' rather than a clean PASS.
 
     Exit codes: 0 ready (WARNs allowed), 2 NOT ready (a hard check failed:
-    wrong PowerShell major version, missing CLI, unreadable SSM param, or
-    manifest trust mismatch), 10 usage.
+    wrong PowerShell major version, missing/corrupt manifest, or a manifest that
+    disagrees with the tag-archived baseline), 10 usage.
     WARN-level items do not fail the run.
 .EXAMPLE
-    # before deploying one system
+    # before deploying one system, anchored against the approved release tag
     .\Invoke-Preflight.ps1 -Processor SYSTEM_NAME `
-      -ApprovedCommitParam /ves/SYSTEM_NAME/approved-commit `
-      -TrustParam /ves/SYSTEM_NAME/baseline-hash `
-      -ManifestPath D:\baselines\SYSTEM_NAME.json
+      -ManifestPath D:\baselines\SYSTEM_NAME.json `
+      -BaselineRepo D:\ves-baselines -ReleaseTag SYSTEM_NAME/v1.4.0
 .EXAMPLE
-    # validate every drift target's SSM + baseline in one shot
+    # validate every drift target's baseline in one shot
     .\Invoke-Preflight.ps1 -TargetsFile D:\ves-verify\targets.json
 #>
 [CmdletBinding()]
 param(
     [string]$Processor = 'unknown',
-    [string]$ApprovedCommitParam,
-    [string]$TrustParam,
     [string]$ManifestPath,
     [string]$ConfigContract,
     [string]$TargetsFile,
-    [string]$Region = 'us-gov-west-1',
+    # Git checkout holding the archived release records. With -ReleaseTag this is
+    # the trust anchor: the local manifest must agree with the one committed under
+    # the tag. This replaced the SSM pin, which never existed in this environment.
+    [string]$BaselineRepo,
+    [string]$ReleaseTag,
     [string]$LogFile,
     # --- DATADOG DISABLED -----------------------------------------------------
     # Optional: probe whether the Datadog agent/API key are in place. WARN-only --
@@ -82,50 +90,38 @@ function Test-PsVersion {
     }
 }
 
-# --- SSM probe: distinguish "no CLI" / "not found" / "denied" for a real diagnosis ---
-$script:awsChecked = $false
-function Test-AwsCli {
-    if ($script:awsChecked) { return }
-    $script:awsChecked = $true
-    if (Get-Command aws -ErrorAction SilentlyContinue) {
-        Add-Check 'aws-cli' 'PASS' 'AWS CLI found on PATH'
+# --- release-tag anchor: read the archived baseline back out of the tag ---------
+# Replaces the former SSM probe. Returns the archived manifest object, or $null
+# when no anchor is configured or the readback fails; Test-Manifest decides the
+# severity so the "no anchor at all" case can never be reported as a clean PASS.
+function Get-TagAnchor([string]$ProcessorName, [string]$Tag) {
+    if ([string]::IsNullOrWhiteSpace($BaselineRepo) -or [string]::IsNullOrWhiteSpace($Tag)) { return $null }
+    if (-not (Test-VesReleaseTag -Tag $Tag)) {
+        Add-Check 'release-tag' 'FAIL' "malformed release tag '$Tag'; expected <system>/vMAJOR.MINOR.PATCH"
+        return $null
     }
-    else {
-        Add-Check 'aws-cli' 'FAIL' 'AWS CLI not on PATH; SSM reads will fail'
+    try {
+        $archived = Get-VesManifestFromTag -RepoPath $BaselineRepo -Tag $Tag -Processor $ProcessorName
     }
-}
-function Test-SsmParam([string]$ParamName) {
-    if ([string]::IsNullOrWhiteSpace($ParamName)) { return }
-    Test-AwsCli
-    # Invoke-VesAwsCli, not a bare '& aws ... 2>&1': under $ErrorActionPreference
-    # ='Stop' the CLI's stderr becomes a TERMINATING error, which would abort the
-    # whole run into the outer catch and skip per-check reporting.
-    $r = Invoke-VesAwsCli -Arguments @(
-        'ssm', 'get-parameter', '--name', $ParamName, '--with-decryption',
-        '--region', $Region, '--query', 'Parameter.Value', '--output', 'text')
-    # success: report readability by length only (the value may be a secret)
-    if ($r.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($r.StdOut)) {
-        # don't echo the value; it may be a secret. show length only.
-        $val = $r.StdOut.Trim()
-        Add-Check "ssm:$ParamName" 'PASS' ("readable ({0} chars)" -f $val.Length)
-        return $val
+    catch {
+        # A configured anchor that cannot be read is a hard failure, never a pass:
+        # it is indistinguishable from a tag that was deleted to hide a change.
+        Add-Check 'release-tag' 'FAIL' "cannot read baseline from ${Tag}: $($_.Exception.Message)"
+        return $null
     }
-    # failure: translate the CLI's error text into an actionable reason
-    $msg = $r.StdErr.Trim()
-    if ($msg -match 'ParameterNotFound') { $why = 'parameter does not exist (check path/region)' }
-    elseif ($msg -match 'AccessDenied') { $why = 'access denied (IAM ssm:GetParameter / kms:Decrypt)' }
-    elseif ($msg -match 'ExpiredToken|Unable to locate credentials') { $why = 'no/expired credentials on host' }
-    elseif ($msg) { $why = ($msg -replace '\s+', ' ') }
-    else { $why = "unreadable (aws exit $($r.ExitCode), no output)" }
-    Add-Check "ssm:$ParamName" 'FAIL' $why
-    return $null
+    if (-not $archived.Consistent) {
+        Add-Check 'release-tag' 'FAIL' ("archived manifest self-hash mismatch at {0}" -f $archived.Source)
+        return $null
+    }
+    Add-Check 'release-tag' 'PASS' ("baseline readable at {0}" -f $archived.Source)
+    return $archived
 }
 
 # --- baseline captured under a superseded exclude pattern? ---------------------
 # The exclude pattern once missed top-level logs\ / temp\ / cache\ / .git\ dirs, so
 # baselines captured before that fix can carry entries the current pattern drops.
 # Such a baseline is intact and trusted, but re-capturing it changes its hash and
-# breaks the SSM pin -- so flag it here rather than let a scheduled drift check
+# breaks the tag anchor -- so flag it here rather than let a scheduled drift check
 # discover it as an exit 2 later. WARN, never FAIL.
 function Test-ManifestPatternStale($Manifest) {
     $rels = @($Manifest.Doc.files | ForEach-Object { $_.RelPath })
@@ -142,7 +138,7 @@ function Test-ManifestPatternStale($Manifest) {
 }
 
 # --- baseline manifest integrity + trust anchor, no prod files needed ---
-function Test-Manifest([string]$Path, [string]$Trust) {
+function Test-Manifest([string]$Path, [string]$ProcessorName, [string]$Tag) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return }
     # must exist, load, and be self-consistent before we bother with the trust anchor
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -157,22 +153,32 @@ function Test-Manifest([string]$Path, [string]$Trust) {
     }
     # intact, so it is worth asking whether it was captured under current rules
     Test-ManifestPatternStale $m
-    # if a trust param is given, the manifest hash must match the SSM-pinned value
-    if (-not [string]::IsNullOrWhiteSpace($Trust)) {
-        $pinned = Test-SsmParam $Trust
-        if ($null -eq $pinned) {
-            Add-Check 'manifest' 'WARN' 'self-consistent, but trust hash unreadable (see ssm check above)'
-        }
-        elseif ($pinned -ne $m.RecomputedHash) {
-            Add-Check 'manifest' 'FAIL' "trust mismatch: SSM=$pinned manifest=$($m.RecomputedHash)"
+    # With a release tag configured, the local manifest must agree with the copy
+    # archived under that tag. Disagreement is a hard FAIL: one of the two was
+    # edited after the release was approved.
+    $anchorName = if ([string]::IsNullOrWhiteSpace($ProcessorName)) { $Processor } else { $ProcessorName }
+    # A target's own releaseTag wins over the script-level -ReleaseTag: in
+    # -TargetsFile mode each target names the release it is supposed to be at.
+    $anchorTag = if ([string]::IsNullOrWhiteSpace($Tag)) { $ReleaseTag } else { $Tag }
+    $archived = Get-TagAnchor $anchorName $anchorTag
+    if ($null -ne $archived) {
+        if ($archived.RecomputedHash -ne $m.RecomputedHash) {
+            Add-Check 'manifest' 'FAIL' ("anchor mismatch: {0}={1} local={2}" -f `
+                    $anchorTag, $archived.RecomputedHash, $m.RecomputedHash)
         }
         else {
-            Add-Check 'manifest' 'PASS' "intact and trust-anchored ($($m.Doc.fileCount) files)"
+            Add-Check 'manifest' 'PASS' ("intact and anchored to {0} ({1} files)" -f $anchorTag, @($m.Doc.files).Count)
         }
     }
-    else {
-        Add-Check 'manifest' 'PASS' "self-consistent ($($m.Doc.fileCount) files); no -TrustParam to anchor against"
+    elseif ([string]::IsNullOrWhiteSpace($BaselineRepo) -or [string]::IsNullOrWhiteSpace($anchorTag)) {
+        # No anchor configured at all. Self-consistency is NOT tamper evidence --
+        # the self-hash lives inside the file it protects, so anyone who edits the
+        # manifest can recompute it. Reporting PASS here would overstate the
+        # control, so this is a WARN. It does not flip readiness, because an
+        # unanchored baseline is a configuration gap, not a detected compromise.
+        Add-Check 'manifest' 'WARN' ("self-consistent ({0} files) but NOT anchored; pass -BaselineRepo and -ReleaseTag to verify against the approved release" -f @($m.Doc.files).Count)
     }
+    # else: Get-TagAnchor already logged a FAIL explaining why the anchor is unusable.
 }
 
 # --- DATADOG DISABLED: reachability probe (was WARN only, never blocked) -------
@@ -222,14 +228,13 @@ try {
     # DATADOG DISABLED: optional agent reachability check ran in either mode when requested.
     # if ($CheckDatadog) { Test-DatadogAgent }
 
-    # Mode A: -TargetsFile validates SSM + manifest + contract for every drift target at once
+    # Mode A: -TargetsFile validates manifest + contract for every drift target at once
     if ($TargetsFile) {
         if (-not (Test-Path -LiteralPath $TargetsFile)) {
             Write-VesLog ERROR "Targets file not found: $TargetsFile" -LogFile $LogFile
             if ($Json) { @{ status = 'usage' } | ConvertTo-Json -Compress }
             exit $VES_EXIT_USAGE
         }
-        Test-AwsCli
         # Import-VesTargetInventory, NOT a raw ConvertFrom-Json. Under the
         # ves.targets.v1 schema the parsed document is the ROOT object, so
         # `foreach ($t in $targets)` iterated it once as if it were a target:
@@ -247,30 +252,25 @@ try {
         }
         # Per-target checks run even on an invalid inventory: the FAIL rows above
         # already decide readiness, and an operator fixing the inventory wants the
-        # SSM/manifest diagnosis in the same run rather than one round trip later.
+        # manifest/contract diagnosis in the same run rather than one round trip later.
         foreach ($t in $inventory.Targets) {
             $p = if ($t.PSObject.Properties['processor']) { $t.processor } else { '?' }
             Write-VesLog INFO "--- target: $p ---" -LogFile $LogFile
-            $tp = if ($t.PSObject.Properties['trustParam']) { $t.trustParam }     else { $null }
             $mp = if ($t.PSObject.Properties['manifestPath']) { $t.manifestPath }   else { $null }
             $cc = if ($t.PSObject.Properties['configContract']) { $t.configContract } else { $null }
-            Test-Manifest $mp $tp          # also reads trustParam from SSM
+            $rt = if ($t.PSObject.Properties['releaseTag']) { $t.releaseTag }     else { $null }
+            Test-Manifest $mp $p $rt       # anchors against the target's own releaseTag
             Test-ConfigContract $cc
         }
     }
     # Mode B: per-processor invocation validates whichever of the params were supplied
     else {
-        if (-not $ApprovedCommitParam -and -not $TrustParam -and -not $ManifestPath -and -not $ConfigContract) {
-            Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ApprovedCommitParam / -TrustParam / -ManifestPath / -ConfigContract.' -LogFile $LogFile
+        if (-not $ManifestPath -and -not $ConfigContract) {
+            Write-VesLog ERROR 'Provide -TargetsFile, or at least one of -ManifestPath / -ConfigContract.' -LogFile $LogFile
             if ($Json) { @{ status = 'usage' } | ConvertTo-Json -Compress }
             exit $VES_EXIT_USAGE
         }
-        # $null = : these probe for their PASS/FAIL side effect; discard the
-        # returned parameter value so a (possibly sensitive) SSM value never leaks
-        # to stdout/console.
-        $null = Test-SsmParam $ApprovedCommitParam
-        Test-Manifest $ManifestPath $TrustParam   # reads TrustParam from SSM if set
-        if ($TrustParam -and -not $ManifestPath) { $null = Test-SsmParam $TrustParam }  # still probe the param
+        Test-Manifest $ManifestPath $Processor    # anchors against -ReleaseTag when supplied
         Test-ConfigContract $ConfigContract
     }
 

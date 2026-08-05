@@ -16,7 +16,12 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$TargetsFile,
-    [string]$Region = 'us-gov-west-1',
+    # Git checkout holding the archived release records. Each target is verified
+    # against the manifest committed under its own releaseTag. Without this the
+    # drift check can only compare prod against a manifest that sits next to prod,
+    # which detects accidental drift but not a deliberate edit of both -- so the
+    # runner reports that weaker mode explicitly rather than passing quietly.
+    [string]$BaselineRepo,
     # Set VES_AUDIT_LOG_DIR to a central durable share, or pass -LogDir.
     [string]$LogDir,
     [string]$HeartbeatPath,
@@ -115,7 +120,6 @@ try {
             Mode = 'All'
             ReleaseRoot = $t.releaseRoot
             ManifestPath = $t.manifestPath
-            TrustParam = $t.trustParam
             ConfigContract = $t.configContract
             ConfigPath = $t.configPath
             Processor = $t.processor
@@ -123,9 +127,21 @@ try {
             # release identifier stamped into log entries for this drift run.
             CommitSha = $t.releaseTag
             Environment = $t.environment
-            Region = $Region
             LogFile = $log
             Json = $true
+        }
+        # Anchor this target against its own release tag when an archive is
+        # configured. Announce the unanchored case in the run log: a drift check
+        # comparing prod only against a prod-adjacent manifest cannot detect an
+        # edit that rewrote both, and that limitation must appear in the evidence
+        # rather than being inferred from the absence of a parameter.
+        if (-not [string]::IsNullOrWhiteSpace($BaselineRepo) -and -not [string]::IsNullOrWhiteSpace($t.releaseTag)) {
+            $params['BaselineRepo'] = $BaselineRepo
+            $params['ReleaseTag'] = $t.releaseTag
+        }
+        else {
+            Write-VesLog WARN "UNANCHORED drift check for $($t.processor): no -BaselineRepo/releaseTag; comparing against the local manifest only" `
+                -Data @{runId=$runId; processor=$t.processor; anchored=$false} -LogFile $log
         }
         $null = & $verify @params
         $code = $LASTEXITCODE

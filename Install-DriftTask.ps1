@@ -25,11 +25,11 @@ param(
     [string]$LogDir = 'D:\ves-verify\logs',
     # 0 derives a threshold of three intervals (minimum 15 minutes).
     [int]$HeartbeatMaxAgeMinutes = 0,
-    # Baked into the registered task. Without it a scheduled runner is stuck on the
-    # runner's own default forever, and the OMS SSM convention
-    # (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1, not west --
-    # a task registered with the wrong region fails every SSM read as a trust error.
-    [string]$Region,
+    # Baked into the registered task: the git checkout holding archived release
+    # records. Without it the scheduled drift check runs UNANCHORED -- it compares
+    # production against a manifest sitting next to production, which catches an
+    # accidental edit but not a deliberate one that rewrote both.
+    [string]$BaselineRepo,
     # Passed through so retention is set once at registration rather than by editing
     # the task's argument string later. 0 disables pruning.
     [int]$LogRetentionDays = 0,
@@ -90,7 +90,7 @@ $watchdogLog = Join-Path $LogDir 'drift-heartbeat-watchdog.jsonl'
 $runnerArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -TargetsFile "{1}" -LogDir "{2}"' -f $runner, $TargetsFile, $LogDir
 # Only append what the caller actually set, so the task line stays the runner's own
 # defaults otherwise rather than freezing today's defaults into Task Scheduler.
-if ($Region) { $runnerArgs += ' -Region "{0}"' -f $Region }
+if ($BaselineRepo) { $runnerArgs += ' -BaselineRepo "{0}"' -f $BaselineRepo }
 if ($LogRetentionDays -gt 0) { $runnerArgs += ' -LogRetentionDays {0}' -f $LogRetentionDays }
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $runnerArgs
 $watchdogAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
@@ -133,7 +133,7 @@ Write-VesLog OK 'DRIFT TASKS REGISTERED' -Data @{
     heartbeatMaxAgeMinutes = $HeartbeatMaxAgeMinutes
     targetsFile            = $TargetsFile
     logDir                 = $LogDir
-    region                 = $Region
+    baselineRepo           = $BaselineRepo
     logRetentionDays       = $LogRetentionDays
     environment            = $Environment
     registeredBy           = "$env:USERNAME@$env:COMPUTERNAME"

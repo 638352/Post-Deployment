@@ -30,7 +30,6 @@
       "releaseTag": "TBD",
       "releaseRoot": "C:\\VLER_TEST_OUTBOUND\\Processors\\VES.OutboundProcessor",
       "manifestPath": "D:\\baselines\\OutboundDBQ.json",
-      "trustParam": "/ves/OutboundDBQ/baseline-hash",
       "configContract": "D:\\baselines\\OutboundDBQ.config.json",
       "configPath": "C:\\VLER_TEST_OUTBOUND\\Processors\\VES.OutboundProcessor\\VES.OutboundDBQProcessor.exe.config",
       "note": "UAT starter aligned with Deploy-OutboundDBQ-uat.ps1 / SERVERS.md. DBQ also deploys on VESEMSEGRESS02/03 in PROD — create one confirmed entry per deployed copy."

@@ -12,7 +12,6 @@ BeforeAll {
 
     $script:Root = Join-Path $TestDrive 'rb'
     $script:OrigPath = $env:PATH
-    $script:CallLog = Join-Path $TestDrive 'aws-calls-rb.txt'
 
     # 'v1' is the good release we roll back TO; 'v2' is the bad one in production.
     $script:V1 = New-VesTree (Join-Path $script:Root 'v1') 'version-one'
@@ -22,7 +21,7 @@ BeforeAll {
     $script:V1Manifest = Join-Path $script:Root 'v1-baseline.json'
     $cap = Invoke-VesScript 'Invoke-Verification.ps1' @(
         '-Mode', 'Capture', '-ReleaseRoot', $script:V1, '-ManifestPath', $script:V1Manifest,
-        '-Processor', 'rbtest', '-AllowUntrustedCapture', '-AllowUnarchivedCapture')
+        '-Processor', 'rbtest', '-CommitSha', 'testcommit1', '-AllowUnarchivedCapture')
     if ($cap.ExitCode -ne 0) { throw "v1 capture failed: $($cap.Output)" }
     $script:V1Hash = (Get-Content -LiteralPath $script:V1Manifest -Raw | ConvertFrom-Json).manifestHash
 
@@ -30,26 +29,18 @@ BeforeAll {
     $script:V2Manifest = Join-Path $script:Root 'v2-baseline.json'
     $cap2 = Invoke-VesScript 'Invoke-Verification.ps1' @(
         '-Mode', 'Capture', '-ReleaseRoot', $script:V2, '-ManifestPath', $script:V2Manifest,
-        '-Processor', 'rbtest', '-AllowUntrustedCapture', '-AllowUnarchivedCapture')
+        '-Processor', 'rbtest', '-CommitSha', 'testcommit1', '-AllowUnarchivedCapture')
     if ($cap2.ExitCode -ne 0) { throw "v2 capture failed: $($cap2.Output)" }
     $script:V2Hash = (Get-Content -LiteralPath $script:V2Manifest -Raw | ConvertFrom-Json).manifestHash
 
-    # The anchor pins V2 -- the release being rolled AWAY from. That is what
-    # production actually looks like at rollback time: capture pins at UAT sign-off,
-    # before the deploy, and nothing re-pins on the way back down.
-    #
-    # This fixture used to pin V1 (the release being restored), which is the inverse.
-    # That inversion hid a real deadlock: with the pin naming V2, passing -TrustParam
-    # to the post-rollback verify failed the restored V1 manifest against the wrong
-    # anchor and returned exit 2 on a byte-perfect restore -- which then permanently
-    # blocked -RepinTrust, since that is gated on the same verify passing.
-    New-VesAwsStub -Path (Join-Path $TestDrive 'awsstub-rb') -CallLog $script:CallLog -Parameters @{
-        '/ves/rbtest/baseline-hash'   = $script:V2Hash
-        '/ves/rbtest/approved-commit' = 'newcommit'
-        # A second anchor that DOES name the restored release, for the case where a
-        # rollback is run after the pin has already been moved back.
-        '/ves/rbtest/prior-baseline-hash' = $script:V1Hash
-    } | Out-Null
+    # The archive holds BOTH releases under their own tags: v1.0.0 (the release
+    # being restored) and v2.0.0 (the one being rolled away from). Verifying the
+    # restore against v1's tag is the correct pairing; the old SSM fixture proved
+    # what happens when a restore is checked against the wrong release's anchor.
+    $script:Archive = New-VesBaselineArchive -Path (Join-Path $script:Root 'archive') `
+        -Processor 'rbtest' -ManifestPath $script:V1Manifest -Tag 'rbtest/v1.0.0'
+    New-VesBaselineArchive -Path $script:Archive `
+        -Processor 'rbtest' -ManifestPath $script:V2Manifest -Tag 'rbtest/v2.0.0' | Out-Null
 
     # Fresh target (holding the bad v2) + a backup of v1, per test.
     function script:New-Case([string]$Name, [hashtable]$Record = @{}, [switch]$NoRecord, [switch]$EmptyBackup) {
@@ -79,7 +70,7 @@ BeforeAll {
 
 AfterAll {
     $env:PATH = $script:OrigPath
-    $env:VES_STUB_LOG = $null
+    Remove-VesBaselineArchive -Path $script:Archive
 }
 
 Describe '-ListBackups' {
@@ -106,7 +97,7 @@ Describe '-ListBackups' {
 Describe 'restore fidelity' {
     It 'mirrors the backup back, removes the bad release files, and leaves no sidecars behind' {
         $c = New-Case 'fidelity'
-        $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c @('-ManifestPath', $script:V1Manifest, '-TrustParam', '/ves/rbtest/baseline-hash'))
+        $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c @('-BaselineRepo', $script:Archive, '-ReleaseTag', 'rbtest/v1.0.0'))
         $r.ExitCode | Should -Be 0
         $r.Output | Should -Match 'Rollback complete'
         # restored content
@@ -224,7 +215,7 @@ Describe 'post-rollback proof' {
         $cap = Invoke-VesScript 'Invoke-Verification.ps1' @(
             '-Mode', 'Capture', '-ReleaseRoot', $script:V1,
             '-ManifestPath', (Join-Path $c.BackupDir 'backup-manifest.json'),
-            '-Processor', 'rbtest', '-AllowUntrustedCapture', '-AllowUnarchivedCapture')
+            '-Processor', 'rbtest', '-CommitSha', 'testcommit1', '-AllowUnarchivedCapture')
         $cap.ExitCode | Should -Be 0
         $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c)
         $r.ExitCode | Should -Be 0
@@ -237,38 +228,34 @@ Describe 'post-rollback proof' {
         $v2Manifest = Join-Path $c.Case 'v2.json'
         $cap = Invoke-VesScript 'Invoke-Verification.ps1' @(
             '-Mode', 'Capture', '-ReleaseRoot', $script:V2, '-ManifestPath', $v2Manifest,
-            '-Processor', 'rbtest', '-AllowUntrustedCapture', '-AllowUnarchivedCapture')
+            '-Processor', 'rbtest', '-CommitSha', 'testcommit1', '-AllowUnarchivedCapture')
         $cap.ExitCode | Should -Be 0
         $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c @('-ManifestPath', $v2Manifest))
         $r.ExitCode | Should -Be 1
         $r.Output | Should -Match 'Post-rollback verify failed'
     }
 
-    It 'proves a good restore even though the live pin still names the release being rolled back' {
-        # The regression this guards: -TrustParam was passed to the post-rollback
-        # verify unconditionally, so the restored release's manifest was compared
-        # against an anchor naming the FAILED release and a byte-perfect restore
-        # exited 2. This is the README's documented operator command shape.
-        $c = New-Case 'anchor-stale' -Record @{
-            priorSsm = @{ trustHash = $script:V1Hash; trustHashRead = $true; approvedCommit = 'oldcommit'; approvedCommitRead = $true }
-        }
+    It 'proves a good restore against the PRIOR release tag, not the failed release''s baseline' {
+        # The trap this guards (inherited from the SSM era): a restore verified
+        # against the anchor of the release being rolled AWAY from exits 2 on a
+        # byte-perfect restore. -ReleaseTag on a rollback must name the release
+        # being RESTORED -- here v1 -- and the archive holds v2 as well, so a
+        # regression that grabs "the latest" tag would fail this case.
+        $c = New-Case 'anchor-prior'
         $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c @(
-                '-ManifestPath', $script:V1Manifest, '-TrustParam', '/ves/rbtest/baseline-hash'))
+                '-BaselineRepo', $script:Archive, '-ReleaseTag', 'rbtest/v1.0.0'))
         $r.ExitCode | Should -Be 0
-        # and it says so, rather than quietly dropping the anchor
-        $r.Output | Should -Match 'NOT SSM-anchored'
-        $r.Output | Should -Match 'release being rolled back'
+        $r.Output | Should -Match 'anchored to rbtest/v1\.0\.0'
     }
 
-    It 'still cross-checks SSM when the anchor genuinely names the restored release' {
-        $c = New-Case 'anchor-fresh' -Record @{
-            priorSsm = @{ trustHash = $script:V1Hash; trustHashRead = $true; approvedCommit = 'oldcommit'; approvedCommitRead = $true }
-        }
+    It 'reports drift when the restore is verified against the wrong release''s tag' {
+        # The inverse pairing, kept as a test so the failure mode stays visible:
+        # v1 bits checked against v2's baseline must fail as drift, never pass.
+        $c = New-Case 'anchor-wrong'
         $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c @(
-                '-ManifestPath', $script:V1Manifest, '-TrustParam', '/ves/rbtest/prior-baseline-hash'))
-        $r.ExitCode | Should -Be 0
-        $r.Output | Should -Match 'SSM-anchored'
-        $r.Output | Should -Match 'Manifest trust verified against SSM'
+                '-BaselineRepo', $script:Archive, '-ReleaseTag', 'rbtest/v2.0.0'))
+        $r.ExitCode | Should -Be 1
+        $r.Output | Should -Match 'Post-rollback verify failed'
     }
 
     It 'exits 3 when the restore is clean but the processor is not healthy' {
@@ -333,53 +320,30 @@ Describe 'config restore' {
     }
 }
 
-Describe 'trust re-pin' {
-    It 'refuses -RepinTrust when the backup recorded no prior value, and writes nothing to SSM' {
-        $c = New-Case 'repin-norecord' -NoRecord
-        Remove-Item -LiteralPath $script:CallLog -Force -ErrorAction SilentlyContinue
-        $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c @(
-                '-RepinTrust', '-TrustParam', '/ves/rbtest/baseline-hash'))
-        $r.ExitCode | Should -Be 10
-        $r.Output | Should -Match 'rollback-record.json'
-        (Get-VesStubCalls $script:CallLog) | Should -Not -Match 'put-parameter'
-    }
+Describe 'post-rollback attestation' {
+    # Replaced the SSM 'trust re-pin' cases. The safety property those cases
+    # guarded is preserved: nothing is ever asserted about a tree whose
+    # verification did not pass. What changed is the action -- there is no pin to
+    # rewrite; the run attests and names the operator work still required.
 
-    It 'skips the re-pin (and writes nothing) when the post-rollback verify fails' {
-        $c = New-Case 'repin-badverify' -Record @{
-            priorSsm = @{ trustHash = $script:V1Hash; trustHashRead = $true; approvedCommit = 'oldcommit'; approvedCommitRead = $true }
-        }
-        $v2Manifest = Join-Path $c.Case 'v2.json'
-        $cap = Invoke-VesScript 'Invoke-Verification.ps1' @(
-            '-Mode', 'Capture', '-ReleaseRoot', $script:V2, '-ManifestPath', $v2Manifest,
-            '-Processor', 'rbtest', '-AllowUntrustedCapture', '-AllowUnarchivedCapture')
-        $cap.ExitCode | Should -Be 0
-        Remove-Item -LiteralPath $script:CallLog -Force -ErrorAction SilentlyContinue
+    It 'makes no claim about production when the post-rollback verify fails' {
+        $c = New-Case 'attest-badverify'
+        # verify the restored v1 bits against v2's tag: genuine drift, exit 1
         $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c @(
-                '-ManifestPath', $v2Manifest, '-RepinTrust', '-TrustParam', '/ves/rbtest/baseline-hash'))
-        # Exit 1: the restored v1 tree genuinely differs from the v2 manifest it was
-        # verified against. The live pin names v2 (the release being rolled away
-        # from), so it is correctly NOT used as the anchor -- the failure reported is
-        # the real drift, not a trust error standing in for one.
+                '-BaselineRepo', $script:Archive, '-ReleaseTag', 'rbtest/v2.0.0'))
         $r.ExitCode | Should -Be 1
-        $r.Output | Should -Match 'NOT SSM-anchored'
-        $r.Output | Should -Match 'TRUST RE-PIN SKIPPED'
-        (Get-VesStubCalls $script:CallLog) | Should -Not -Match 'put-parameter'
+        $r.Output | Should -Match 'RESTORE NOT ATTESTED'
+        $r.Output | Should -Not -Match 'RESTORED RELEASE ATTESTED'
     }
 
-    It 're-pins BOTH the baseline hash and the approved commit on a proven restore' {
-        $c = New-Case 'repin-ok' -Record @{
-            priorSsm = @{ trustHash = $script:V1Hash; trustHashRead = $true; approvedCommit = 'oldcommit'; approvedCommitRead = $true }
-        }
-        Remove-Item -LiteralPath $script:CallLog -Force -ErrorAction SilentlyContinue
+    It 'attests a proven restore and names the archive re-point the operator still owes' {
+        $c = New-Case 'attest-ok'
         $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c @(
-                '-ManifestPath', $script:V1Manifest, '-RepinTrust',
-                '-TrustParam', '/ves/rbtest/baseline-hash', '-ApprovedCommitParam', '/ves/rbtest/approved-commit'))
+                '-BaselineRepo', $script:Archive, '-ReleaseTag', 'rbtest/v1.0.0'))
         $r.ExitCode | Should -Be 0
-        $r.Output | Should -Match 'TRUST RE-PIN COMPLETE'
-        $calls = Get-VesStubCalls $script:CallLog
-        $calls | Should -Match 'put-parameter'
-        $calls | Should -Match '/ves/rbtest/baseline-hash'
-        $calls | Should -Match '/ves/rbtest/approved-commit'
+        $r.Output | Should -Match 'RESTORED RELEASE ATTESTED'
+        # the message must carry the instruction, not assume the operator knows
+        $r.Output | Should -Match 're-point the approved release tag'
     }
 }
 

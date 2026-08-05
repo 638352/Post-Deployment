@@ -80,7 +80,6 @@ param(
     [string]$ReleaseTag,
     # Manifest describing the RESTORED release (not the failed one).
     [string]$ManifestPath,
-    [string]$TrustParam,
     [string]$ConfigContract,
     [switch]$SkipHealth,
     # Accept a restore that could not be verified against any baseline (exit 0
@@ -95,14 +94,14 @@ param(
     [string]$ProcessArgumentPattern,
 
     # --- trust anchor ---------------------------------------------------------
-    # Re-pin SSM to the restored release. Off by default, operator-only, and
-    # applied only after the post-rollback verification passes.
-    [switch]$RepinTrust,
-    [string]$ApprovedCommitParam,
+    # -RepinTrust used to rewrite the SSM pin to the restored release. There is no
+    # pin to rewrite: the anchor is the release tag in the archive, and moving a
+    # tag is deliberately NOT something an automated step may do. The run now
+    # emits an attestation naming the restored release and the operator action
+    # still required. See the attestation block at the end of this script.
 
     [string]$Initials = $env:USERNAME,
     [string]$Environment = 'prod',
-    [string]$Region = 'us-gov-west-1',
     [string]$LogFile
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
@@ -148,13 +147,13 @@ if ($ListBackups) {
     Write-VesLog INFO ("{0} backup(s) for {1}, newest first:" -f $all.Count, $Processor) -LogFile $LogFile
     foreach ($b in $all) {
         $rec = $b.Record
+        # Did the tree in this backup match the release that was being installed
+        # over it? Formerly compared against the SSM pin; now against the incoming
+        # release hash recorded at backup time.
         $pinMatch = $null
-        $priorSsm = Get-RecordValue $rec 'priorSsm'
         $recordedHash = Get-RecordValue $rec 'backupManifestHash'
-        if ($priorSsm -and $recordedHash) {
-            $pinnedHash = Get-RecordValue $priorSsm 'trustHash'
-            if ($pinnedHash) { $pinMatch = ($pinnedHash -eq $recordedHash) }
-        }
+        $incomingHash = Get-RecordValue $rec 'incomingManifestHash'
+        if ($incomingHash -and $recordedHash) { $pinMatch = ($incomingHash -eq $recordedHash) }
         $line = "  {0}  files={1}  size={2:N0}B  record={3}  replacedBy={4}  priorTag={5}  matchedPin={6}" -f `
             $b.Name, $b.FileCount, $b.SizeBytes, $(if ($b.HasRecord) { 'yes' } else { 'NO (may be incomplete)' }), `
             $(if (Get-RecordValue $rec 'replacedByCommit') { Get-RecordValue $rec 'replacedByCommit' } else { '-' }), `
@@ -277,26 +276,9 @@ if (Test-Path -LiteralPath $backupManifestPath) {
     }
 }
 
-$priorSsm = Get-RecordValue $record 'priorSsm'
-$priorTrustHash = Get-RecordValue $priorSsm 'trustHash'
-$priorTrustRead = [bool](Get-RecordValue $priorSsm 'trustHashRead')
-$priorApprovedCommit = Get-RecordValue $priorSsm 'approvedCommit'
-$priorApprovedRead = [bool](Get-RecordValue $priorSsm 'approvedCommitRead')
-if (-not $TrustParam) { $TrustParam = Get-RecordValue $record 'trustParam' }
-if (-not $ApprovedCommitParam) { $ApprovedCommitParam = Get-RecordValue $record 'approvedCommitParam' }
+if (-not $BaselineRepo) { $BaselineRepo = Get-RecordValue $record 'baselineRepo' }
 if (-not $ReleaseTag) { $ReleaseTag = Get-RecordValue $record 'priorReleaseTag' }
 if (-not $ConfigPath) { $ConfigPath = Get-RecordValue $record 'configPath' }
-
-if ($RepinTrust) {
-    if (-not $priorTrustRead -or [string]::IsNullOrWhiteSpace($priorTrustHash)) {
-        Write-VesLog ERROR '-RepinTrust needs the prior SSM value recorded in rollback-record.json; this backup has none, and re-pinning to a blank anchor would break every later verify.' -LogFile $LogFile
-        Stop-Rollback $VES_EXIT_USAGE
-    }
-    if (-not $TrustParam) {
-        Write-VesLog ERROR '-RepinTrust requires -TrustParam (or a trustParam in the backup record).' -LogFile $LogFile
-        Stop-Rollback $VES_EXIT_USAGE
-    }
-}
 
 # --- Build the robocopy exclusions -------------------------------------------
 # The restore MUST mirror: /E alone would leave the bad release's files behind and
@@ -333,8 +315,8 @@ if ($ConfigPath) {
 # Block-level ShouldProcess, not per-cmdlet: robocopy is a native command and gets
 # no automatic -WhatIf.
 if (-not $PSCmdlet.ShouldProcess($TargetRoot, "Rollback $Processor from $(Split-Path -Leaf $chosenPath)")) {
-    Write-VesLog WARN ("WhatIf: would restore {0} ({1} files) to {2}; configRestore={3}; repinTrust={4}. Nothing changed." -f `
-            $chosenPath, $payload.Count, $TargetRoot, (-not $NoConfigRestore), [bool]$RepinTrust) -LogFile $LogFile
+    Write-VesLog WARN ("WhatIf: would restore {0} ({1} files) to {2}; configRestore={3}. Nothing changed." -f `
+            $chosenPath, $payload.Count, $TargetRoot, (-not $NoConfigRestore)) -LogFile $LogFile
     Stop-Rollback $VES_EXIT_OK
 }
 
@@ -422,48 +404,31 @@ Write-VesLog OK "Rollback complete: $Processor restored from $chosenPath" -LogFi
 $verifyCode = $VES_EXIT_OK
 $verifySource = $null
 $verifyManifest = $null
-$verifyTrust = $null
 $verifyRepo = $null
 
-# Whether the LIVE SSM anchor may be used to cross-check the restored release.
+# Which baseline describes the release being RESTORED.
 #
-# The anchor pins exactly one release at a time, and it is written at capture
-# (UAT sign-off) -- nothing re-pins it on the way back down. So after a failed
-# deploy it names the release we are rolling AWAY from. Passing -TrustParam
-# blindly then compares the restored (prior) release's manifest against the wrong
-# anchor and reports "Manifest not trusted" -> exit 2 on a byte-perfect restore,
-# which in turn permanently blocks -RepinTrust below (gated on this verify
-# passing) -- the re-pin was the only thing that could have made it pass.
+# This is the trap the old SSM code fell into and the reason -ReleaseTag here
+# must name the PRIOR release: the anchor describes exactly one release, and
+# after a failed deploy the archive's "current" release is the one being rolled
+# AWAY from. Verifying a byte-perfect restore against that baseline reports a
+# mismatch and fails a rollback that actually succeeded.
 #
 # So ask the anchor what it currently points at. Cross-check only when it really
 # does describe the release being restored; otherwise verify structurally against
 # the archived/explicit manifest and say plainly in the log that the live pin was
 # not the anchor. The manifest's own self-hash still rejects a tampered baseline.
-$anchorNote = 'no SSM trust parameter configured'
-$trustUsable = $false
-if ($TrustParam) {
-    $currentPin = $null
-    try { $currentPin = Get-VesTrustedHash -ParameterName $TrustParam -Region $Region }
-    catch { Write-VesLog WARN "Could not read the trust anchor at ${TrustParam}: $($_.Exception.Message)" -LogFile $LogFile }
-    if (-not $currentPin) {
-        $anchorNote = "NOT SSM-anchored: $TrustParam could not be read"
-    }
-    elseif ($priorTrustRead -and $priorTrustHash -and $currentPin -eq $priorTrustHash) {
-        $trustUsable = $true
-        $anchorNote = "SSM-anchored ($TrustParam still pins the release being restored)"
-    }
-    else {
-        $anchorNote = "NOT SSM-anchored: $TrustParam pins $currentPin, which is the release being rolled back, not the one being restored. Re-pin with -RepinTrust once this restore is proven."
-    }
-}
-
+# The anchor is the archived release record. -ReleaseTag here names the PRIOR
+# release (the one being restored), not the failed one -- Deploy-Processor passes
+# it as -RollbackReleaseTag precisely so a good rollback is not verified against
+# the bad release's baseline.
+$anchorNote = 'NOT anchored: no -BaselineRepo/-ReleaseTag for the release being restored'
 if ($BaselineRepo -and $ReleaseTag) {
     $verifySource = "tag $ReleaseTag in $BaselineRepo"; $verifyRepo = $BaselineRepo
-    if ($trustUsable) { $verifyTrust = $TrustParam }
+    $anchorNote = "anchored to $ReleaseTag"
 }
 elseif ($ManifestPath) {
     $verifySource = "manifest $ManifestPath"; $verifyManifest = $ManifestPath
-    if ($trustUsable) { $verifyTrust = $TrustParam }
 }
 elseif ($backupManifest) {
     # Self-recorded snapshot: proves the restore is byte-identical to what was in
@@ -483,17 +448,20 @@ if (-not $verifySource) {
 }
 else {
     Write-VesLog INFO ">>> post-rollback verify ($verifySource); $anchorNote" `
-        -Data @{runId = $runId; verifySource = $verifySource; ssmAnchored = $trustUsable; trustParam = $TrustParam } -LogFile $LogFile
+        -Data @{runId = $runId; verifySource = $verifySource; anchored = [bool]$verifyRepo } -LogFile $LogFile
     $verArgs = @(
         '-Mode', $(if ($ConfigContract) { 'All' } else { 'VerifyFiles' }),
         '-ReleaseRoot', $TargetRoot,
         '-Processor', $Processor,
-        '-Environment', $Environment,
-        '-Region', $Region)
+        '-Environment', $Environment)
     if ($verifyManifest) { $verArgs += '-ManifestPath', $verifyManifest }
     if ($verifyRepo) { $verArgs += '-BaselineRepo', $verifyRepo }
     if ($ReleaseTag -and $verifyRepo) { $verArgs += '-ReleaseTag', $ReleaseTag }
-    if ($verifyTrust) { $verArgs += '-TrustParam', $verifyTrust }
+    # Verifying against a bare manifest is unanchored by definition. Say so
+    # explicitly rather than letting verification refuse mid-rollback: the
+    # operator already accepted this weaker proof by supplying -ManifestPath or
+    # by falling back to the backup's own manifest, and both paths log it loudly.
+    if (-not $verifyRepo) { $verArgs += '-AllowUnanchoredVerify' }
     if ($ConfigContract) { $verArgs += '-ConfigContract', $ConfigContract, '-ConfigPath', $ConfigPath }
     if ($LogFile) { $verArgs += '-LogFile', $LogFile }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-Verification.ps1') @verArgs
@@ -502,15 +470,17 @@ else {
     if ($verifyCode -ne 0) { Write-VesLog ERROR "Post-rollback verify failed (exit $verifyCode)." -LogFile $LogFile }
 }
 
-# Independent of the verify above: did the tree we restored match what SSM had
-# pinned at backup time? Informational either way -- the restore is still correct.
+# Independent of the verify above: was the tree we restored the same one the
+# failed deploy was trying to install? Informational either way -- the restore is
+# still correct. Formerly compared against the SSM pin.
 $recordedHash = Get-RecordValue $record 'backupManifestHash'
-if ($recordedHash -and $priorTrustRead -and $priorTrustHash) {
-    if ($recordedHash -eq $priorTrustHash) {
-        Write-VesLog OK 'Restored tree matches the SSM-pinned prior baseline.' -LogFile $LogFile
+$recordedIncoming = Get-RecordValue $record 'incomingManifestHash'
+if ($recordedHash -and $recordedIncoming) {
+    if ($recordedHash -eq $recordedIncoming) {
+        Write-VesLog OK 'The tree replaced by that deploy was already the incoming release; this restore returns identical bits.' -LogFile $LogFile
     }
     else {
-        Write-VesLog DRIFT 'Restored tree matches pre-deploy production, which itself differed from the pinned baseline.' -LogFile $LogFile
+        Write-VesLog INFO 'Restored tree is the pre-deploy production state, which differed from the release that deploy was installing (the expected case).' -LogFile $LogFile
     }
 }
 
@@ -541,38 +511,27 @@ else {
     if ($healthCode -ne 0) { Write-VesLog ERROR "Post-rollback health check failed (exit $healthCode)." -LogFile $LogFile }
 }
 
-# --- Trust re-pin: last, and only on a proven restore -------------------------
-if ($RepinTrust) {
-    if ($verifyCode -ne 0) {
-        Write-VesLog ERROR 'TRUST RE-PIN SKIPPED: the post-rollback verification did not pass, and pinning the anchor to an unproven tree is exactly what the anchor exists to prevent.' -LogFile $LogFile
-    }
-    elseif ($PSCmdlet.ShouldProcess($TrustParam, 'Re-pin the SSM trust anchor to the restored release')) {
-        $currentPin = $null
-        try { $currentPin = Get-VesTrustedHash -ParameterName $TrustParam -Region $Region } catch { $currentPin = $null }
-        # audit line BEFORE the write, so the intent is on record even if it fails
-        Write-VesLog WARN 'TRUST RE-PIN' -Data @{
-            runId = $runId; trustParam = $TrustParam; fromHash = $currentPin; toHash = $priorTrustHash
-            approvedCommitParam = $ApprovedCommitParam; toApprovedCommit = $priorApprovedCommit
-            operator = "$env:USERNAME@$env:COMPUTERNAME"; reason = $Reason; backupDir = $chosenPath
-        } -LogFile $LogFile
-        try {
-            Set-VesTrustedHash -ParameterName $TrustParam -Value $priorTrustHash -Region $Region
-            # One switch drives BOTH values: re-pinning the hash without the
-            # approved-commit leaves the gate and the verifier disagreeing about
-            # which release is approved, which is worse than doing neither.
-            if ($ApprovedCommitParam -and $priorApprovedRead -and $priorApprovedCommit) {
-                Set-VesTrustedHash -ParameterName $ApprovedCommitParam -Value $priorApprovedCommit -Region $Region
-            }
-            else {
-                Write-VesLog WARN 'Approved-commit was not recorded in this backup; only the baseline hash was re-pinned. Re-pin the approved commit by hand before the next deploy.' -LogFile $LogFile
-            }
-            Write-VesLog OK 'TRUST RE-PIN COMPLETE' -Data @{runId = $runId; trustParam = $TrustParam; toHash = $priorTrustHash } -LogFile $LogFile
-        }
-        catch {
-            Write-VesLog ERROR "TRUST RE-PIN FAILED: $($_.Exception.Message)" -LogFile $LogFile
-            $verifyCode = Get-VesWorstExitCode -ExitCode @($verifyCode, $VES_EXIT_NOBASE)
-        }
-    }
+# --- Attestation: last, and only on a proven restore --------------------------
+# This replaces the SSM trust re-pin. There is no pin to rewrite any more, but the
+# problem the re-pin solved is still real: after a rollback, the release the
+# archive calls "approved" is the one that just failed, so the NEXT deploy would
+# gate against the wrong baseline. Nothing here can fix that automatically --
+# moving a release tag is exactly the privilege this design refuses to give an
+# automated step -- so it records what is actually live and names the human
+# action required.
+#
+# The safety property from the old re-pin is preserved verbatim: nothing is
+# asserted about a tree whose verification did not pass.
+if ($verifyCode -ne 0) {
+    Write-VesLog ERROR 'RESTORE NOT ATTESTED: the post-rollback verification did not pass, so this run makes no claim about what is now running in production.' `
+        -Data @{runId = $runId; attested = $false; verifyExitCode = $verifyCode } -LogFile $LogFile
+}
+else {
+    Write-VesLog WARN 'RESTORED RELEASE ATTESTED. The archive still marks the ROLLED-BACK release as approved: re-point the approved release tag before the next deploy, or the gate will compare against the release you just removed.' `
+        -Data @{
+        runId = $runId; attested = $true; restoredReleaseTag = $ReleaseTag
+        restoredFromBackup = $chosenPath; operator = "$env:USERNAME@$env:COMPUTERNAME"; reason = $Reason
+    } -LogFile $LogFile
 }
 
 # Severity, not numeric order: 2 (ERROR) outranks 3 (FAIL).
