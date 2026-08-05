@@ -5,6 +5,8 @@ It explains **what to run**, **where to run it**, and **how to run it** in clear
 
 For detailed technical guidance, use [RUNBOOK.md](RUNBOOK.md).
 
+> **Changed 2026-08-05:** approved releases are now recorded in a **release archive** (a Git repo of tagged releases). The old AWS/SSM values (`-TrustParam`, `-ApprovedCommitParam`, `-Region`) no longer exist; the scripts take `-ArchiveRepo`/`-BaselineRepo` and `-ReleaseTag` instead.
+
 ---
 
 ## 1) What this process does
@@ -12,11 +14,11 @@ For detailed technical guidance, use [RUNBOOK.md](RUNBOOK.md).
 You are confirming that:
 
 1. The script suite is healthy.
-2. The approved UAT release was captured correctly.
+2. The approved UAT release was recorded in the release archive correctly.
 3. Production files match what UAT approved.
 4. Health checks pass after deployment.
 
-If anything fails, stop and escalate.
+The release archive is the source of truth for what was approved. Its safety rests on one simple rule: only authorized people may move release tags in that archive. If anything fails, stop and escalate.
 
 ---
 
@@ -27,7 +29,8 @@ Check each item before running anything:
 - [ ] I am using **Windows PowerShell 5.1** (not PowerShell 7).
 - [ ] I am on the **correct machine** for this step (workstation, UAT host, or PROD server).
 - [ ] I know where the repo is on this machine (example: `D:\ves-verify`).
-- [ ] I have the required values (processor name, manifest path, SSM paths, release tag, region).
+- [ ] I know where the **release archive** is on this machine (the folder that holds approved releases).
+- [ ] I have the required values (processor name, manifest path, release tag).
 - [ ] Required approvers are present for UAT capture or production actions.
 
 ---
@@ -37,7 +40,7 @@ Check each item before running anything:
 | Script                                       | Where to run it                                    | Why                                                  |
 | -------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------- |
 | `Invoke-Tests.ps1`                           | Tester workstation                                 | Make sure script logic is healthy first              |
-| `Invoke-Preflight.ps1`                       | The machine where you will run verification/deploy | Check PowerShell, AWS access, and baseline readiness |
+| `Invoke-Preflight.ps1`                       | The machine where you will run verification/deploy | Check PowerShell, the release archive, and baseline readiness |
 | `Invoke-Verification.ps1 -Mode Capture`      | UAT approval host                                  | Save and lock approved UAT baseline                  |
 | `Invoke-Verification.ps1 -Mode VerifyFiles`  | Production target server                           | Check production files match approved baseline       |
 | `Invoke-Verification.ps1 -Mode VerifyConfig` | Production target server                           | Check config values are valid                        |
@@ -94,15 +97,17 @@ If not `0`: stop and escalate.
 
 ```powershell
 .\Invoke-Preflight.ps1 -Processor <system> `
-  -ApprovedCommitParam <approvedCommitParam> `
-  -TrustParam <trustParam> `
-  -ManifestPath <manifestPath>
+  -ManifestPath <manifestPath> `
+  -BaselineRepo <releaseArchivePath> `
+  -ReleaseTag <releaseTag>
 $LASTEXITCODE
 ```
 
 Success means exit code is `0`.
 
 If not `0`: stop and fix access/paths before moving on.
+
+Note: if the manifest is not yet recorded in the release archive, preflight will show a warning ("NOT anchored") but still pass. If the release archive is named but cannot be read, preflight fails with exit code `2` — stop and escalate.
 
 ---
 
@@ -116,18 +121,23 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
  -Mode Capture `
  -ReleaseRoot <releaseRoot> `
  -ManifestPath <manifestPath> `
- -TrustParam <trustParam> `
- -ArchiveRepo <repoRoot> `
+ -ArchiveRepo <releaseArchivePath> `
  -ReleaseTag <releaseTag> `
  -Processor <system> `
  -CommitSha (git rev-parse HEAD) `
  -Environment uat `
- -Region <region> `
+ -PushRemote `
  -Json
 $LASTEXITCODE
 ```
 
 Success means exit code is `0`.
+
+Notes:
+
+- `-CommitSha` must be a real commit id. The script refuses an empty or placeholder value (exit code `10`).
+- `-PushRemote` shares the release record with the team's copy of the archive. Leave it off only if the archive has no remote.
+- Recording the release under its tag **is** the approval step — there is no separate "pin" or "activate" step afterward.
 
 If not `0`: stop and escalate.
 
@@ -142,11 +152,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
  -File .\Invoke-Verification.ps1 `
  -Mode VerifyFiles `
  -ReleaseRoot <releaseRoot> `
- -ManifestPath <manifestPath> `
- -TrustParam <trustParam> `
+ -BaselineRepo <releaseArchivePath> `
+ -ReleaseTag <releaseTag> `
  -Processor <system> `
  -Environment prod `
- -Region <region> `
  -Json
 $LASTEXITCODE
 ```
@@ -155,6 +164,8 @@ Success means:
 
 - Exit code `0`
 - No `MISSING`, `CHANGED`, or `EXTRA` entries
+
+The check reads the approved baseline out of the release archive using the release tag. Do not skip the archive: a check that compares production only against a local manifest file proves the two files agree with each other, not that the release was approved.
 
 If not `0`: stop and escalate with logs.
 
@@ -165,13 +176,15 @@ If not `0`: stop and escalate with logs.
 **Where:** production target server.
 
 ```powershell
-.\Invoke-Verification.ps1 -Mode VerifyConfig -Processor <system>
+.\Invoke-Verification.ps1 -Mode VerifyConfig -Processor <system> `
+  -ConfigContract <contractPath> `
+  -ConfigPath <configPath>
 $LASTEXITCODE
 ```
 
 Success means exit code `0`.
 
-If not `0`: stop and escalate.
+If not `0`: stop and escalate. If the failure message says the contract contains unverifiable keys (`ssmExpectedValues`), the contract file itself needs fixing — ask the contract author to move those keys to `expectedValues` or remove them.
 
 ---
 
@@ -201,23 +214,26 @@ Use these only during an approved change window.
 
 ```powershell
 .\Invoke-PreDeployGate.ps1 -StagedRoot <stagedRoot> -StagedCommit <sha> `
-  -ApprovedCommitParam <approvedCommitParam> `
-  -BaselineRepo <repoRoot> -ReleaseTag <releaseTag> `
-  -TrustParam <trustParam> -Processor <system>
+  -BaselineRepo <releaseArchivePath> -ReleaseTag <releaseTag> `
+  -Processor <system>
 $LASTEXITCODE
 ```
+
+The gate reads the approved release out of the archive using the tag; both `-BaselineRepo` and `-ReleaseTag` are required (exit code `10` without them).
 
 2. Dry-run deploy first on target server:
 
 ```powershell
-.\processors\Deploy-<system>.ps1 -StagedRoot <stagedRoot> -StagedCommit <sha> -WhatIf
+.\processors\Deploy-<system>.ps1 -StagedRoot <stagedRoot> -StagedCommit <sha> `
+  -ReleaseTag <releaseTag> -BaselineRepo <releaseArchivePath> -WhatIf
 $LASTEXITCODE
 ```
 
 3. Real deploy on target server:
 
 ```powershell
-.\processors\Deploy-<system>.ps1 -StagedRoot <stagedRoot> -StagedCommit <sha>
+.\processors\Deploy-<system>.ps1 -StagedRoot <stagedRoot> -StagedCommit <sha> `
+  -ReleaseTag <releaseTag> -BaselineRepo <releaseArchivePath>
 $LASTEXITCODE
 ```
 
@@ -229,7 +245,7 @@ $LASTEXITCODE
 | --------: | -------------------------------------------------- | -------------------------------------- |
 |       `0` | Success                                            | Record result and continue             |
 |       `1` | Files/config do not match approved baseline        | Stop and escalate                      |
-|       `2` | Trust/access/runtime issue (often SSM/path/access) | Stop, validate inputs/access, escalate |
+|       `2` | Approved-release record missing or unreadable (release archive/path/access) | Stop, validate inputs/access, escalate |
 |       `3` | Health check failed                                | Stop and escalate immediately          |
 |      `10` | Invalid or unsafe usage/input                      | Correct command inputs and rerun       |
 

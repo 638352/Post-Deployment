@@ -4,13 +4,17 @@
 
 Work from the repository root at `c:\Users\howardr01\Post-Deployment`. This is the
 single live Git checkout (`origin/main`) and the source of truth for scripts, tests,
-and docs.
+and docs. Open Cursor on that path (File → Open Folder); do **not** open the nested
+`Post-Deployment\Post-Deployment` folder — it is retired and empty, so Source Control
+and commits from that window will look broken.
 
 History note (2026-08-05): there was previously a second, newer checkout nested at
 `Post-Deployment\Post-Deployment` while the parent lagged behind. The parent has been
 fast-forwarded to that lineage and the nested copy removed. If a nested
 `Post-Deployment\` folder ever reappears, it is scratch from another tool, not the
-canonical repo — check `git log` before trusting either.
+canonical repo — check `git log` before trusting either. Delete the empty retired
+nested folder after a reboot if it is still present (directory handles may block
+removal until then).
 
 Treat `Post-Deployment-datadog-558667ed/` as a snapshot/reference copy only. Do not make changes there unless you are explicitly comparing against the snapshot.
 
