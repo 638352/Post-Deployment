@@ -107,5 +107,6 @@ has been observed once under change control.
 ## Out of scope for this first pilot
 
 Citrix inventory, PROD wrappers (`VESEMSEGRESS01/02/03`), database objects,
-Datadog re-enable, and break-glass / config-`/MIR` policy decisions (decide those
-before PROD; see README Open items).
+Datadog re-enable, and break-glass policy (decide before PROD; see README Open
+items). Per-server config is not open: stage the server-correct `.exe.config`
+with the artifact; the gate blocks a package that shipped without it.

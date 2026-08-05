@@ -115,9 +115,12 @@ The manual steps are not automation debt. They fall into two groups:
    attaches to a person, and automating them would remove the control rather than
    strengthen it. Each one is recorded in the audit trail with the operator's identity.
 
-2. **Genuine remaining work** — the per-server configuration still to be filled in,
-   the server inventory to be completed, and above all the alerting to be connected.
-   These are tracked as open items in the README.
+2. **Genuine remaining work** — filling the remaining per-server deploy wrappers
+   and confirming runbook values (task names, log dirs), completing the server
+   inventory, and above all connecting alerting. The rule for per-server config
+   files is already decided and enforced: stage the server-correct config with
+   the artifact; the gate blocks a package that shipped without it. Remaining
+   items are tracked in the README.
 
 > **Trust model (2026-08-05).** The approved baseline is the release tag in the
 > baseline archive repository plus the manifest committed under it. There is no

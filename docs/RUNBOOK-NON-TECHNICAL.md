@@ -221,6 +221,14 @@ $LASTEXITCODE
 
 The gate reads the approved release out of the archive using the tag; both `-BaselineRepo` and `-ReleaseTag` are required (exit code `10` without them).
 
+Before either deploy step: the staged package must already contain the
+server’s config file (for OutboundDBQ, `VES.OutboundDBQProcessor.exe.config`
+with that box’s values). The deploy overwrites the config on the server; a
+package without it is blocked and nothing is copied. For the UAT OutboundDBQ
+wrapper, pass `-ConfirmedRunbookValues` only after the scheduled-task name and
+log folder match the runbook — the script also checks that both exist on the
+server and refuses to run if either does not.
+
 2. Dry-run deploy first on target server:
 
 ```powershell

@@ -321,6 +321,16 @@ no unanchored deploy. Deploy mode uses the staged-release parameters
 (`-StagedRoot`, `-StagedCommit`, `-ReleaseTag`, `-BaselineRepo`,
 `-ManifestPath`) and does not use rollback-only parameters.
 
+**Stage the config.** The copy mirrors with `robocopy /MIR` and no `/XF`, so
+whatever `.exe.config` (or other config under `TargetRoot`) ships in
+`StagedRoot` replaces the file on the server. `*.config` is excluded from the
+hash manifest by design, so file verify cannot catch a missing one; the gate
+does — when `-ConfigContract`/`-ConfigPath` are set, `Deploy-Processor.ps1`
+derives the config's staged relative path and requires it as an artifact. A
+package without that file is blocked (exit `1`) before anything is copied.
+Build the server-correct config into the staged tree; the deploy will not
+preserve the one already on the box.
+
 With `-BackupRoot` set (the wrappers set it), the pre-copy backup is the
 restore point, recorded by a `rollback-record.json` sidecar naming what it
 replaced — including the `baselineRepo` and the `incomingManifestHash` of the
@@ -328,7 +338,10 @@ release that overwrote it.
 
 Each system's thin wrapper in `processors/` pins the fixed per-server values
 (`TargetRoot`, `ScheduledTasks`, paths) and calls `Deploy-Processor.ps1`. Copy
-`processors/Deploy-SYSTEM_NAME.ps1` to onboard a new system.
+`processors/Deploy-SYSTEM_NAME.ps1` to onboard a new system. The UAT OutboundDBQ
+wrapper (`Deploy-OutboundDBQ-uat.ps1`) also requires `-ConfirmedRunbookValues`
+and then checks that its scheduled-task name and fresh-log directory exist on
+the box before deploying.
 
 **Console-EXE note:** the same `VES.OutboundDBQProcessor.exe` runs 2–3 times per
 box from different folders. The deploy stops only the instance whose executable
