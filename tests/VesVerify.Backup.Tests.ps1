@@ -123,6 +123,33 @@ Describe 'Get-VesWorstExitCode' {
     }
 }
 
+Describe 'Get-VesManifest empty tree' {
+    It 'returns an empty object[] (not $null) for a directory with no files' {
+        $empty = Join-Path $TestDrive 'empty-manifest-root'
+        New-Item -ItemType Directory -Path $empty -Force | Out-Null
+        $m = Get-VesManifest -ReleaseRoot $empty
+        $null -eq $m | Should -BeFalse
+        @($m).Count | Should -Be 0
+    }
+
+    It 'hashes and compares an empty manifest without parameter-binding errors' {
+        $empty = Join-Path $TestDrive 'empty-manifest-compare'
+        New-Item -ItemType Directory -Path $empty -Force | Out-Null
+        # Assign first, then wrap. `@($fn)` around a unary-comma empty return nests
+        # the empty array as one element and breaks Compare-VesFiles.
+        $m = Get-VesManifest -ReleaseRoot $empty
+        $m = @($m)
+        { Get-VesManifestHash -Manifest $m } | Should -Not -Throw
+        $hash = Get-VesManifestHash -Manifest $m
+        $hash | Should -Match '^[0-9a-f]{64}$'
+        $diff = Compare-VesFiles -Baseline $m -ReleaseRoot $empty
+        $diff.Match | Should -BeTrue
+        $diff.Missing.Count | Should -Be 0
+        $diff.Extra.Count | Should -Be 0
+        $diff.Changed.Count | Should -Be 0
+    }
+}
+
 Describe 'Stop-VesProcessorTarget' {
     BeforeAll {
         $script:Target = New-VesTree (Join-Path $TestDrive 'stoptarget')

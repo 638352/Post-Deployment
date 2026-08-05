@@ -519,8 +519,9 @@ and fresh-log health probes; do not pass their binaries to
   VLER_EM_Outbound_Request_Handler / \_Processor (and \_2 / \_12 variants) and
   VLER_EM_Real_Time_Outbound_Processor. **Citrix server names are not yet
   documented** and must be added to `requiredServers` and `targets` before
-  `inventoryComplete` can be set to true. processors/ holds only the template;
-  copy it per confirmed system and server (3-5 person-days each incl. pilot).
+  `inventoryComplete` can be set to true. `processors/` has the template plus
+  filled wrappers (e.g. `Deploy-OutboundDBQ-uat.ps1`); copy the template per
+  confirmed system and server (3-5 person-days each incl. pilot).
 - Database objects (stored procedures, triggers, views) are **out of scope** for
   the current two-week window. They fit the same SHA-256 capture-and-verify
   pattern and are planned as a fast follow; no script changes are needed to

@@ -605,11 +605,14 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
         Stop-Deploy $VES_EXIT_NOBASE
     }
     if ($copyFailed) {
-        # A /MIR that died part-way IS the case rollback exists for.
-        $code = $VES_EXIT_DRIFT
+        # A /MIR that died part-way left production indeterminate — same class as a
+        # failed restore or aborted backup: NOBASE (2), not DRIFT (1). Drift means
+        # "we compared and production differs"; here no successful compare ran.
+        # Auto-rollback is the remediation path when a backup exists.
+        $code = $VES_EXIT_NOBASE
         if ($rollbackOnFail) {
             $script:onFailExitCode = $null
-            & $rollbackOnFail 'copy' $VES_EXIT_DRIFT
+            & $rollbackOnFail 'copy' $VES_EXIT_NOBASE
             if ($null -ne $script:onFailExitCode) { $code = $script:onFailExitCode }
         }
         Stop-Deploy $code

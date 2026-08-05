@@ -310,9 +310,11 @@ function Get-VesManifest {
         # Record path, hash, and size; size is a cheap secondary sanity signal.
         $out.Add([PSCustomObject]@{ RelPath = $relNorm; Sha256 = $hash; Bytes = $f.Length })
     }
-    # Sort for deterministic order (required for a stable manifest hash); leading comma
-    # prevents PowerShell from unrolling a single-element result into a scalar.
-    return , ($out | Sort-Object RelPath)
+    # Sort for deterministic order (required for a stable manifest hash). Force an
+    # object[] even when empty: `return , ($list | Sort-Object)` on an empty List
+    # collapses to $null under PS 5.1, which then fails Mandatory [object[]] binds.
+    $sorted = @($out | Sort-Object RelPath)
+    return , $sorted
 }
 
 function Get-VesManifestHash {
@@ -325,7 +327,7 @@ function Get-VesManifestHash {
     [CmdletBinding()]
     param(
         # The manifest entries (output of Get-VesManifest or the .files of a loaded manifest doc).
-        [Parameter(Mandatory)][object[]]$Manifest
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Manifest
     )
     # StringBuilder avoids repeated string reallocation while concatenating many lines.
     $sb = New-Object System.Text.StringBuilder
@@ -352,7 +354,7 @@ function Export-VesManifest {
     [CmdletBinding()]
     param(
         # Manifest entries to persist.
-        [Parameter(Mandatory)][object[]]$Manifest,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Manifest,
         # Destination JSON path.
         [Parameter(Mandatory)][string]$Path,
         # Git commit of the release captured; 'unknown' if capture ran outside a checkout.
@@ -462,7 +464,7 @@ function Compare-VesFiles {
     [CmdletBinding()]
     param(
         # Baseline entries from the trusted manifest.
-        [Parameter(Mandatory)][object[]]$Baseline,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Baseline,
         # Live production tree to compare.
         [Parameter(Mandatory)][string]$ReleaseRoot,
         # Must match the pattern used at capture, or excluded files appear as extras.
@@ -470,10 +472,19 @@ function Compare-VesFiles {
     )
     # Hash the live tree with the same rules used at capture time.
     $live = Get-VesManifest -ReleaseRoot $ReleaseRoot -ExcludePattern $ExcludePattern
-    # Index baseline by relative path for O(1) lookups.
-    $baseMap = @{}; foreach ($b in $Baseline) { $baseMap[$b.RelPath] = $b }
+    # Index baseline by relative path for O(1) lookups. Skip null/non-entry items
+    # so a mangled empty bind cannot throw on .RelPath under StrictMode.
+    $baseMap = @{}
+    foreach ($b in $Baseline) {
+        if ($null -eq $b -or $null -eq $b.PSObject.Properties['RelPath']) { continue }
+        $baseMap[$b.RelPath] = $b
+    }
     # Index live tree the same way.
-    $liveMap = @{}; foreach ($l in $live) { $liveMap[$l.RelPath] = $l }
+    $liveMap = @{}
+    foreach ($l in $live) {
+        if ($null -eq $l -or $null -eq $l.PSObject.Properties['RelPath']) { continue }
+        $liveMap[$l.RelPath] = $l
+    }
 
     $missing = New-Object System.Collections.Generic.List[string]  # In baseline, absent in prod (the Storage.Net case).
     $changed = New-Object System.Collections.Generic.List[object]  # Present in both but hash differs.

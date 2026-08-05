@@ -8,7 +8,8 @@
     "Citrix server names are not yet documented in this repository and must be added to requiredServers and targets.",
     "Confirm production processor paths, task names, configuration paths, and GovCloud region from the deployment runbooks.",
     "Excluded per brief Scope: cloud services (gateway services, MERA - VESMERA01, VESOMSVEMS01/02) already have standard deployment processes; joining them to the Git release discipline is later work.",
-    "Excluded per brief Scope: database objects (stored procedures, triggers, views) are a planned fast follow, outside the two-week window."
+    "Excluded per brief Scope: database objects (stored procedures, triggers, views) are a planned fast follow, outside the two-week window.",
+    "Starter OutboundDBQ paths match SERVERS.md UAT and processors/Deploy-OutboundDBQ-uat.ps1; PROD uses VESEMSEGRESS02/03 with different roots — confirm before inventoryComplete."
   ],
   "requiredServers": [
     "VESDEVAPPS01",
@@ -22,17 +23,17 @@
   ],
   "targets": [
     {
-      "processor": "OutboundDBQProcessor",
-      "server": "VESEMSEGRESS02",
-      "environment": "prod",
+      "processor": "OutboundDBQ",
+      "server": "VESMSEGRESSUAT",
+      "environment": "uat",
       "inventoryStatus": "needs-confirmation",
       "releaseTag": "TBD",
-      "releaseRoot": "C:\\VLER_Test\\Processors\\OutboundDBQProcessor",
-      "manifestPath": "D:\\baselines\\OutboundDBQProcessor.json",
-      "trustParam": "/ves/OutboundDBQProcessor/baseline-hash",
-      "configContract": "D:\\baselines\\OutboundDBQProcessor.config.json",
-      "configPath": "C:\\VLER_Test\\Processors\\OutboundDBQProcessor\\VES.OutboundDBQProcessor.exe.config",
-      "note": "DBQ is documented on VESEMSEGRESS02/03; create one confirmed entry per deployed copy."
+      "releaseRoot": "C:\\VLER_TEST_OUTBOUND\\Processors\\VES.OutboundProcessor",
+      "manifestPath": "D:\\baselines\\OutboundDBQ.json",
+      "trustParam": "/ves/OutboundDBQ/baseline-hash",
+      "configContract": "D:\\baselines\\OutboundDBQ.config.json",
+      "configPath": "C:\\VLER_TEST_OUTBOUND\\Processors\\VES.OutboundProcessor\\VES.OutboundDBQProcessor.exe.config",
+      "note": "UAT starter aligned with Deploy-OutboundDBQ-uat.ps1 / SERVERS.md. DBQ also deploys on VESEMSEGRESS02/03 in PROD — create one confirmed entry per deployed copy."
     }
   ]
 }

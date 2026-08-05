@@ -143,10 +143,7 @@ try {
         }
         elseif ($code -eq $VES_EXIT_DRIFT) {
             $driftedNames.Add($t.processor)
-            # Numeric -lt is safe here: verify returns only 0/1/2 (no health=3).
-            # Do not reuse this pattern where 3 can appear — severity is not
-            # numeric order (see Get-VesWorstExitCode: 10 > 2 > 3 > 1 > 0).
-            if ($worst -lt $VES_EXIT_DRIFT) { $worst = $VES_EXIT_DRIFT }
+            $worst = Get-VesWorstExitCode -ExitCode @($worst, $code)
             Write-VesLog DRIFT "DRIFT DETECTED $($t.processor): deployed files/config diverged from baseline." `
                 -Data @{runId=$runId; outcome='FAIL'; exitCode=$code} -LogFile $log
             # --- DATADOG DISABLED ---------------------------------------------
@@ -157,7 +154,7 @@ try {
         }
         elseif ($code -eq $VES_EXIT_NOBASE) {
             $trustFailNames.Add($t.processor)
-            if ($worst -lt $VES_EXIT_NOBASE) { $worst = $VES_EXIT_NOBASE }
+            $worst = Get-VesWorstExitCode -ExitCode @($worst, $code)
             Write-VesLog ERROR "DRIFT-CHECK TRUST FAIL $($t.processor): baseline missing, unreadable, or untrusted." `
                 -Data @{runId=$runId; outcome='ERROR'; exitCode=$code} -LogFile $log
             # --- DATADOG DISABLED ---------------------------------------------
@@ -170,7 +167,7 @@ try {
             $errorNames.Add($t.processor)
             # Unexpected codes (health, usage, unknown) collapse to NOBASE so the
             # sweep never reports cleaner than "unverified".
-            if ($worst -lt $VES_EXIT_NOBASE) { $worst = $VES_EXIT_NOBASE }
+            $worst = Get-VesWorstExitCode -ExitCode @($worst, $VES_EXIT_NOBASE)
             Write-VesLog ERROR "DRIFT-CHECK ERROR $($t.processor): verify exited $code; treating as unverified." `
                 -Data @{runId=$runId; outcome='ERROR'; exitCode=$code} -LogFile $log
             # --- DATADOG DISABLED ---------------------------------------------

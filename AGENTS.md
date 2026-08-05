@@ -2,8 +2,13 @@
 
 ## Canonical workspace
 
-Work from the repository root in `c:\Users\howardr01\Post-Deployment`.
-That root folder is the source of truth for scripts, tests, and docs because it contains the live Git history.
+Work from the repository root in `c:\Users\howardr01\Post-Deployment\Post-Deployment`.
+That nested folder is the live Git checkout (`origin/main`) and the source of truth
+for scripts, tests, and docs.
+
+Do **not** edit or run scripts from the parent folder `c:\Users\howardr01\Post-Deployment`
+except when deliberately comparing trees: that parent copy is stale (for example its
+`Invoke-Preflight.ps1` still has a false-READY inventory bug fixed in this repo).
 
 Treat `Post-Deployment-datadog-558667ed/` as a snapshot/reference copy only. Do not make changes there unless you are explicitly comparing against the snapshot.
 

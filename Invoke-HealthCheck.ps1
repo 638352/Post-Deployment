@@ -81,6 +81,13 @@ if ($probeCount -eq 0) {
     exit $VES_EXIT_USAGE
 }
 
+# Outer try/catch: with $ErrorActionPreference Stop, an unexpected terminating error
+# outside a probe's own catch would otherwise become PowerShell's default exit 1
+# (drift). Health/runtime failures must never be mislabeled as file drift.
+try {
+# Test hook: forces the outer catch so Pester can assert exit 3, not 1.
+if ($env:VES_HEALTH_FORCE_THROW -eq '1') { throw 'VES_HEALTH_FORCE_THROW' }
+
 # Check 1: each required .NET assembly loads and its types resolve (catches a missing dependency)
 foreach ($dll in $RequiredAssemblies) {
     try {
@@ -267,3 +274,22 @@ Write-VesLog ($(if ($healthy) { 'OK' }else { 'ERROR' })) `
     -Data @{runId = $runId; outcome = $(if ($healthy) { 'PASS' } else { 'FAIL' }); exitCode = $exitCode; processor = $Processor; release = $CommitSha; releaseTag = $ReleaseTag } `
     -LogFile $LogFile
 exit $exitCode
+}
+catch {
+    Write-VesLog ERROR "Health check error: $($_.Exception.Message)" `
+        -Data @{runId = $runId; outcome = 'FAIL'; exitCode = $VES_EXIT_HEALTH; processor = $Processor } -LogFile $LogFile
+    if ($Json) {
+        [PSCustomObject]@{
+            runId     = $runId
+            processor = $Processor
+            commit    = $CommitSha
+            healthy   = $false
+            outcome   = 'FAIL'
+            failures  = @("error:$($_.Exception.Message)")
+        } | ConvertTo-Json -Compress
+    }
+    Write-VesLog ERROR ("RUN END: health verification outcome=FAIL exit={0}" -f $VES_EXIT_HEALTH) `
+        -Data @{runId = $runId; outcome = 'FAIL'; exitCode = $VES_EXIT_HEALTH; processor = $Processor; release = $CommitSha; releaseTag = $ReleaseTag } `
+        -LogFile $LogFile
+    exit $VES_EXIT_HEALTH
+}

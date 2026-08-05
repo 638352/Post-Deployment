@@ -20,9 +20,12 @@
 
     Two shapes to fill in, pick the one that matches the system:
       - Outbound .exe processor (VESEMSEGRESS0x): set ScheduledTasks to the Task
-        Scheduler jobs on THIS server (e.g. VLER_EM_Real_Time_Outbound_Processor),
-        FreshLogDir to its C:\VLER_Test\Logs\... folder, leave ServiceName/HealthUrl
-        empty. There is no actuator endpoint.
+        Scheduler jobs on THIS server (e.g. VLER_EM_Realtime_DBQ_Processor),
+        FreshLogDir to its log folder under the tier root (UAT example:
+        C:\VLER_TEST_OUTBOUND\Logs\...), leave ServiceName/HealthUrl empty.
+        There is no actuator endpoint. TargetRoot is the per-tier
+        ...\Processors\VES.OutboundProcessor folder (see SERVERS.md), not
+        ...\Processors\<name>.
       - Java/Spring Boot service (VESOMSVEMS0x, VESMERA0x): set ServiceName (e.g.
         oms-vems-pagecount-prod) and HealthUrl (e.g.
         http://localhost:9191/actuator/health), leave ScheduledTasks empty.
@@ -65,29 +68,31 @@ $log = Join-Path $logDir ('deploy_SYSTEM_NAME_{0}.jsonl' -f (Get-Date).ToUnivers
 # - BackupRoot is the folder where dated restore points are stored for rollback.
 # Values below are shaped for an outbound .exe processor on an egress server.
 $fixed = @{
-    Processor              = 'SYSTEM_NAME'                                   # e.g. OutboundDBQProcessor
-    TargetRoot             = 'C:\VLER_Test\Processors\SYSTEM_NAME'           # where the .exe lives on the box
+    Processor              = 'SYSTEM_NAME'                                   # e.g. OutboundDBQ
+    # Per-tier install folder (SERVERS.md): not ...\Processors\SYSTEM_NAME
+    TargetRoot             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor'
     ManifestPath           = 'D:\baselines\SYSTEM_NAME.json'
     TrustParam             = '/ves/SYSTEM_NAME/baseline-hash'
     ApprovedCommitParam    = '/ves/SYSTEM_NAME/approved-commit'
     ConfigContract         = 'D:\baselines\SYSTEM_NAME.config.json'
-    ConfigPath             = 'C:\VLER_Test\Processors\SYSTEM_NAME\VES.OutboundDBQProcessor.exe.config'
+    ConfigPath             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe.config'
     # dated backup of the current prod files before overwrite (runbook convention)
-    BackupRoot             = 'C:\VLER_Test\Processors\BackUp'
+    BackupRoot             = 'C:\VLER_TEST_OUTBOUND\Processors\BackUp'
     # stop/restart: the outbound processors run as Task Scheduler jobs on THIS
     # server. List only the jobs that live here (see VEMS-5346 note in header).
-    ScheduledTasks         = @('VLER_EM_Real_Time_Outbound_Processor')
+    # Name must match the .bat / Task Scheduler entry (e.g. Realtime_DBQ, not Real_Time).
+    ScheduledTasks         = @('VLER_EM_Realtime_DBQ_Processor')
     # console EXEs hold their files open even with the task disabled: kill the
     # running instance (matched by exe path under TargetRoot, audited by PID +
     # command line) and relaunch via the task right after a clean copy
     KillProcesses          = $true
     StartTasksAfter        = $true
-    # Match the processor mode argument as well as the executable path.
+    # Match the processor mode argument as well as the executable path (RTPDP = DBQ).
     ProcessArgumentPattern = '\bRTPDP\b'
     # health for an endpoint-less .exe: a fresh line in today's log proves life
-    FreshLogDir            = 'C:\VLER_Test\Logs\VES.OutboundProcessor'
+    FreshLogDir            = 'C:\VLER_TEST_OUTBOUND\Logs\VES.OutboundProcessor'
     # .NET assembly load check (defect UAT may have signed off on)
-    RequiredAssemblies     = @('C:\VLER_Test\Processors\SYSTEM_NAME\VES.OutboundDBQProcessor.exe')
+    RequiredAssemblies     = @('C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe')
     # --- Java/Spring Boot variant instead of the two lines above: ---
     # ServiceName       = 'oms-vems-pagecount-prod'
     # HealthUrl         = 'http://localhost:9191/actuator/health'
