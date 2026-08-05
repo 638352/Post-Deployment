@@ -72,3 +72,45 @@ Describe 'UAT-to-production file match flow' {
         $r.Output   | Should -Match 'ReleaseRoot required'
     }
 }
+
+Describe 'capture and compare must use the same exclude rules' {
+    # A baseline captured under one exclude pattern and compared under another
+    # reports the excluded files as Extra forever -- drift no redeploy can clear.
+    # The pattern is now recorded in the manifest so the mismatch is caught and
+    # named instead of surfacing as an unexplained permanent failure.
+    BeforeAll {
+        $script:CustomManifest = Join-Path $script:Root 'custom-pattern.json'
+        $script:CustomPattern  = '(?i)\.tmp$'
+        $script:CustomCapture  = Invoke-VesScript 'Invoke-Verification.ps1' @(
+            '-Mode','Capture',
+            '-ReleaseRoot',$script:Release,
+            '-ManifestPath',$script:CustomManifest,
+            '-ExcludePattern',$script:CustomPattern,
+            '-Processor','test',
+            '-AllowUntrustedCapture','-AllowUnarchivedCapture','-Json')
+    }
+
+    It 'records the pattern it captured under' {
+        $script:CustomCapture.ExitCode | Should -Be 0
+        $doc = Get-Content -LiteralPath $script:CustomManifest -Raw | ConvertFrom-Json
+        $doc.excludePattern | Should -Be $script:CustomPattern
+    }
+
+    It 'exits 2 (not 1) when the verify pattern differs from the capture pattern' {
+        $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
+            '-Mode','VerifyFiles','-ReleaseRoot',$script:Release,
+            '-ManifestPath',$script:CustomManifest,'-Json')
+        # NOBASE: the baseline is unusable here, production is not wrong
+        $r.ExitCode | Should -Be 2
+        $r.Output   | Should -Match 'captured under a different exclude pattern'
+    }
+
+    It 'passes when the same pattern is supplied again' {
+        $r = Invoke-VesScript 'Invoke-Verification.ps1' @(
+            '-Mode','VerifyFiles','-ReleaseRoot',$script:Release,
+            '-ManifestPath',$script:CustomManifest,
+            '-ExcludePattern',$script:CustomPattern,'-Json')
+        $r.ExitCode    | Should -Be 0
+        $r.Json.status | Should -Be 'match'
+    }
+}

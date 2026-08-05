@@ -133,7 +133,11 @@ try {
             # hash the release tree and write the manifest to disk
             Write-VesLog INFO "Capturing baseline: $ReleaseRoot" -Data @{processor = $Processor } -LogFile $LogFile
             $manifest = Get-VesManifest -ReleaseRoot $ReleaseRoot -ExcludePattern $ExcludePattern
-            $hash = Export-VesManifest -Manifest $manifest -Path $ManifestPath -CommitSha $CommitSha -Processor $Processor
+            # Record the pattern in the manifest: a baseline captured under custom
+            # rules is only comparable by a run using the same rules, and without
+            # this the mismatch surfaces as unexplained permanent drift.
+            $hash = Export-VesManifest -Manifest $manifest -Path $ManifestPath -CommitSha $CommitSha `
+                -Processor $Processor -ExcludePattern $ExcludePattern
             Write-VesLog OK "Manifest written: $($manifest.Count) files, hash=$hash" -LogFile $LogFile
             # What the trust anchor pointed at BEFORE this capture. Read it now,
             # while it is still the previous release's hash: the put-parameter
@@ -257,6 +261,21 @@ try {
                 # manifest was edited or corrupted after capture
                 Write-VesLog ERROR "Manifest self-hash mismatch (tampered/corrupt): stored=$($m.StoredHash) recomputed=$($m.RecomputedHash)" -LogFile $LogFile
                 $result.status = 'no-baseline'; Out-Result $VES_EXIT_NOBASE
+            }
+
+            # Same rules on both sides, proven rather than assumed. A baseline
+            # captured under a different -ExcludePattern cannot be compared against
+            # this tree: the excluded files resurface as "Extra" and the run reports
+            # drift that no amount of redeploying will clear. Fail as NOBASE, not
+            # DRIFT -- the baseline is unusable here, production is not wrong.
+            $patternCheck = Test-VesExcludePattern -ManifestDoc $m.Doc -ExcludePattern $ExcludePattern
+            if ($patternCheck.Known -and -not $patternCheck.Match) {
+                Write-VesLog ERROR ("Baseline was captured under a different exclude pattern, so it cannot be compared against this tree. captured='{0}' current='{1}'. Re-run with the captured pattern, or re-capture and re-pin." -f `
+                        $patternCheck.Recorded, $patternCheck.Effective) -LogFile $LogFile
+                $result.status = 'no-baseline'; Out-Result $VES_EXIT_NOBASE
+            }
+            if (-not $patternCheck.Known) {
+                Write-VesLog WARN 'Baseline records no exclude pattern (captured before that field existed); assuming it matches the pattern in use. Re-capture to make this provable.' -LogFile $LogFile
             }
 
             # trust anchor: confirm the baseline still matches the hash pinned in SSM

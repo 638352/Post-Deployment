@@ -25,16 +25,41 @@ param(
     [string]$LogDir = 'D:\ves-verify\logs',
     # 0 derives a threshold of three intervals (minimum 15 minutes).
     [int]$HeartbeatMaxAgeMinutes = 0,
+    # Baked into the registered task. Without it a scheduled runner is stuck on the
+    # runner's own default forever, and the OMS SSM convention
+    # (/DbqFormService/<ENV>/<region>/...) points at us-gov-east-1, not west --
+    # a task registered with the wrong region fails every SSM read as a trust error.
+    [string]$Region,
+    # Passed through so retention is set once at registration rather than by editing
+    # the task's argument string later. 0 disables pruning.
+    [int]$LogRetentionDays = 0,
     [string]$Environment = 'prod',
     [switch]$Uninstall
 )
 $ErrorActionPreference = 'Stop'
 
-# -Uninstall path: remove the runner and its independent watchdog.
+# Registering a SYSTEM/Highest task needs elevation. Without this check the failure
+# surfaces as a raw Access Denied from Register-ScheduledTask, several steps after
+# the log dir has already been created.
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+if (-not (New-Object Security.Principal.WindowsPrincipal $identity).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Install-DriftTask.ps1 must run elevated: it registers scheduled tasks that run as SYSTEM.'
+}
+
+Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
+
+# -Uninstall path: remove the runner and its independent watchdog. Audited too --
+# silently deleting the drift check is indistinguishable from "no drift" afterwards,
+# which is precisely the gap the watchdog exists to close.
 if ($Uninstall) {
+    $uninstallLog = New-VesLogFile -Prefix 'install-drift-task' -LogDir $LogDir
     foreach ($name in @($TaskName,$WatchdogTaskName)) {
         if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $name -Confirm:$false
+            Write-VesLog WARN "DRIFT TASK REMOVED: $name" `
+                -Data @{script='Install-DriftTask.ps1'; taskName=$name; removedBy="$env:USERNAME@$env:COMPUTERNAME"} `
+                -LogFile $uninstallLog
             Write-Host "Removed scheduled task '$name'."
         }
     }
@@ -62,8 +87,12 @@ $watchdogLog = Join-Path $LogDir 'drift-heartbeat-watchdog.jsonl'
 
 # action: pin Windows PowerShell 5.1 (powershell.exe), not pwsh — prod scripts
 # target 5.1 only and must not silently run under a different engine.
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
-    '-NoProfile -ExecutionPolicy Bypass -File "{0}" -TargetsFile "{1}" -LogDir "{2}"' -f $runner, $TargetsFile, $LogDir)
+$runnerArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -TargetsFile "{1}" -LogDir "{2}"' -f $runner, $TargetsFile, $LogDir
+# Only append what the caller actually set, so the task line stays the runner's own
+# defaults otherwise rather than freezing today's defaults into Task Scheduler.
+if ($Region) { $runnerArgs += ' -Region "{0}"' -f $Region }
+if ($LogRetentionDays -gt 0) { $runnerArgs += ' -LogRetentionDays {0}' -f $LogRetentionDays }
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $runnerArgs
 $watchdogAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
     '-NoProfile -ExecutionPolicy Bypass -File "{0}" -HeartbeatPath "{1}" -MaxAgeMinutes {2} -Environment "{3}" -LogFile "{4}"' -f `
         $watchdog, $heartbeatPath, $HeartbeatMaxAgeMinutes, $Environment, $watchdogLog)
@@ -91,7 +120,27 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
 Register-ScheduledTask -TaskName $WatchdogTaskName -Action $watchdogAction -Trigger $watchdogTrigger `
     -Principal $principal -Settings $settings -Force | Out-Null
 
+# Registering these tasks changes what runs on this box unattended, as SYSTEM.
+# Write-Host alone leaves no evidence of that, so mirror it into the JSONL audit
+# trail the rest of the suite writes -- who registered what, when, against which
+# targets file and region.
+$installLog = New-VesLogFile -Prefix 'install-drift-task' -LogDir $LogDir
+Write-VesLog OK 'DRIFT TASKS REGISTERED' -Data @{
+    script                 = 'Install-DriftTask.ps1'
+    taskName               = $TaskName
+    watchdogTaskName       = $WatchdogTaskName
+    intervalMinutes        = $IntervalMinutes
+    heartbeatMaxAgeMinutes = $HeartbeatMaxAgeMinutes
+    targetsFile            = $TargetsFile
+    logDir                 = $LogDir
+    region                 = $Region
+    logRetentionDays       = $LogRetentionDays
+    environment            = $Environment
+    registeredBy           = "$env:USERNAME@$env:COMPUTERNAME"
+} -LogFile $installLog
+
 Write-Host ("Registered '{0}': every {1} min as SYSTEM, targets={2}" -f $TaskName, $IntervalMinutes, $TargetsFile)
 Write-Host ("Registered '{0}': alerts when heartbeat exceeds {1} min, heartbeat={2}" -f `
     $WatchdogTaskName, $HeartbeatMaxAgeMinutes, $heartbeatPath)
 Write-Host "Point monitoring/log shipping at $LogDir; production watchdog failures exit 2."
+Write-Host "Registration recorded in $installLog"

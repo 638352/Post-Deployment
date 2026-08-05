@@ -114,8 +114,11 @@ $runId = [guid]::NewGuid().ToString()
 $script:chosen = $null
 $script:restored = $false
 
+# -Initials is carried into the audit record: a restore of production is an
+# operator action, and "who" belongs in the evidence next to "why" ($Reason).
+# Deploy-Processor forwards its own -Initials here for exactly that reason.
 Write-VesLog INFO 'RUN START: rollback' `
-    -Data @{runId = $runId; script = 'Invoke-Rollback.ps1'; processor = $Processor; environment = $Environment; target = $TargetRoot; reason = $Reason } `
+    -Data @{runId = $runId; script = 'Invoke-Rollback.ps1'; processor = $Processor; environment = $Environment; target = $TargetRoot; reason = $Reason; initials = $Initials; operator = "$env:USERNAME@$env:COMPUTERNAME" } `
     -LogFile $LogFile
 
 function Stop-Rollback([int]$code) {
@@ -254,8 +257,17 @@ if (Test-Path -LiteralPath $backupManifestPath) {
         # guard matters most, so it must not be the thing that disables it.
         $backupManifest = Get-Content -LiteralPath $backupManifestPath -Raw -Encoding utf8 | ConvertFrom-Json
         $expected = [int](Get-RecordValue $backupManifest 'fileCount')
-        if ($expected -gt 0 -and $payload.Count -lt $expected) {
-            Write-VesLog ERROR ("Partial backup: {0} files on disk but the backup manifest lists {1}. Refusing to restore an incomplete tree." -f $payload.Count, $expected) -LogFile $LogFile
+        # Compare like with like. fileCount came from Get-VesManifest, which drops
+        # *.config, *.log and logs\/temp\/cache\ -- while $payload is everything
+        # robocopy /E copied. Counting raw files against a filtered total makes the
+        # disk side systematically larger, so a genuinely truncated backup could sit
+        # under the threshold and pass. Filter the payload the same way first.
+        $hashablePayload = @($payload | Where-Object {
+                $rel = $_.FullName.Substring($chosenPath.Length).TrimStart('\')
+                $rel -notmatch $Global:VES_DEFAULT_EXCLUDE
+            })
+        if ($expected -gt 0 -and $hashablePayload.Count -lt $expected) {
+            Write-VesLog ERROR ("Partial backup: {0} hashable files on disk but the backup manifest lists {1}. Refusing to restore an incomplete tree." -f $hashablePayload.Count, $expected) -LogFile $LogFile
             Stop-Rollback $VES_EXIT_NOBASE
         }
     }
@@ -413,11 +425,45 @@ $verifyManifest = $null
 $verifyTrust = $null
 $verifyRepo = $null
 
+# Whether the LIVE SSM anchor may be used to cross-check the restored release.
+#
+# The anchor pins exactly one release at a time, and it is written at capture
+# (UAT sign-off) -- nothing re-pins it on the way back down. So after a failed
+# deploy it names the release we are rolling AWAY from. Passing -TrustParam
+# blindly then compares the restored (prior) release's manifest against the wrong
+# anchor and reports "Manifest not trusted" -> exit 2 on a byte-perfect restore,
+# which in turn permanently blocks -RepinTrust below (gated on this verify
+# passing) -- the re-pin was the only thing that could have made it pass.
+#
+# So ask the anchor what it currently points at. Cross-check only when it really
+# does describe the release being restored; otherwise verify structurally against
+# the archived/explicit manifest and say plainly in the log that the live pin was
+# not the anchor. The manifest's own self-hash still rejects a tampered baseline.
+$anchorNote = 'no SSM trust parameter configured'
+$trustUsable = $false
+if ($TrustParam) {
+    $currentPin = $null
+    try { $currentPin = Get-VesTrustedHash -ParameterName $TrustParam -Region $Region }
+    catch { Write-VesLog WARN "Could not read the trust anchor at ${TrustParam}: $($_.Exception.Message)" -LogFile $LogFile }
+    if (-not $currentPin) {
+        $anchorNote = "NOT SSM-anchored: $TrustParam could not be read"
+    }
+    elseif ($priorTrustRead -and $priorTrustHash -and $currentPin -eq $priorTrustHash) {
+        $trustUsable = $true
+        $anchorNote = "SSM-anchored ($TrustParam still pins the release being restored)"
+    }
+    else {
+        $anchorNote = "NOT SSM-anchored: $TrustParam pins $currentPin, which is the release being rolled back, not the one being restored. Re-pin with -RepinTrust once this restore is proven."
+    }
+}
+
 if ($BaselineRepo -and $ReleaseTag) {
-    $verifySource = "tag $ReleaseTag in $BaselineRepo"; $verifyRepo = $BaselineRepo; $verifyTrust = $TrustParam
+    $verifySource = "tag $ReleaseTag in $BaselineRepo"; $verifyRepo = $BaselineRepo
+    if ($trustUsable) { $verifyTrust = $TrustParam }
 }
 elseif ($ManifestPath) {
-    $verifySource = "manifest $ManifestPath"; $verifyManifest = $ManifestPath; $verifyTrust = $TrustParam
+    $verifySource = "manifest $ManifestPath"; $verifyManifest = $ManifestPath
+    if ($trustUsable) { $verifyTrust = $TrustParam }
 }
 elseif ($backupManifest) {
     # Self-recorded snapshot: proves the restore is byte-identical to what was in
@@ -436,7 +482,8 @@ if (-not $verifySource) {
     }
 }
 else {
-    Write-VesLog INFO ">>> post-rollback verify ($verifySource)" -LogFile $LogFile
+    Write-VesLog INFO ">>> post-rollback verify ($verifySource); $anchorNote" `
+        -Data @{runId = $runId; verifySource = $verifySource; ssmAnchored = $trustUsable; trustParam = $TrustParam } -LogFile $LogFile
     $verArgs = @(
         '-Mode', $(if ($ConfigContract) { 'All' } else { 'VerifyFiles' }),
         '-ReleaseRoot', $TargetRoot,

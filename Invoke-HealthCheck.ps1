@@ -119,11 +119,28 @@ elseif ($ProcessPathRoot) {
     try {
         $rootItem = Get-Item -LiteralPath $ProcessPathRoot -ErrorAction Stop
         $rootPrefix = $rootItem.FullName.TrimEnd('\') + '\'
-        $runningProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
-                $_.ExecutablePath -and
-                $_.ExecutablePath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -and
-                ([string]::IsNullOrWhiteSpace($ProcessArgumentPattern) -or [regex]::IsMatch($_.CommandLine, $ProcessArgumentPattern))
-            })
+        # $_.CommandLine may be $null even when ExecutablePath is readable (the
+        # caller lacks rights to that process's full command line). [regex]::IsMatch
+        # throws ArgumentNullException on it, the block's own catch turns that into a
+        # failure entry, and a perfectly healthy processor reports exit 3. Guard the
+        # null explicitly so an unreadable command line is a non-match, not a crash.
+        $script:unreadableCommandLine = 0
+        $runningProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+                Where-Object {
+                    $_.ExecutablePath -and
+                    $_.ExecutablePath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)
+                } |
+                Where-Object {
+                    if ([string]::IsNullOrWhiteSpace($ProcessArgumentPattern)) { return $true }
+                    if ([string]::IsNullOrEmpty($_.CommandLine)) { $script:unreadableCommandLine++; return $false }
+                    return [regex]::IsMatch($_.CommandLine, $ProcessArgumentPattern)
+                })
+        if ($unreadableCommandLine -gt 0) {
+            # Say so rather than silently under-counting: on a box where this fires
+            # every time, the mode-argument probe is not actually being applied.
+            Write-VesLog WARN ("{0} process(es) under {1} had an unreadable command line and could not be matched against /{2}/; run with rights to read it if this probe must be authoritative." -f `
+                    $unreadableCommandLine, $ProcessPathRoot, $ProcessArgumentPattern) -LogFile $LogFile
+        }
         if ($runningProcesses.Count -eq 0) {
             $detail = if ($ProcessArgumentPattern) { " under $ProcessPathRoot matching /$ProcessArgumentPattern/" } else { " under $ProcessPathRoot" }
             $fail.Add("process-path:$ProcessPathRoot not found")

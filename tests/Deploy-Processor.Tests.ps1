@@ -97,6 +97,19 @@ Describe 'clean deploy' {
         $r.ExitCode | Should -Be 0
         $r.Output | Should -Not -Match 'Rollback-only parameters'
     }
+
+    It 'does not cry DRIFT on a healthy deploy just because the pin names the incoming release' {
+        # The anchor is pinned at capture (UAT sign-off), so during a normal deploy
+        # it already describes the release being installed, not the one on disk.
+        # Logging that expected mismatch as DRIFT fired on 100% of clean deploys and
+        # trained operators to ignore the one word that means "production is wrong".
+        $target = New-LiveTarget 'target-nodrift'
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $target @(
+                '-BackupRoot', (Join-Path $script:Root 'backups-nodrift')))
+        $r.ExitCode | Should -Be 0
+        $r.Output | Should -Not -Match 'Pre-deploy tree does NOT match'
+        $r.Output | Should -Match 'as expected before a deploy'
+    }
 }
 
 Describe 'backup and rollback record' {
@@ -175,7 +188,9 @@ Describe 'running console-EXE instance' {
         $target = Join-Path $script:Root 'target-locked'
         $script:LockProc = Start-VesLockedInstance $target
         $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $target)
-        $r.ExitCode | Should -Be 1
+        # 2, not 1: nothing was compared and production was not touched, so the
+        # honest answer is "could not proceed" (ERROR), not "production drifted".
+        $r.ExitCode | Should -Be 2
         $r.Output | Should -Match 'Running instance holds'
         $r.Output | Should -Match '-KillProcesses'
         # no copy happened: the staged files never landed

@@ -230,9 +230,25 @@ try {
             exit $VES_EXIT_USAGE
         }
         Test-AwsCli
-        # run the manifest + config checks per target, reading each target's own params
-        $targets = Get-Content -LiteralPath $TargetsFile -Raw | ConvertFrom-Json
-        foreach ($t in $targets) {
+        # Import-VesTargetInventory, NOT a raw ConvertFrom-Json. Under the
+        # ves.targets.v1 schema the parsed document is the ROOT object, so
+        # `foreach ($t in $targets)` iterated it once as if it were a target:
+        # every per-target field resolved to $null, Test-Manifest and
+        # Test-ConfigContract both returned on their IsNullOrWhiteSpace guards,
+        # and preflight exited 0 READY having checked no parameter, no manifest,
+        # and no contract. Sharing the runner's validator also means the two can
+        # never disagree about what counts as a complete inventory.
+        $inventory = Import-VesTargetInventory -Path $TargetsFile
+        foreach ($warning in $inventory.Warnings) { Add-Check 'inventory' 'WARN' $warning }
+        foreach ($problem in $inventory.Errors) { Add-Check 'inventory' 'FAIL' $problem }
+        if ($inventory.Valid) {
+            Add-Check 'inventory' 'PASS' ("{0} confirmed target(s) covering {1} required server(s)" -f `
+                @($inventory.Targets).Count, @($inventory.RequiredServers).Count)
+        }
+        # Per-target checks run even on an invalid inventory: the FAIL rows above
+        # already decide readiness, and an operator fixing the inventory wants the
+        # SSM/manifest diagnosis in the same run rather than one round trip later.
+        foreach ($t in $inventory.Targets) {
             $p = if ($t.PSObject.Properties['processor']) { $t.processor } else { '?' }
             Write-VesLog INFO "--- target: $p ---" -LogFile $LogFile
             $tp = if ($t.PSObject.Properties['trustParam']) { $t.trustParam }     else { $null }
