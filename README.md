@@ -490,6 +490,15 @@ Control mapping to the tracked leadership brief
   bin/Storage.Net.dll is missing from the artifact". Required configuration
   files/folders are checked separately through `-RequiredArtifactPaths`, so
   hash-excluded environment configuration still blocks when absent.
+- **Per-server configuration** (closed): the staged artifact must carry the
+  config the target server is meant to run. `Deploy-Processor.ps1` mirrors with
+  `robocopy /MIR` and no `/XF`, so a config under TargetRoot is replaced by the
+  staged one; rather than protect the on-server file, the deploy derives the
+  config's staged relative path from `-ConfigPath` and passes it to the gate as
+  a required artifact. A release that shipped without the config is blocked
+  before the copy, and Verify-Config then checks the file production is
+  actually running. Building the right config into the staged tree is a release
+  responsibility, not something the deploy repairs.
 - **Console-EXE stop mechanism** (closed, pilot pending): `Deploy-Processor
 -KillProcesses` stops the running instance whose exe lives under TargetRoot
   (audited by PID + command line), and `-StartTasksAfter` relaunches it via
@@ -595,14 +604,6 @@ and fresh-log health probes; do not pass their binaries to
   with -StartTasksAfter after a clean copy. Without -KillProcesses a detected
   instance aborts the deploy before robocopy can fight a file lock. Pilot on
   the UAT egress box (vesemsegressuat) before any PROD use.
-- Per-server config is overwritten by the copy. `Deploy-Processor.ps1` mirrors
-  with `robocopy /MIR` and no `/XF`, so a config file living under TargetRoot is
-  replaced by the staged one — on a server whose config legitimately differs
-  (endpoints, thumbprints), the deploy flattens it. The gate only proves the
-  file is _present_ (-RequiredArtifactPaths), and Verify-Config checks the live
-  file _after_ the copy has already replaced it. Decide the fix before PROD:
-  exclude configs from the mirror (`/XF *.config`), or stage the per-server
-  config alongside the artifact so the mirrored copy is already correct.
 - Tag protection on the archive remote. The release tag is the trust anchor,
   so who may push/move tags in the baseline archive is the control that
   everything else rests on. Decide and enforce that permission set (and where

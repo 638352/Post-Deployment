@@ -19,6 +19,13 @@
       4. pilot on the UAT egress (vesemsegressuat) with -WhatIf first, then
          for real, before touching a PROD egress server
 
+    STAGE THE CONFIG: the copy mirrors with /MIR, so the staged tree must already
+    contain the .exe.config this server is meant to run -- the deploy will not
+    preserve the one currently on the box. Because *.config is excluded from hash
+    verification, the gate is what enforces this: ConfigPath below is turned into
+    a required staged artifact, and a release that shipped without the config is
+    blocked before anything is copied.
+
     Two shapes to fill in, pick the one that matches the system:
       - Outbound .exe processor (VESEMSEGRESS0x): set ScheduledTasks to the Task
         Scheduler jobs on THIS server (e.g. VLER_EM_Realtime_DBQ_Processor),
@@ -75,6 +82,8 @@ $fixed = @{
     TargetRoot             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor'
     ManifestPath           = 'D:\baselines\SYSTEM_NAME.json'
     ConfigContract         = 'D:\baselines\SYSTEM_NAME.config.json'
+    # Live config. Sitting under TargetRoot, it doubles as the gate's required
+    # staged artifact, so the staged tree must ship this file (see header).
     ConfigPath             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe.config'
     # dated backup of the current prod files before overwrite (runbook convention)
     BackupRoot             = 'C:\VLER_TEST_OUTBOUND\Processors\BackUp'

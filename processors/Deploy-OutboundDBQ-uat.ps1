@@ -11,10 +11,20 @@
 
     CONFIRM before a real run: the values tagged # CONFIRM are not in SERVERS.md
     (scheduled-task name, log dir). Pull them from the Outbound Deployment Steps
-    runbook. The running console-exe instance is handled: KillProcesses stops the
+    runbook. -ConfirmedRunbookValues is not taken on trust: the script checks
+    that the named task and log directory actually exist on this server and
+    refuses to run if either does not.
+
+    The running console-exe instance is handled: KillProcesses stops the
     instance whose exe lives under TargetRoot (audited by PID + command line) and
     StartTasksAfter relaunches it via its scheduled task after a clean copy.
     Pilot with -WhatIf first, then a real run on this UAT box, before PROD.
+
+    STAGE THE CONFIG: the copy mirrors with /MIR, so StagedRoot must already
+    contain VES.OutboundDBQProcessor.exe.config with this box's values -- the
+    deploy replaces the one on the server rather than preserving it. The gate
+    enforces it (ConfigPath below becomes a required staged artifact), so a
+    package without the config is blocked before anything is copied.
 .EXAMPLE
     .\Deploy-OutboundDBQ-uat.ps1 -StagedRoot D:\stage\OutboundDBQ -StagedCommit abc1234 -ConfirmedRunbookValues -WhatIf
 #>
@@ -54,8 +64,12 @@ $fixed = @{
     TargetRoot             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor'
     ManifestPath           = 'D:\baselines\OutboundDBQ.json'
     ConfigContract         = 'D:\baselines\OutboundDBQ.config.json'
+    # Live config. Sitting under TargetRoot, it doubles as the gate's required
+    # staged artifact, so the staged tree must ship this file (see header).
     ConfigPath             = 'C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe.config'
     BackupRoot             = 'C:\VLER_TEST_OUTBOUND\Processors\BackUp'
+    # SERVERS.md documents the DBQ batch file as VLER_EM_Realtime_DBQ_Processor.bat;
+    # the Task Scheduler job that launches it is assumed to carry the same name.
     ScheduledTasks         = @('VLER_EM_Realtime_DBQ_Processor')            # CONFIRM task name
     FreshLogDir            = 'C:\VLER_TEST_OUTBOUND\Logs\VES.OutboundProcessor'  # CONFIRM log dir
     # kill the running console-exe instance before copy; relaunch via task after
@@ -66,6 +80,24 @@ $fixed = @{
     # DBQ has no actuator endpoint; leave these empty
     ServiceName            = ''
     HealthUrl              = ''
+}
+
+# -ConfirmedRunbookValues is an operator's word for it; these two checks make it
+# falsifiable against the box itself. Left unchecked, a wrong task name surfaces
+# in the stop stage and a wrong log dir as a health failure after the copy --
+# both of them after production has already been opened. Read-only, so it costs
+# nothing to run before every deploy rather than only the first.
+$unverified = @()
+foreach ($taskName in $fixed.ScheduledTasks) {
+    if (-not (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
+        $unverified += "scheduled task '$taskName' does not exist on $env:COMPUTERNAME"
+    }
+}
+if (-not (Test-Path -LiteralPath $fixed.FreshLogDir)) {
+    $unverified += "fresh-log directory '$($fixed.FreshLogDir)' does not exist"
+}
+if ($unverified.Count) {
+    throw ("Runbook values do not match this server, so -ConfirmedRunbookValues cannot be true: {0}. Correct them in this wrapper from the current Outbound Deployment Steps runbook." -f ($unverified -join '; '))
 }
 
 $passthru = @{}

@@ -31,6 +31,29 @@ and [SERVERS.md](../SERVERS.md) if needed:
 - [ ] Place the contract where the wrapper expects it (default
       `D:\baselines\OutboundDBQ.config.json`) or update the wrapper path.
 
+Every setting in the live file has to land in exactly one bucket — an undeclared
+key is reported as drift, so the contract is only finished when a run comes back
+clean. Work down the live `appSettings` and `connectionStrings` and sort each key:
+
+| Bucket | Use it for |
+|--------|------------|
+| `expectedValues` | must be this exact value on every box (`Tls:MinVersion`, feature flags) |
+| `machineKeys` | must exist, value legitimately differs per box (endpoints, thumbprints, connection strings) |
+| `requiredKeys` | must exist, value not worth pinning |
+| `sensitiveKeys` | real secrets — compared, but reported as `(masked)`. Never also in `expectedValues`; the contract refuses |
+| `ignoredKeys` | deliberately out of scope, so it is a decision on the record rather than a silent pass |
+
+`format` is `appconfig` for a `.exe.config`. Connection strings flatten to
+`ConnectionStrings:<name>`. Prove the contract before it gates anything:
+
+```powershell
+.\Verify-Config.ps1 -ContractPath D:\baselines\OutboundDBQ.config.json `
+  -ConfigPath C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe.config
+```
+
+- [ ] That standalone run reports PASS against the live file before the contract
+      is wired into a deploy
+
 ## 4. First Capture (approval record)
 
 On the UAT approval host, with the release owner present:
@@ -65,6 +88,10 @@ Then the real deploy (same args without `-WhatIf`), using the wrapper's
 `-KillProcesses` / `-StartTasksAfter` defaults after the kill/restart behavior
 has been observed once under change control.
 
+- [ ] The staged tree carries `VES.OutboundDBQProcessor.exe.config` with this
+      box's values. `/MIR` replaces the config on the server, so whatever ships
+      in the package is what production runs; a package without it is blocked at
+      the gate before anything is copied.
 - [ ] Preflight READY (or WARN only for unanchored items you intentionally skipped)
 - [ ] `-WhatIf` gate passes
 - [ ] Real deploy exits `0`; health probes populated so health is not empty → `10`

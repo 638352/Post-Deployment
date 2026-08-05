@@ -114,6 +114,58 @@ Describe 'clean deploy' {
     }
 }
 
+Describe 'per-server config must be staged' {
+    # *.config is excluded from the hash manifest by design (log4net paths,
+    # endpoints and thumbprints legitimately differ per box), so file verify can
+    # never notice a release that shipped without one -- and /MIR overwrites
+    # whatever config the server had. Deploy-Processor closes that hole by
+    # deriving the config's staged relative path from -ConfigPath and handing it
+    # to the gate as a required artifact, which turns "stage the per-server
+    # config" from a convention someone remembers into a blocking check.
+    BeforeAll {
+        $script:CfgLeaf = 'dptest.exe.config'
+        $script:CfgContract = Join-Path $script:Root 'dptest.config.json'
+        # keyvalue rather than appconfig: what is under test is the gate's
+        # presence check, not the contract parser (Verify-Config.Tests covers that).
+        ([ordered]@{ format = 'keyvalue'; requiredKeys = @('OutboundEnabled') } | ConvertTo-Json) |
+            Set-Content -LiteralPath $script:CfgContract -Encoding utf8
+
+        function script:New-ConfigDeployArgs([string]$Staged, [string]$Target) {
+            @(
+                '-Processor', 'dptest', '-StagedRoot', $Staged, '-TargetRoot', $Target,
+                '-StagedCommit', 'abc1234', '-ManifestPath', $script:ManifestPath,
+                '-BaselineRepo', $script:Archive, '-ReleaseTag', 'dptest/v1.0.0',
+                '-FreshLogDir', $script:FreshLogs,
+                '-ConfigContract', $script:CfgContract,
+                '-ConfigPath', (Join-Path $Target $script:CfgLeaf)
+            )
+        }
+    }
+
+    It 'blocks at the gate when the artifact shipped without it, leaving the target untouched' {
+        $staged = New-VesTree (Join-Path $script:Root 'staged-no-config')
+        $target = Join-Path $script:Root 'target-no-config'
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-ConfigDeployArgs $staged $target)
+        # 1 = blocked, the same code the gate uses for any refused deploy
+        $r.ExitCode | Should -Be 1
+        $r.Output | Should -Match ([regex]::Escape("$script:CfgLeaf is missing from the artifact"))
+        # blocked before the copy: production was never opened
+        Test-Path $target | Should -BeFalse
+    }
+
+    It 'deploys when the config is staged alongside the artifact' {
+        $staged = New-VesTree (Join-Path $script:Root 'staged-with-config')
+        Set-Content -Path (Join-Path $staged $script:CfgLeaf) -Value 'OutboundEnabled=true' -NoNewline
+        $target = Join-Path $script:Root 'target-with-config'
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-ConfigDeployArgs $staged $target)
+        $r.ExitCode | Should -Be 0
+        # the mirrored config is what config verify then read, so the file the
+        # contract passed against is the one production is now running
+        Test-Path (Join-Path $target $script:CfgLeaf) | Should -BeTrue
+        $r.Output | Should -Match 'Config verify PASS'
+    }
+}
+
 Describe 'backup and rollback record' {
     BeforeAll {
         $script:BkTarget = New-LiveTarget 'target-backup'
