@@ -3,7 +3,7 @@
 # console-EXE instance handling, the dated backup + rollback-record sidecar, the
 # -Rollback alias, and -AutoRollback.
 #
-# SSM is stubbed with a fake aws.cmd on PATH. The "running instance" is a real
+# Git baseline archive fixtures replace the old SSM stubs. The "running instance" is a real
 # process: powershell.exe copied INTO the target dir and started there, so its
 # ExecutablePath sits under TargetRoot exactly like a deployed processor exe.
 #

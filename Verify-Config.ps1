@@ -10,18 +10,11 @@
       requiredKeys       keys that must exist, value ignored
       machineKeys        allowed to differ per host, listed for documentation
       expectedValues     keys pinned to exact values in the contract file
-      ssmExpectedValues  keys pinned to values read from SSM Parameter Store at
-                         check time (config key -> parameter name). Use for
-                         values that must be tamper-resistant: editing the
-                         contract file alongside the config won't fool this one.
       sensitiveKeys      keys whose values must never appear in logs/reports.
                          Comparison still happens on the real values, but any
-                         mismatch is reported as '(masked)'. Keys checked via
-                         ssmExpectedValues are ALWAYS reported masked (they are
-                         SecureString-gated in Parameter Store), whether or not
-                         they are listed here. Independently of this list, any
-                         key whose name matches the secret-name pattern
-                         (password/secret/token/credential/api-key/key/
+                         mismatch is reported as '(masked)'. Independently of
+                         this list, any key whose name matches the secret-name
+                         pattern (password/secret/token/credential/api-key/key/
                          connectionstring, case-insensitive) is auto-masked in
                          reports as defense-in-depth — still list real secrets
                          explicitly rather than relying on their names.
@@ -29,20 +22,21 @@
                          out of scope (not required, not pinned, not "extra").
                          Undeclared live keys outside this set are drift.
 
+    Do not declare ssmExpectedValues. That legacy Parameter Store mapping is
+    rejected as unverifiable (exit 2) — move those keys into expectedValues or
+    requiredKeys.
+
     Contract example:
     {
       "format": "appconfig",
       "requiredKeys":  ["Storage:Provider","Outbound:QueueName"],
       "machineKeys":   ["Storage:ConnectionString","Endpoint:Url"],
       "expectedValues":{ "Outbound:Enabled": "true", "Tls:MinVersion": "1.2" },
-      "ssmExpectedValues": { "Outbound:QueueName": "/ves/SYSTEM/config/queue-name" },
       "sensitiveKeys": ["Outbound:ApiToken"]
     }
 
     format is one of: appconfig, json, keyvalue.
     Returns an object with .pass; called by Invoke-Verification.
-    An SSM read failure throws, which the caller maps to exit 2 (trust failure),
-    never a pass.
 #>
 [CmdletBinding()]
 param(
@@ -169,7 +163,7 @@ $expectedProps = if ($contract.PSObject.Properties['expectedValues'] -and $contr
 else { @() }
 foreach ($p in $expectedProps) {
     if ($sensitiveKeys.ContainsKey($p.Name)) {
-        throw "Contract stores a sensitive key under expectedValues: $($p.Name). Use requiredKeys for presence or ssmExpectedValues for a secure comparison."
+        throw "Contract stores a sensitive key under expectedValues: $($p.Name). Use requiredKeys for presence-only checks; do not embed secret values in the contract."
     }
 }
 

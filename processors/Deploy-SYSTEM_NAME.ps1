@@ -5,16 +5,17 @@
 .DESCRIPTION
     One of these exists per manual-copy system (the brief's "one deploy script
     per VLER/VEMS outbound processor"). It pins everything that is fixed for the
-    system - paths, SSM parameter names, service name, health probe - so the
-    operator only supplies what changes per release: the staged tree and its
-    commit. Everything else routes through ..\Deploy-Processor.ps1
-    (gate -> copy -> verify -> health).
+    system - paths, service name, health probe, scheduled tasks - so the
+    operator only supplies what changes per release: the staged tree, its
+    commit, and the release tag / baseline archive checkout. Everything else
+    routes through ..\Deploy-Processor.ps1 (gate -> copy -> verify -> health).
 
     To onboard a system:
       1. copy this file to Deploy-<System>.ps1
       2. replace every SYSTEM_NAME and fill in the stop/health section
-      3. capture its baseline (Invoke-Verification -Mode Capture) and pin
-         /ves/<system>/approved-commit in SSM
+      3. capture its baseline (Invoke-Verification -Mode Capture -ArchiveRepo
+         -ReleaseTag <system>/vX.Y.Z -PushRemote) so the Git release tag is
+         the approval record
       4. pilot on the UAT egress (vesemsegressuat) with -WhatIf first, then
          for real, before touching a PROD egress server
 

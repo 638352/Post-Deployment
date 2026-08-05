@@ -2,8 +2,10 @@
 <#
 .DESCRIPTION
     Runs the repository's file-match test suite.
-    Needs Pester 5.x; the in-box Pester 3.4 won't parse the tests. Install once:
-        Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+    Needs Pester 5.x (not 6+); the in-box Pester 3.4 won't parse the tests.
+    Install once:
+        Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 `
+            -Scope CurrentUser -Force -SkipPublisherCheck
     Run under Windows PowerShell 5.1 so the tests use the same engine as prod:
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1
     Exit code is the failed-test count (0 = green). Missing Pester exits 2 —
@@ -21,13 +23,18 @@ if (-not $Path) {
     $Path = Join-Path $root 'tests'
 }
 
+# Pin to Pester 5.x: the suite is authored against the Pester 5 configuration API.
+# Prefer the highest installed 5.x so a side-by-side Pester 6 does not take over.
 $p5 = Get-Module -ListAvailable Pester |
-    Where-Object { $_.Version -ge [version]'5.0.0' } |
+    Where-Object {
+        $_.Version -ge [version]'5.0.0' -and
+        $_.Version -lt [version]'6.0.0'
+    } |
     Sort-Object Version -Descending | Select-Object -First 1
 
 if (-not $p5) {
     Write-Host 'Pester 5.x not found. Install it with:' -ForegroundColor Red
-    Write-Host '  Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck'
+    Write-Host '  Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Scope CurrentUser -Force -SkipPublisherCheck'
     exit 2
 }
 

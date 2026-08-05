@@ -28,12 +28,12 @@
     -WhatIf runs the gate only and skips stop/backup/copy.
 
     Rollback: with -BackupRoot the pre-copy backup is the restore point, recorded
-    by a rollback-record.json sidecar (what it replaced, the config it stashed,
-    and the SSM values in force at the time). -AutoRollback restores it when the
-    post-deploy verify or the health check fails; the deploy still exits with that
-    stage's code, because rolling back is remediation, not success. -Rollback runs
-    a restore instead of a deploy by delegating to Invoke-Rollback.ps1, which owns
-    the safety gates and the post-restore proof.
+    by a rollback-record.json sidecar (what it replaced and the config it
+    stashed). -AutoRollback restores it when the post-deploy verify or the health
+    check fails; the deploy still exits with that stage's code, because rolling
+    back is remediation, not success. -Rollback runs a restore instead of a
+    deploy by delegating to Invoke-Rollback.ps1, which owns the safety gates and
+    the post-restore proof.
 
     Server-aware by design: pass only the -ScheduledTasks that live on THIS
     server. PROD splits the outbound processors across VESEMSEGRESS01/02/03
@@ -83,7 +83,7 @@ param(
     # opt-in: restore the backup automatically when the post-deploy verify or the
     # health check fails. Requires -BackupRoot. A rolled-back deploy still exits
     # with the failing stage's code -- rollback is remediation, not success.
-    # Never re-pins the SSM trust anchor (that is operator-only, see Invoke-Rollback).
+    # Never moves the approved release tag (that is operator-only, see Invoke-Rollback).
     [switch]$AutoRollback,
     # Restore a backup instead of deploying. Thin alias for Invoke-Rollback.ps1,
     # which owns the restore logic (selection, safety gates, post-restore verify).

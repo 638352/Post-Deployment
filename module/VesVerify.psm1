@@ -3,9 +3,9 @@
 .SYNOPSIS
     Shared functions for VES Post-Deployment Verification.
 .DESCRIPTION
-    Manifest capture/compare, manifest trust (SSM-anchored hash), and structured
-    logging. Imported by all entry-point scripts. Datadog emit (ddog-gov) is
-    commented out in place -- see the DATADOG DISABLED block below.
+    Manifest capture/compare, Git release-tag trust (baseline archive), and
+    structured logging. Imported by all entry-point scripts. Datadog emit
+    (ddog-gov) is commented out in place -- see the DATADOG DISABLED block below.
     Target: Windows PowerShell 5.1. No PowerShell 7+ syntax.
 #>
 
@@ -49,7 +49,7 @@ $Global:VES_DEFAULT_EXCLUDE = '(?i)(^|\\)(logs|temp|cache|\.git)\\|\.(log|tmp|co
 # line 1 of every audit file. Module-scoped and reused: the encoder is stateless.
 $script:VesUtf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 
-# PowerShell 5.1 defaults to SSL3/TLS1.0, which ddog-gov and AWS endpoints reject.
+# PowerShell 5.1 defaults to SSL3/TLS1.0, which modern HTTPS endpoints reject.
 # OR the existing protocol set with Tls12 (rather than replacing) so we add, not remove, protocols.
 [Net.ServicePointManager]::SecurityProtocol = `
     [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -376,7 +376,8 @@ function Export-VesManifest {
     #
     # Adding excludePattern does NOT change any existing manifest's hash:
     # Get-VesManifestHash digests only the sorted 'relpath|sha256|bytes' lines, not
-    # the JSON around them. Existing SSM pins therefore stay valid and no re-capture
+    # the JSON around them. Adding metadata fields does not invalidate prior
+    # baselines; re-capture is only needed when the exclude rules themselves change.
     # is required to adopt this field.
     $doc = [ordered]@{
         schema         = 'ves.manifest.v1'                                          # Format identifier for forward compatibility.
@@ -538,8 +539,7 @@ function Compare-VesFiles {
 # Capture commits the manifest under baselines/<processor>/ in the archive repo
 # and tags the commit. These helpers read that record back at a given tag so
 # the gate and verification can source their baseline from the release tag
-# itself instead of only a local file. When SSM is also configured, the tag
-# manifest must agree with the pinned hash; the tag never replaces the anchor.
+# itself instead of only a local file.
 
 function Invoke-VesGit {
     <#

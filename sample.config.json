@@ -12,10 +12,8 @@
   ],
   "expectedValues": {
     "Outbound:Enabled": "true",
-    "Tls:MinVersion": "1.2"
-  },
-  "ssmExpectedValues": {
-    "Outbound:QueueName": "/ves/SYSTEM_NAME/config/queue-name"
+    "Tls:MinVersion": "1.2",
+    "Outbound:QueueName": "outbound-queue"
   },
   "sensitiveKeys": [
     "ConnectionStrings:MainDb"

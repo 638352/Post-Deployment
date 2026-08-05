@@ -6,7 +6,7 @@
   "inventoryNotes": [
     "Fail-closed starter inventory only. Confirm every manual-copy target before setting inventoryComplete to true.",
     "Citrix server names are not yet documented in this repository and must be added to requiredServers and targets.",
-    "Confirm production processor paths, task names, configuration paths, and GovCloud region from the deployment runbooks.",
+    "Confirm production processor paths, task names, and configuration paths from the deployment runbooks.",
     "Excluded per brief Scope: cloud services (gateway services, MERA - VESMERA01, VESOMSVEMS01/02) already have standard deployment processes; joining them to the Git release discipline is later work.",
     "Excluded per brief Scope: database objects (stored procedures, triggers, views) are a planned fast follow, outside the two-week window.",
     "Starter OutboundDBQ paths match SERVERS.md UAT and processors/Deploy-OutboundDBQ-uat.ps1; PROD uses VESEMSEGRESS02/03 with different roots — confirm before inventoryComplete."

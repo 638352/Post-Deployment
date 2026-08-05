@@ -6,16 +6,16 @@
     Restore a processor from a deploy backup: pick the backup, quiesce the
     processor, mirror the backup tree back over TargetRoot, restore an
     out-of-tree config, restart, then PROVE the restore by re-running
-    verification and the health check. Optionally re-pin the SSM trust anchor
-    back to the restored release.
+    verification and the health check. Re-pointing the approved release tag
+    after a rollback is a deliberate operator step (there is no auto re-pin).
 
     The restore points are the dated folders Deploy-Processor writes before it
     overwrites production: <BackupRoot>\<yyyyMMddTHHmmss>_<Initials>_<Processor>
     (older date-only folders are still restorable). Each carries a
-    rollback-record.json sidecar naming what it replaced, the config it stashed,
-    and the SSM values in force at the time. The sidecar is written LAST by the
-    deploy, so a backup without one may be incomplete -- this script warns and
-    cross-checks the file count rather than trusting the folder blindly.
+    rollback-record.json sidecar naming what it replaced and the config it
+    stashed. The sidecar is written LAST by the deploy, so a backup without one
+    may be incomplete -- this script warns and cross-checks the file count
+    rather than trusting the folder blindly.
 
     Two deliberate differences from Deploy-Processor:
       * tasks are STARTED after a clean restore by default (-NoStartTasksAfter

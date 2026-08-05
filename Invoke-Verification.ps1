@@ -4,7 +4,8 @@
     Capture a UAT baseline or verify deployed files/config against it.
 .DESCRIPTION
     Modes:
-      Capture       snapshot the UAT-approved release into a manifest and pin its hash to SSM
+      Capture       snapshot the UAT-approved release into a manifest and archive
+                    it under a Git release tag (the trust anchor)
       VerifyFiles   hash-compare a deployed tree against the baseline manifest
       VerifyConfig  structural check of live config against a sanitized contract
       All           VerifyFiles then VerifyConfig
@@ -13,24 +14,22 @@
     checkout> commits the manifest and optional config contract under
     baselines/<processor>/; -ReleaseTag tags the commit and must match
     <system>/vMAJOR.MINOR.PATCH (e.g. OutboundDBQ/v1.4.0). A capture that
-    cannot archive its record must fail closed. When -TrustParam is provided,
-    the manifest hash is pinned to SSM so later verifies can detect tampering.
+    cannot archive its record must fail closed. Archival IS activation — there
+    is no separate pin step.
 
     VerifyFiles/All can source the baseline from the archived record instead of
     a local file: -BaselineRepo <git checkout> with -ReleaseTag reads the
-    manifest committed under that tag. The SSM trust anchor still applies when
-    -TrustParam is set.
+    manifest committed under that tag. Use -AllowUnanchoredVerify only for
+    local drift scans; it is not release evidence.
 
     Exit codes: 0 match, 1 drift, 2 no baseline / trust failure, 10 usage.
     Replaces the earlier Verify-Deployment.ps1 Capture/Verify script.
 .EXAMPLE
     .\Invoke-Verification.ps1 -Mode VerifyFiles -ReleaseRoot C:\Procs\SYSTEM_NAME `
-      -ManifestPath D:\baselines\SYSTEM_NAME.json `
-      -TrustParam /ves/PROCESSOR/baseline-hash
+      -BaselineRepo D:\ves-baselines -ReleaseTag SYSTEM_NAME/v1.4.0
 .EXAMPLE
     .\Invoke-Verification.ps1 -Mode All -ReleaseRoot C:\Procs\SYSTEM_NAME `
-      -ManifestPath D:\baselines\SYSTEM_NAME.json `
-      -TrustParam /ves/PROCESSOR/baseline-hash `
+      -BaselineRepo D:\ves-baselines -ReleaseTag SYSTEM_NAME/v1.4.0 `
       -ConfigContract D:\baselines\PROCESSOR.config.json `
       -ConfigPath E:\apps\PROCESSOR\app.config -Json
 #>
@@ -257,7 +256,7 @@ try {
 
             # load the baseline from the Git release tag when -BaselineRepo is set,
             # else from the local manifest file. Both paths yield the same shape,
-            # so the self-hash and SSM trust checks below apply equally.
+            # so the self-hash and release-tag trust checks below apply equally.
             if ($useTag) {
                 $leafName = if ($ManifestPath) { Split-Path -Leaf $ManifestPath } else { $null }
                 $m = Get-VesManifestFromTag -RepoPath $BaselineRepo -Tag $ReleaseTag -Processor $Processor -FileName $leafName

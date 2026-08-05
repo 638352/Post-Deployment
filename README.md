@@ -621,16 +621,19 @@ and fresh-log health probes; do not pass their binaries to
 
 ## Testing
 
-The automated Pester suite is 103 tests across the verification, pre-deploy
+The automated Pester suite covers verification, config contracts, the pre-deploy
 gate (`tests/Invoke-PreDeployGate.Tests.ps1`), preflight, deploy, rollback,
-backup, and health-check scripts. Run it on a workstation/CI host, not on
-production servers.
+backup helpers, the drift runner, module unit tests, and health-check scripts.
+Run it on a workstation/CI host, not on production servers. GitHub Actions runs
+the same entry point on every push and pull request (`.github/workflows/tests.yml`).
 
-It needs Pester 5.0 or newer (the in-box Pester 3.4 will not parse the tests);
-install it once:
+It needs Pester **5.x** (not 6+; the in-box Pester 3.4 will not parse the tests).
+`Invoke-Tests.ps1` selects the highest installed 5.x even if Pester 6 is also
+present. Install once:
 
 ```powershell
-Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 `
+  -Scope CurrentUser -Force -SkipPublisherCheck
 ```
 
 Run the suite under Windows PowerShell 5.1 (the target runtime), so the tests
@@ -644,7 +647,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1
 centers on the exit-code contract end to end: baseline capture and archive,
 matching-tree pass (`exit 0`), drift detection (`exit 1`), tampered or
 unanchored baseline rejection (`exit 2`), gate block/anchor behavior, backup
-and rollback safety gates, and missing required input rejection (`exit 10`).
+and rollback safety gates, config contract checks, drift-runner pruning, and
+missing required input rejection (`exit 10`).
+
+For the first UAT egress pilot, follow [docs/UAT-PILOT-CHECKLIST.md](docs/UAT-PILOT-CHECKLIST.md)
+after the suite is green.
 
 Run the scripts directly from the repo root:
 

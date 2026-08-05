@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pester:
+    name: Pester (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Pester 5.x
+        shell: powershell
+        run: |
+          Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 `
+            -Scope CurrentUser -Force -SkipPublisherCheck
+          $p = Get-Module -ListAvailable Pester |
+            Where-Object { $_.Version -ge [version]'5.0.0' -and $_.Version -lt [version]'6.0.0' } |
+            Sort-Object Version -Descending | Select-Object -First 1
+          if (-not $p) { throw 'Pester 5.x install failed' }
+          Write-Host "Installed Pester $($p.Version)"
+
+      - name: Run Invoke-Tests.ps1
+        shell: powershell
+        run: |
+          $hostExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          & $hostExe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

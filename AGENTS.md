@@ -29,7 +29,9 @@ Treat `Post-Deployment-datadog-558667ed/` as a snapshot/reference copy only. Do 
 
 - Target Windows PowerShell 5.1 scripts only; avoid PS7-only syntax.
 - Keep the exit code contract intact: `0` pass, `1` drift, `2` no baseline or trust failure, `3` health failure, `10` usage or unsafe configuration.
-- Preserve the JSONL logging behavior and the trust model around SSM-pinned manifest hashes.
+- Preserve the JSONL logging behavior and the trust model around Git release-tag
+  anchors (manifest archived under `<system>/vMAJOR.MINOR.PATCH` in the baseline
+  archive repo).
 - Prefer small, focused edits in the root scripts such as `Invoke-Verification.ps1`, `Invoke-Preflight.ps1`, `Invoke-HealthCheck.ps1`, `Deploy-Processor.ps1`, and `Start-DriftRunner.ps1`.
 
 ## Validation

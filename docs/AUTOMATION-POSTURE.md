@@ -82,7 +82,8 @@ automated action can quietly redefine what "approved" means).
 
 ### Ongoing
 
-- Running the regression test suite — there is no continuous-integration pipeline.
+- Running the regression test suite (CI runs it on pull requests; operators can
+  still run `Invoke-Tests.ps1` locally).
 - Triaging drift findings: the system detects and records drift, but does not judge it.
 - **Watching for alerts.** See the gap below.
 
@@ -114,18 +115,16 @@ The manual steps are not automation debt. They fall into two groups:
    attaches to a person, and automating them would remove the control rather than
    strengthen it. Each one is recorded in the audit trail with the operator's identity.
 
-2. **Genuine remaining work** — removing the unused AWS code paths (see below), the
-   per-server configuration still to be filled in, the server inventory to be completed,
-   and above all the alerting to be connected. These are tracked as open items.
+2. **Genuine remaining work** — the per-server configuration still to be filled in,
+   the server inventory to be completed, and above all the alerting to be connected.
+   These are tracked as open items in the README.
 
-> **Correction, 2026-08-05.** Earlier versions of this document described the baseline
-> pin as living in AWS SSM. There is no AWS in this environment. The scripts still
-> contain AWS code paths that have never been usable here, and removing them is now
-> open work. Two consequences worth stating plainly: readiness checks currently report
-> NOT READY on every server purely because the AWS CLI is absent, and the approved
-> baseline is protected by the release tag in the archive repository rather than by a
-> separate pinned value — which is only as strong as the controls on who can move that
-> tag.
+> **Trust model (2026-08-05).** The approved baseline is the release tag in the
+> baseline archive repository plus the manifest committed under it. There is no
+> separate pin and no AWS/SSM dependency. Preflight and gate readiness are driven by
+> that tag anchor and the inventory — not by an AWS CLI. Tag integrity is only as
+> strong as the controls on who can create, move, or delete release tags on the
+> archive remote.
 
 The distinction that matters for risk: **an unapproved or corrupted release cannot reach
 production undetected** — that check is automated and fails closed. What still depends on
