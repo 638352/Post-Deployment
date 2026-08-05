@@ -52,6 +52,8 @@ try {
         [Globalization.CultureInfo]::InvariantCulture,
         [Globalization.DateTimeStyles]::RoundtripKind)
     $ageMinutes = [math]::Round(([DateTimeOffset]::UtcNow - $completed.ToUniversalTime()).TotalMinutes, 2)
+    # Small negative age: allow ~5 min clock skew across hosts. Larger "future"
+    # timestamps fail closed — a wildly wrong clock must not look like a fresh run.
     if ($ageMinutes -lt -5) {
         throw "Heartbeat completion time is in the future by $([math]::Abs($ageMinutes)) minutes."
     }

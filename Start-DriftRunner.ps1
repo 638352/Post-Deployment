@@ -1,5 +1,7 @@
 #Requires -Version 5.1
 <#
+.SYNOPSIS
+    Scheduled multi-target drift sweep with atomic heartbeat for the watchdog.
 .DESCRIPTION
     Validates the confirmed server inventory, then runs a full files+config
     verification for every target. Each target gets a timestamped JSONL log.
@@ -43,6 +45,8 @@ $runId = [guid]::NewGuid().ToString()
 $runStamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
 $runStarted = (Get-Date).ToUniversalTime()
 $runLog = Join-Path $LogDir ("drift-run_{0}.jsonl" -f $runStamp)
+# Fail closed until inventory validates and every target reports: an early exit
+# or empty sweep must not look like a clean run (0).
 $worst = $VES_EXIT_NOBASE
 $targetCount = 0
 $targets = @()
@@ -51,6 +55,8 @@ $trustFailNames = New-Object System.Collections.Generic.List[string]
 $errorNames = New-Object System.Collections.Generic.List[string]
 
 function Write-Heartbeat([int]$ExitCode) {
+    # Atomic replace: write temp then Move-Item so a crash mid-write never leaves
+    # a truncated JSON file that the watchdog would misread as a fresh heartbeat.
     $completed = (Get-Date).ToUniversalTime()
     $outcome = Get-VesOutcome -ExitCode $ExitCode
     $doc = [ordered]@{
@@ -137,6 +143,9 @@ try {
         }
         elseif ($code -eq $VES_EXIT_DRIFT) {
             $driftedNames.Add($t.processor)
+            # Numeric -lt is safe here: verify returns only 0/1/2 (no health=3).
+            # Do not reuse this pattern where 3 can appear — severity is not
+            # numeric order (see Get-VesWorstExitCode: 10 > 2 > 3 > 1 > 0).
             if ($worst -lt $VES_EXIT_DRIFT) { $worst = $VES_EXIT_DRIFT }
             Write-VesLog DRIFT "DRIFT DETECTED $($t.processor): deployed files/config diverged from baseline." `
                 -Data @{runId=$runId; outcome='FAIL'; exitCode=$code} -LogFile $log
@@ -159,6 +168,8 @@ try {
         }
         else {
             $errorNames.Add($t.processor)
+            # Unexpected codes (health, usage, unknown) collapse to NOBASE so the
+            # sweep never reports cleaner than "unverified".
             if ($worst -lt $VES_EXIT_NOBASE) { $worst = $VES_EXIT_NOBASE }
             Write-VesLog ERROR "DRIFT-CHECK ERROR $($t.processor): verify exited $code; treating as unverified." `
                 -Data @{runId=$runId; outcome='ERROR'; exitCode=$code} -LogFile $log
@@ -224,6 +235,8 @@ finally {
         # ----------------------------------------------------------------------
     } catch {
         Write-VesLog ERROR "Could not write drift heartbeat: $($_.Exception.Message)" -LogFile $runLog
+        # No heartbeat evidence means the watchdog cannot prove the run finished;
+        # treat as unverified (same class as trust failure), not as a clean exit.
         $worst = $VES_EXIT_NOBASE
     }
 }

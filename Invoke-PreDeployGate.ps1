@@ -1,5 +1,7 @@
 #Requires -Version 5.1
 <#
+.SYNOPSIS
+    Block a deploy whose staged commit or tree does not match the approved release.
 .DESCRIPTION
     Two checks against trusted values:
       1. staged commit equals the UAT-approved commit
@@ -101,6 +103,9 @@ function Fail-Gate([string]$msg) {
     #     -Text "Pre-deploy gate blocked $Processor (staged=$StagedCommit). Reason: $msg" `
     #     -AlertType (Get-VesAlertType -Environment $Environment) -Tags ($ddTags + 'event:gate-blocked')
     # ----------------------------------------------------------------------------
+    # Exit 1 = blocked, same numeric code as post-deploy file/config drift.
+    # Monitoring should key off the PRE-DEPLOY BLOCKED log line / script name,
+    # not assume every 1 means "prod drifted after install".
     Stop-Gate $VES_EXIT_DRIFT
 }
 
@@ -111,7 +116,9 @@ try {
         Stop-Gate $VES_EXIT_USAGE
     }
 
-    # Gate 1 (commit): the staged commit must equal the UAT-approved commit pinned in SSM
+    # Gate 1 (commit): staged commit must equal the UAT-approved commit pinned in
+    # SSM. Get-VesTrustedHash also reads baseline-hash pins elsewhere; here the
+    # SecureString value is a git commit SHA, not a manifest digest.
     $approved = Get-VesTrustedHash -ParameterName $ApprovedCommitParam -Region $Region
     Write-VesLog INFO "Approved commit (SSM): $approved" -LogFile $LogFile
 

@@ -1,5 +1,7 @@
 #Requires -Version 5.1
 <#
+.SYNOPSIS
+    Register (or remove) the scheduled drift runner and heartbeat watchdog tasks.
 .DESCRIPTION
     Creates a task running as SYSTEM that re-verifies every target in the
     targets file. The runner writes a timestamped JSONL log per target under its
@@ -58,7 +60,8 @@ if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Path 
 $heartbeatPath = Join-Path $LogDir 'ves-verify-drift.heartbeat.json'
 $watchdogLog = Join-Path $LogDir 'drift-heartbeat-watchdog.jsonl'
 
-# action: run the drift runner under Windows PowerShell against the targets file
+# action: pin Windows PowerShell 5.1 (powershell.exe), not pwsh — prod scripts
+# target 5.1 only and must not silently run under a different engine.
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
     '-NoProfile -ExecutionPolicy Bypass -File "{0}" -TargetsFile "{1}" -LogDir "{2}"' -f $runner, $TargetsFile, $LogDir)
 $watchdogAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
@@ -71,6 +74,8 @@ $watchdogAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) `
     -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
     -RepetitionDuration (New-TimeSpan -Days 3650)
+# Watchdog starts ~one interval later so the first runner pass can write a
+# heartbeat before the watchdog's first check alarms on a missing file.
 $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($IntervalMinutes + 5) `
     -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
     -RepetitionDuration (New-TimeSpan -Days 3650)

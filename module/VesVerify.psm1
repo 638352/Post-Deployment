@@ -124,6 +124,11 @@ function New-VesLogFile {
 function Get-VesOutcome {
     <#
     .SYNOPSIS Map the exit-code contract to PASS, FAIL, or ERROR.
+    .NOTES
+      Drift (1) and health (3) are FAIL: the check ran and production is wrong.
+      Trust/usage/unknown (2, 10, …) are ERROR: the check could not prove a
+      result. Monitoring should treat ERROR louder than FAIL — silence or a
+      broken anchor must never look like a clean deploy.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][int]$ExitCode)
@@ -490,6 +495,14 @@ function Invoke-VesAwsCli {
 }
 
 function Get-VesTrustedHash {
+    <#
+    .SYNOPSIS Read the SSM-pinned trust value (manifest hash or approved commit SHA).
+    .DESCRIPTION
+      Throws on CLI failure or empty value. Callers must map that to exit 2
+      (NOBASE / trust failure), never to a pass — a missing anchor is unverified.
+      The same helper serves both baseline-hash and approved-commit pins; both
+      are SecureString parameters in Parameter Store.
+    #>
     [CmdletBinding()]
     param(
         # SSM parameter name holding the pinned value, e.g. /ves/vemsoutbound/baseline-hash.
@@ -511,6 +524,15 @@ function Get-VesTrustedHash {
 }
 
 function Set-VesTrustedHash {
+    <#
+    .SYNOPSIS Pin a trust value to SSM (SecureString, overwrite).
+    .DESCRIPTION
+      This is the live trust write used by Capture and operator-driven Rollback
+      (-RepinTrust). Deploy auto-rollback must never call it: an automated
+      rewrite of the anchor after a failed deploy is the most dangerous action
+      in the suite. Throws on CLI failure so an unpinned baseline cannot look
+      like success.
+    #>
     [CmdletBinding()]
     param(
         # SSM parameter to write.
@@ -913,6 +935,10 @@ function Start-VesProcessorTarget {
                 Write-VesLog INFO "Started task: $tn" -LogFile $LogFile
             }
             catch {
+                # WARN (not ERROR): Enable above already succeeded, so the task will
+                # fire on its next trigger. Immediate Start is best-effort relaunch;
+                # failing it must not outrank a re-enable failure that leaves the
+                # job permanently disabled.
                 $msg = "Could not start task $tn -> $($_.Exception.Message)"
                 Write-VesLog WARN $msg -LogFile $LogFile; $errors.Add($msg)
             }

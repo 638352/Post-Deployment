@@ -36,6 +36,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $core = Split-Path -Parent $PSScriptRoot
+# Fail closed until an operator has checked the # CONFIRM values against the
+# current Outbound Deployment Steps runbook (task name / log dir not in SERVERS.md).
 if (-not $ConfirmedRunbookValues) {
     throw 'Refusing to run: confirm the scheduled-task name and fresh-log directory, then pass -ConfirmedRunbookValues.'
 }
@@ -73,4 +75,5 @@ if ($ReleaseTag) { $passthru['ReleaseTag'] = $ReleaseTag }
 if ($BaselineRepo) { $passthru['BaselineRepo'] = $BaselineRepo }
 & (Join-Path $core 'Deploy-Processor.ps1') @fixed @passthru `
     -StagedRoot $StagedRoot -StagedCommit $StagedCommit -Environment 'uat' -Region $Region -LogFile $log
+# Hardcoded uat: PROD paths/hosts live on VESEMSEGRESS02/03 and need a separate wrapper.
 exit $LASTEXITCODE

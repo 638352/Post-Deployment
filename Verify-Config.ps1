@@ -25,6 +25,9 @@
                          connectionstring, case-insensitive) is auto-masked in
                          reports as defense-in-depth — still list real secrets
                          explicitly rather than relying on their names.
+      ignoredKeys        keys present in live config that are intentionally
+                         out of scope (not required, not pinned, not "extra").
+                         Undeclared live keys outside this set are drift.
 
     Contract example:
     {
@@ -73,6 +76,9 @@ function Get-FlatConfig([string]$path, [string]$format) {
         # JSON config: recursively flatten nested objects into colon-joined leaf keys
         'json' {
             $obj = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            # Nested function + $script:__m: under PS 5.1 a nested Walk cannot
+            # reliably return a hashtable up through recursion without script
+            # scope; a local $map would stay empty after Walk returns.
             function Walk($o, $prefix) {
                 foreach ($p in $o.PSObject.Properties) {
                     $key = if ($prefix) { "$prefix`:$($p.Name)" } else { $p.Name }

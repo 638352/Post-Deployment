@@ -6,7 +6,8 @@
         Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
     Run under Windows PowerShell 5.1 so the tests use the same engine as prod:
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Tests.ps1
-    Exit code is the failed-test count (0 = green).
+    Exit code is the failed-test count (0 = green). Missing Pester exits 2 —
+    that is a runner signal, not the suite's usage (10) / trust (2) contract.
 .PARAMETER Path
     Test path. Defaults to the tests\ folder next to this script.
 #>
@@ -38,6 +39,8 @@ $cfg.Run.Path         = $Path
 $cfg.Run.PassThru     = $true
 $cfg.Output.Verbosity = 'Detailed'
 
+# Point audit logs at a temp dir so Deploy/Rollback tests never append into a
+# production VES_AUDIT_LOG_DIR or ProgramData evidence share on the developer box.
 $previousAuditLogDir = $env:VES_AUDIT_LOG_DIR
 $testAuditLogDir = Join-Path ([IO.Path]::GetTempPath()) ("ves-verify-test-logs-{0}" -f $PID)
 New-Item -ItemType Directory -Path $testAuditLogDir -Force | Out-Null

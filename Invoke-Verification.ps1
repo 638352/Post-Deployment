@@ -1,5 +1,7 @@
 #Requires -Version 5.1
 <#
+.SYNOPSIS
+    Capture a UAT baseline or verify deployed files/config against it.
 .DESCRIPTION
     Modes:
       Capture       snapshot the UAT-approved release into a manifest and pin its hash to SSM
@@ -267,6 +269,10 @@ try {
                 Write-VesLog OK 'Manifest trust verified against SSM.' -LogFile $LogFile
             }
             else {
+                # Verify may continue without SSM (WARN): useful for local drift
+                # scans. Capture fails closed without -TrustParam unless
+                # -AllowUntrustedCapture is set — pinning is part of the release
+                # record, not an optional verify nicety.
                 Write-VesLog WARN 'No -TrustParam; skipping trust anchor (drift-only check).' -LogFile $LogFile
             }
 

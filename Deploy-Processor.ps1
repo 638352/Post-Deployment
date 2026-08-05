@@ -1,5 +1,7 @@
 #Requires -Version 5.1
 <#
+.SYNOPSIS
+    Gate, stop, backup, copy, restart, verify, and health-check a processor deploy.
 .DESCRIPTION
     Runs the pre-deploy gate, stops the running processor (Task Scheduler job(s)
     for the outbound .exe processors and/or a Windows service for the Java
@@ -328,6 +330,10 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             }
             New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
             robocopy $TargetRoot $backupDir /E /NP /R:2 /W:5 | Out-Null
+            # Robocopy 8+ is a hard copy failure. There is no dedicated "backup
+            # failed" exit code; use DRIFT (1) so the deploy aborts as FAIL rather
+            # than USAGE/NOBASE — production was not changed, but the restore
+            # point could not be taken.
             if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "Backup failed ($LASTEXITCODE); aborting before copy" -LogFile $LogFile; Stop-Deploy $VES_EXIT_DRIFT }
             $global:LASTEXITCODE = 0
 

@@ -1,5 +1,7 @@
 #Requires -Version 5.1
 <#
+.SYNOPSIS
+    Restore a processor from a deploy backup and prove the restore.
 .DESCRIPTION
     Restore a processor from a deploy backup: pick the backup, quiesce the
     processor, mirror the backup tree back over TargetRoot, restore an

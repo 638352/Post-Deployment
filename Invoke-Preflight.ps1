@@ -1,5 +1,7 @@
 #Requires -Version 5.1
 <#
+.SYNOPSIS
+    Read-only self-check: SSM reachability and baseline integrity before a real run.
 .DESCRIPTION
     Read-only. Runs a set of checks and reports PASS / WARN / FAIL per check:
 

@@ -1,5 +1,7 @@
 #Requires -Version 5.1
 <#
+.SYNOPSIS
+    Post-deploy health probes: assemblies, process/service, tasks, logs, HTTP.
 .DESCRIPTION
     Checks, any failure exits 3:
       1. required assemblies load AND their referenced types resolve
@@ -101,7 +103,10 @@ foreach ($dll in $RequiredAssemblies) {
     }
 }
 
-# Check 2: liveness by Windows service state (Java services) or, failing that, a running process
+# Check 2: liveness — exactly one of these paths runs (if/elseif). Service for
+# Java hosts; ProcessPathRoot for console EXEs identified by install folder
+# (same exe name runs multiple times per box); ProcessName only as a last resort
+# when path-based identity is unavailable.
 if ($ServiceName) {
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if (-not $svc -or $svc.Status -ne 'Running') {
@@ -160,7 +165,8 @@ foreach ($tn in $ScheduledTasks) {
             Write-VesLog OK "Task running: $tn" -LogFile $LogFile
         }
         else {
-            # 267011/0x41303 = has not run yet; anything non-zero is a failed/odd run
+            # 267011/0x41303 = SCHED_S_TASK_HAS_NOT_RUN: never ran is not
+            # evidence of health. Any other non-zero last result is a failed/odd run.
             $fail.Add("task:$tn lastresult=$lr")
             Write-VesLog ERROR ("Task last run not OK: {0} (result 0x{1:X})" -f $tn, $lr) -LogFile $LogFile
         }
