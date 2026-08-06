@@ -61,6 +61,11 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+# Deploy-Processor launches this gate with `powershell.exe -File`, which cannot
+# carry an array; required artifacts arrive delimiter-joined. Split before use --
+# a joined "a\x.config,b\y.config" would be probed as one nonexistent path and
+# block every deploy that names two required artifacts.
+$RequiredArtifactPaths = Expand-VesList -Value $RequiredArtifactPaths
 # JSONL audit log is opt-in: pass -LogFile to persist a record of this run.
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: pre-deploy gate' `

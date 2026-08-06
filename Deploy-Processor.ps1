@@ -24,6 +24,21 @@
     processor via its own scheduled task rather than waiting for the next
     trigger; a failed deploy is never auto-started.
 
+    Config handling has two postures, chosen per unit by -PreserveFiles, because
+    the deployment runbook itself uses both:
+      * default (empty): the package ships the config and the mirror installs it.
+        The gate requires it in the staged tree, so a package without it is
+        blocked before the copy. This is "delete all files INCLUDING the
+        exe.config", e.g. VESEMSEGRESS01 in 4.7.
+      * -PreserveFiles '*.config': robocopy /XF holds the server's own config
+        back, so it survives the deploy and the gate stops demanding one in the
+        package. This is "delete all files EXCEPT the exe.config files", which is
+        what 4.7 does on every other unit.
+    Either way the live config is proven by Verify-Config against its contract;
+    *.config is outside the byte-hash baseline by design, so the file check is
+    unaffected. Preserving anything that IS hashed logs a warning, because it will
+    surface as CHANGED or EXTRA in the post-deploy verify.
+
     Break-glass is intentionally not wired through here (open policy decision).
     -WhatIf runs the gate only and skips stop/backup/copy.
 
@@ -61,6 +76,20 @@ param(
     # Relative staged paths that must exist even though they are excluded from
     # byte hashing (for example *.config files or required empty folders).
     [string[]]$RequiredArtifactPaths = @(),
+    # Files the mirror must NOT overwrite or delete (robocopy /XF).
+    #
+    # Empty by default, which keeps the staged-config posture: the mirror installs
+    # the package's config and the gate requires the package to carry it. Set it
+    # to '*.config' for a unit whose runbook step reads "delete all files EXCEPT
+    # the exe.config files" -- the server then keeps its own environment-specific
+    # config across the deploy, and the gate stops demanding one in the package.
+    # Either way the live config is proven by Verify-Config against its contract;
+    # $VES_DEFAULT_EXCLUDE already keeps *.config out of the byte-hash baseline,
+    # so preserving it costs the file check nothing.
+    [string[]]$PreserveFiles = @(),
+    # Directory names the mirror must leave alone (robocopy /XD), e.g. a
+    # server-only spool folder that lives inside the processor tree.
+    [string[]]$PreserveDirs = @(),
     [string[]]$RequiredAssemblies = @(),
     [string]$ServiceName,
     # Task Scheduler jobs on THIS server to disable before copy / re-enable after,
@@ -118,6 +147,16 @@ param(
 # - Each processor wrapper supplies the live target path and backup root used here.
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+# This script is itself launched with `powershell.exe -File` (by the test harness,
+# by a scheduled runner, by any wrapper that does not splat), and -File cannot
+# carry an array. Normalize on the way IN so a joined argument and a real array
+# behave identically, then join again on the way out to each child stage. Doing
+# both makes the transport symmetric at every hop instead of only the last one.
+$ScheduledTasks = Expand-VesList -Value $ScheduledTasks
+$RequiredAssemblies = Expand-VesList -Value $RequiredAssemblies
+$RequiredArtifactPaths = Expand-VesList -Value $RequiredArtifactPaths
+$PreserveFiles = Expand-VesList -Value $PreserveFiles
+$PreserveDirs = Expand-VesList -Value $PreserveDirs
 $here = $PSScriptRoot
 if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("deploy-{0}-{1}" -f $Processor, $StagedCommit) }
 $runId = [guid]::NewGuid().ToString()
@@ -141,6 +180,20 @@ function Stop-Deploy([int]$code) {
         "RUN END: deployment outcome=$outcome exit=$code" `
         -Data @{runId = $runId; outcome = $outcome; exitCode = $code; processor = $Processor; release = $StagedCommit; releaseTag = $ReleaseTag; rolledBack = $script:rolledBack; rollbackExitCode = $script:rollbackExitCode } -LogFile $LogFile
     exit $code
+}
+
+# Every stage below runs as a `powershell.exe -File` child, which cannot carry an
+# array (see ConvertTo-VesList). Join the multi-valued parameters ONCE, here, so
+# the gate, rollback, and health call sites cannot each get it subtly different --
+# and so a name carrying the delimiter is refused before the gate, not discovered
+# by a stop phase that has already opened production.
+try {
+    $rbTasks = ConvertTo-VesList -Value $ScheduledTasks -Name 'scheduled task'
+    $rbAssemblies = ConvertTo-VesList -Value $RequiredAssemblies -Name 'required assembly'
+}
+catch {
+    Write-VesLog ERROR $_.Exception.Message -LogFile $LogFile
+    Stop-Deploy $VES_EXIT_USAGE
 }
 
 # Rollback mode: hand off to Invoke-Rollback.ps1, which owns backup selection,
@@ -174,8 +227,8 @@ if ($Rollback) {
     if ($ConfigPath) { $rbArgs += '-ConfigPath', $ConfigPath }
     if ($ConfigContract) { $rbArgs += '-ConfigContract', $ConfigContract }
     if ($ServiceName) { $rbArgs += '-ServiceName', $ServiceName }
-    foreach ($tn in $ScheduledTasks) { $rbArgs += '-ScheduledTasks', $tn }
-    foreach ($dll in $RequiredAssemblies) { $rbArgs += '-RequiredAssemblies', $dll }
+    if ($rbTasks) { $rbArgs += '-ScheduledTasks', $rbTasks }
+    if ($rbAssemblies) { $rbArgs += '-RequiredAssemblies', $rbAssemblies }
     if ($KillProcesses) { $rbArgs += '-KillProcesses' }
     if (-not $StartTasksAfter) { $rbArgs += '-NoStartTasksAfter' }
     if ($HealthUrl) { $rbArgs += '-HealthUrl', $HealthUrl }
@@ -260,6 +313,16 @@ if (-not $Rollback) {
         }
     }
 }
+# A preserved path that IS byte-hashed will surface as CHANGED or EXTRA in the
+# post-deploy verify, because the baseline describes the staged release and the
+# server keeps its own copy. *.config is already outside the hash by design, so the
+# default preserve list is silent; anything else the operator adds is not.
+foreach ($p in (@($PreserveFiles) + @($PreserveDirs))) {
+    if ([string]::IsNullOrWhiteSpace($p)) { continue }
+    if ($p -notmatch $Global:VES_DEFAULT_EXCLUDE) {
+        Write-VesLog WARN "Preserved path '$p' is hash-verified, so the post-deploy verify will report it as CHANGED or EXTRA." -LogFile $LogFile
+    }
+}
 foreach ($path in $RequiredArtifactPaths) {
     if (-not [string]::IsNullOrWhiteSpace($path) -and -not $gateRequired.Contains($path)) {
         $gateRequired.Add($path)
@@ -277,7 +340,14 @@ if ($ConfigContract) {
     $targetPrefix = $targetFull + '\'
     if ($configFull.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         $relativeConfig = $configFull.Substring($targetPrefix.Length)
-        if (-not $gateRequired.Contains($relativeConfig)) { $gateRequired.Add($relativeConfig) }
+        # ...unless the mirror is going to preserve it. Demanding the package ship
+        # a file the copy will then hold back is friction with no safety value, and
+        # it would block every deploy of a package built once for several servers.
+        # The live config is still proven -- by Verify-Config against its contract.
+        if (Test-VesPreservedPath -RelativePath $relativeConfig -PreserveFiles $PreserveFiles -PreserveDirs $PreserveDirs) {
+            Write-VesLog INFO "Config is preserved on the server (not mirrored), so it is not required in the staged package: $relativeConfig" -LogFile $LogFile
+        }
+        elseif (-not $gateRequired.Contains($relativeConfig)) { $gateRequired.Add($relativeConfig) }
     }
     elseif ($gateRequired.Count -eq 0) {
         Write-VesLog ERROR 'ConfigPath is outside TargetRoot; supply -RequiredArtifactPaths with its staged relative path.' -LogFile $LogFile
@@ -334,7 +404,11 @@ Step 'pre-deploy gate' {
         # gate must refuse (exit 10), and omitting the switch here would hide that
         # misconfiguration behind a parameter the gate never saw.
         '-BaselineRepo', $BaselineRepo, '-ReleaseTag', $ReleaseTag)
-    foreach ($requiredPath in $gateRequired) { $gateArgs += '-RequiredArtifactPaths', $requiredPath }
+    # One joined argument, not one per path: two required artifacts passed as two
+    # -RequiredArtifactPaths would fail the gate child with ParameterAlreadyBound
+    # before it ran a single check.
+    $gateRequiredArg = ConvertTo-VesList -Value $gateRequired -Name 'required artifact path'
+    if ($gateRequiredArg) { $gateArgs += '-RequiredArtifactPaths', $gateRequiredArg }
     if ($LogFile) { $gateArgs += '-LogFile', $LogFile }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-PreDeployGate.ps1') @gateArgs
 }
@@ -510,9 +584,10 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                     '-BackupDir', $backupDir, '-Environment', $Environment,
                     '-Initials', $Initials, '-LogFile', $LogFile,
                     '-Reason', ("auto-rollback: deploy stage '$stageName' failed with exit $stageCode"))
-                # -File cannot bind arrays: repeat the named argument instead.
-                foreach ($tn in $ScheduledTasks) { $rbArgs += '-ScheduledTasks', $tn }
-                foreach ($dll in $RequiredAssemblies) { $rbArgs += '-RequiredAssemblies', $dll }
+                # -File cannot bind arrays at all: repeating the named argument is
+                # ParameterAlreadyBound. Pass the joined form (see ConvertTo-VesList).
+                if ($rbTasks) { $rbArgs += '-ScheduledTasks', $rbTasks }
+                if ($rbAssemblies) { $rbArgs += '-RequiredAssemblies', $rbAssemblies }
                 if ($ServiceName) { $rbArgs += '-ServiceName', $ServiceName }
                 if ($BaselineRepo) { $rbArgs += '-BaselineRepo', $BaselineRepo }
                 if ($ConfigContract) { $rbArgs += '-ConfigContract', $ConfigContract }
@@ -568,8 +643,15 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
         # only mirror the staged tree in once everything is safely stopped
         if ($stop.Stopped) {
             Write-VesLog INFO "Copy $StagedRoot -> $TargetRoot" -LogFile $LogFile
-            # /MIR so stale files get removed; binary copy, nothing rewrites line endings
-            robocopy $StagedRoot $TargetRoot /MIR /NP /R:2 /W:5 | Out-Null
+            # /MIR so stale files get removed; binary copy, nothing rewrites line endings.
+            # /XF and /XD hold back the preserved paths: without them /MIR replaces the
+            # server's own config with the staged one AND deletes any server-only file,
+            # and the post-deploy verify still reports PASS because the mirror made the
+            # tree match the manifest. The dated backup was the only recovery.
+            $rcArgs = @($StagedRoot, $TargetRoot, '/MIR', '/NP', '/R:2', '/W:5')
+            foreach ($f in $PreserveFiles) { if ($f) { $rcArgs += '/XF', $f } }
+            foreach ($d in $PreserveDirs) { if ($d) { $rcArgs += '/XD', $d } }
+            robocopy @rcArgs | Out-Null
             # robocopy: 0-7 are success variants, 8+ is failure
             if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "robocopy failed ($LASTEXITCODE)" -LogFile $LogFile; $copyFailed = $true }
             $global:LASTEXITCODE = 0   # clear the 1-7 success codes so Step doesn't trip on them
@@ -640,15 +722,15 @@ Step 'post-deploy verify' {
 
 # Stage 5: confirm the processor is actually alive after the restart (service/task/log/endpoint)
 Step 'health check' {
-    # Build arg array so each array-valued param is passed as repeated named args
-    # (e.g. -RequiredAssemblies a.dll -RequiredAssemblies b.dll), which PowerShell
-    # -File mode binds correctly to [string[]] parameters.
+    # Array-valued params travel as ONE delimiter-joined argument: PowerShell
+    # -File mode cannot bind an array, and repeating a named argument fails the
+    # child with ParameterAlreadyBound. Invoke-HealthCheck splits them back out.
     $hcArgs = @('-Processor', $Processor, '-CommitSha', $StagedCommit, '-Environment', $Environment)
     if ($ReleaseTag) { $hcArgs += '-ReleaseTag', $ReleaseTag }
     if ($LogFile) { $hcArgs += '-LogFile', $LogFile }
-    foreach ($dll in $RequiredAssemblies) { $hcArgs += '-RequiredAssemblies', $dll }
+    if ($rbAssemblies) { $hcArgs += '-RequiredAssemblies', $rbAssemblies }
     if ($ServiceName) { $hcArgs += '-ServiceName', $ServiceName }
-    foreach ($tn in $ScheduledTasks) { $hcArgs += '-ScheduledTasks', $tn }
+    if ($rbTasks) { $hcArgs += '-ScheduledTasks', $rbTasks }
     if ($FreshLogDir) { $hcArgs += '-FreshLogDir', $FreshLogDir, '-FreshLogMaxAgeMinutes', "$FreshLogMaxAgeMinutes" }
     if ($ScheduledTasks.Count -gt 0) {
         $hcArgs += '-ProcessPathRoot', $TargetRoot

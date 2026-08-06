@@ -164,6 +164,56 @@ Describe 'per-server config must be staged' {
         Test-Path (Join-Path $target $script:CfgLeaf) | Should -BeTrue
         $r.Output | Should -Match 'Config verify PASS'
     }
+
+    It 'stops requiring a staged config once the server keeps its own (-PreserveFiles)' {
+        # The other posture in the deployment runbook: "delete all files EXCEPT
+        # the exe.config files". The package legitimately has no config, so the
+        # gate must not block -- and the server's own config must survive /MIR.
+        $staged = New-VesTree (Join-Path $script:Root 'staged-preserve')
+        $target = New-VesTree (Join-Path $script:Root 'target-preserve') 'previous-release'
+        Set-Content -Path (Join-Path $target $script:CfgLeaf) -Value 'OutboundEnabled=true' -NoNewline
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' `
+        ((New-ConfigDeployArgs $staged $target) + @('-PreserveFiles', '*.config'))
+        $r.ExitCode | Should -Be 0
+        $r.Output | Should -Not -Match ([regex]::Escape("$script:CfgLeaf is missing from the artifact"))
+        # survived the mirror, contents untouched, and config verify read THAT file
+        Get-Content -LiteralPath (Join-Path $target $script:CfgLeaf) -Raw | Should -Match 'OutboundEnabled=true'
+        $r.Output | Should -Match 'Config verify PASS'
+    }
+
+    It 'warns when a preserved path is one the baseline actually hashes' {
+        # *.config is outside the hash by design so preserving it is silent. A
+        # preserved path that IS hashed will read as CHANGED/EXTRA at verify time,
+        # and the operator should hear that before the deploy, not after.
+        $staged = New-VesTree (Join-Path $script:Root 'staged-preserve-warn')
+        Set-Content -Path (Join-Path $staged $script:CfgLeaf) -Value 'OutboundEnabled=true' -NoNewline
+        $target = New-LiveTarget 'target-preserve-warn'
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' `
+        ((New-ConfigDeployArgs $staged $target) + @('-PreserveFiles', 'only-on-this-server.txt', '-WhatIf'))
+        $r.Output | Should -Match "Preserved path 'only-on-this-server.txt' is hash-verified"
+    }
+}
+
+Describe 'multi-value arguments across the -File boundary' {
+    # `powershell.exe -File` cannot carry an array: repeating a named argument is
+    # ParameterAlreadyBound and `-X a,b` binds as ONE string. Every stage here is
+    # a -File child, so a processor with two scheduled tasks -- which is what
+    # VESEMSEGRESS02 and 03 run out of a shared folder -- used to fail its health
+    # stage on argument binding alone. These cases pin the joined transport.
+    # The two-scheduled-task case is pinned in Invoke-HealthCheck.Tests.ps1 instead:
+    # a deploy naming tasks that do not exist on the test box aborts in the stop
+    # phase (Disable-ScheduledTask fails and breaks) long before the health stage,
+    # so it cannot demonstrate anything about health argument binding.
+    It 'passes two required assemblies to the health stage without a binding error' {
+        $target = New-LiveTarget 'target-twodlls'
+        $a = Join-Path $target 'app.txt'
+        $b = Join-Path $target 'only-on-this-server.txt'
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $target @(
+                '-RequiredAssemblies', "$a,$b"))
+        $r.Output | Should -Not -Match 'specified more than once'
+        # both probed as separate paths, not one fused path
+        $r.Output | Should -Not -Match ([regex]::Escape("$a,$b"))
+    }
 }
 
 Describe 'backup and rollback record' {

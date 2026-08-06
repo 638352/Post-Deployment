@@ -581,14 +581,28 @@ and fresh-log health probes; do not pass their binaries to
   `commitSha` in the tag-archived manifest, it does not require a real Git SHA
   — but capture refuses an empty or 'unknown' value).
 - In-scope system list is unconfirmed. The scripts now fail closed until the
-  inventory is confirmed. Documented outbound processors:
-  VES.OutboundDBQProcessor.exe / VES.OutboundProcessor.exe, Task Scheduler jobs
-  VLER_EM_Outbound_Request_Handler / \_Processor (and \_2 / \_12 variants) and
-  VLER_EM_Real_Time_Outbound_Processor. **Citrix server names are not yet
-  documented** and must be added to `requiredServers` and `targets` before
-  `inventoryComplete` can be set to true. `processors/` has the template plus
-  filled wrappers (e.g. `Deploy-OutboundDBQ-uat.ps1`); copy the template per
-  confirmed system and server (3-5 person-days each incl. pilot).
+  inventory is confirmed. The **4.7 Deployment Instructions** runbook supplied the
+  six PROD deployment units (target dirs, task/service names, log dirs) — see the
+  PROD table in SERVERS.md — and `processors/` now carries a wrapper per unit
+  alongside the template and `Deploy-OutboundDBQ-uat.ps1`. What that runbook does
+  **not** supply, and what still blocks `inventoryComplete`:
+  - **Citrix server names**, still undocumented, still absent from
+    `requiredServers`/`targets`.
+  - **Baseline manifest and config-contract paths** per unit, and the backup
+    root. The PROD `targets.json` entries carry `CONFIRM`/`TBD` in those fields
+    on purpose: they are `needs-confirmation`, so they document the runbook
+    without counting toward required-server coverage.
+  - The exact **config leaf name** for the two inbound units (assumed from the
+    service/processor name) and whether an assembly-load probe is wanted there.
+- Config posture per unit is now explicit but only half-decided. Five of the six
+  PROD units preserve the server's config (`-PreserveFiles '*.config'` →
+  robocopy `/XF`, matching "delete all files except the exe.config files");
+  VESEMSEGRESS01 replaces it, so its wrapper leaves `PreserveFiles` empty and the
+  gate requires the config in the staged package. The repo-wide default is still
+  the staged-config posture. **Decide whether that should stay the default** —
+  preserving would also close the measured `/MIR` incident where a mirror
+  replaced a per-server config and deleted server-only files while the
+  post-deploy verify still reported PASS.
 - Database objects (stored procedures, triggers, views) are **out of scope** for
   the current two-week window. They fit the same SHA-256 capture-and-verify
   pattern and are planned as a fast follow; no script changes are needed to

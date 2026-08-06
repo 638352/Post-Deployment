@@ -270,3 +270,142 @@ Describe 'Import-VesTargetInventory' {
         $inv.Targets.Count | Should -Be 1
     }
 }
+
+Describe 'ConvertTo-VesList / Expand-VesList' {
+    # `powershell.exe -File` cannot bind an array: repeating a named argument is
+    # ParameterAlreadyBound, and `-X a,b` binds as ONE string. Multi-values
+    # therefore travel joined and are split on arrival. These two functions are
+    # the whole contract, so they are pinned here rather than only end-to-end.
+    It 'joins a real array into one argument' {
+        ConvertTo-VesList -Value @('DBQ_Processor', 'Outbound_Processor') |
+            Should -Be 'DBQ_Processor,Outbound_Processor'
+    }
+
+    It 'returns null for empty input so the caller can omit the switch entirely' {
+        # A bare -X with no value leaves the child's binder waiting for one.
+        ConvertTo-VesList -Value @() | Should -BeNullOrEmpty
+        ConvertTo-VesList -Value $null | Should -BeNullOrEmpty
+        ConvertTo-VesList -Value @('', '  ') | Should -BeNullOrEmpty
+    }
+
+    It 'refuses a value that already contains the delimiter' {
+        # Splitting it on the far side would invent a second task name, and a task
+        # that does not exist is a stop-phase failure DURING a deploy.
+        { ConvertTo-VesList -Value @('Real,Time') -Name 'scheduled task' } |
+            Should -Throw '*contains the list delimiter*'
+    }
+
+    It 'splits a joined argument back into its parts' {
+        $r = Expand-VesList -Value @('DBQ_Processor,Outbound_Processor')
+        $r.Count | Should -Be 2
+        $r[0] | Should -Be 'DBQ_Processor'
+        $r[1] | Should -Be 'Outbound_Processor'
+    }
+
+    It 'leaves an in-process array untouched, so normalizing is safe either way' {
+        # Pester and any wrapper that splats bind a real array; the same script
+        # must behave identically whether it was reached by & or by -File.
+        $r = Expand-VesList -Value @('One', 'Two')
+        $r.Count | Should -Be 2
+        (Expand-VesList -Value @('Solo')).Count | Should -Be 1
+        (Expand-VesList -Value @()).Count | Should -Be 0
+        (Expand-VesList -Value $null).Count | Should -Be 0
+    }
+
+    It 'round-trips whatever a caller could legally pass' {
+        $original = @('VLER_EM_Real_Time_DBQ_Processor', 'VLER_EM_Real_Time_Outbound_Processor')
+        (Expand-VesList -Value (ConvertTo-VesList -Value $original)) | Should -Be $original
+    }
+}
+
+Describe 'Test-VesPreservedPath' {
+    # Decides whether the gate should still demand a staged artifact that the
+    # mirror is going to hold back with /XF. Wrong either way is a real failure:
+    # too strict blocks a legitimate package, too loose lets a config go missing.
+    It 'matches a config by wildcard on the leaf' {
+        Test-VesPreservedPath -RelativePath 'VES.OutboundDBQProcessor.exe.config' -PreserveFiles @('*.config') |
+            Should -BeTrue
+        Test-VesPreservedPath -RelativePath 'sub\nested.exe.config' -PreserveFiles @('*.config') |
+            Should -BeTrue
+    }
+
+    It 'does not match an unrelated file' {
+        Test-VesPreservedPath -RelativePath 'VES.OutboundDBQProcessor.exe' -PreserveFiles @('*.config') |
+            Should -BeFalse
+    }
+
+    It 'matches any segment of a preserved directory' {
+        Test-VesPreservedPath -RelativePath 'spool\pending\item.xml' -PreserveDirs @('spool') | Should -BeTrue
+        Test-VesPreservedPath -RelativePath 'bin\item.xml' -PreserveDirs @('spool') | Should -BeFalse
+    }
+
+    It 'is false when nothing is preserved, which is the default posture' {
+        Test-VesPreservedPath -RelativePath 'app.exe.config' | Should -BeFalse
+    }
+}
+
+Describe 'Test-VesRunbookValues' {
+    # Each per-server wrapper pins paths and names copied out of the deployment
+    # runbook; this is what makes -ConfirmedRunbookValues falsifiable against the
+    # box, read-only, BEFORE the mirror opens production.
+    BeforeAll {
+        $script:RbReal = Join-Path $TestDrive 'rb-target'
+        New-Item -ItemType Directory -Path $script:RbReal -Force | Out-Null
+        $script:RbLogs = Join-Path $TestDrive 'rb-logs'
+        New-Item -ItemType Directory -Path $script:RbLogs -Force | Out-Null
+    }
+
+    It 'passes silently when everything it was given exists' {
+        $r = @(Test-VesRunbookValues -ExpectedServer $env:COMPUTERNAME `
+                -TargetRoot $script:RbReal -FreshLogDir $script:RbLogs `
+                -BackupRoot (Join-Path $script:RbReal 'BackUp'))
+        $r.Count | Should -Be 0
+    }
+
+    It 'catches a wrapper running on the wrong server' {
+        # VESEMSEGRESS01 and 03 deploy into the SAME TargetRoot path on different
+        # boxes, so path checks alone cannot tell them apart. This is the check
+        # that can.
+        $r = @(Test-VesRunbookValues -ExpectedServer 'VESEMSEGRESS03' -TargetRoot $script:RbReal)
+        $r.Count | Should -Be 1
+        $r[0] | Should -Match 'describes VESEMSEGRESS03 but is running on'
+    }
+
+    It 'is case-insensitive about the hostname' {
+        # Windows reports COMPUTERNAME upper-case; a wrapper written in the
+        # runbook's mixed case must not read as a different machine.
+        $r = @(Test-VesRunbookValues -ExpectedServer ("$env:COMPUTERNAME".ToLowerInvariant()))
+        $r.Count | Should -Be 0
+    }
+
+    It 'catches a target directory that does not exist' {
+        # The dangerous one: robocopy /MIR would happily CREATE it and install the
+        # release into a folder nothing runs from, while the real processor keeps
+        # running the old bits and every check still reports PASS.
+        $r = @(Test-VesRunbookValues -TargetRoot (Join-Path $TestDrive 'no-such-tree'))
+        $r.Count | Should -Be 1
+        $r[0] | Should -Match 'target directory .* does not exist'
+    }
+
+    It 'catches a missing fresh-log directory and an unwritable backup root together' {
+        $r = @(Test-VesRunbookValues -FreshLogDir (Join-Path $TestDrive 'no-logs') `
+                -BackupRoot (Join-Path $TestDrive 'no-drive\deeper\BackUp'))
+        $r.Count | Should -Be 2
+        ($r -join ' ') | Should -Match 'fresh-log directory'
+        ($r -join ' ') | Should -Match 'no restore point can be written'
+    }
+
+    It 'reports every scheduled task it could not find, not just the first' {
+        # A shared-folder unit lists two tasks; hearing about only one of them
+        # would send an operator round the loop twice.
+        $r = @(Test-VesRunbookValues -ScheduledTasks @('VES_No_Such_Task_A', 'VES_No_Such_Task_B'))
+        $r.Count | Should -Be 2
+    }
+
+    It 'checks nothing it was not given' {
+        # Wrappers pass only the fields that apply: a service-shaped unit has no
+        # tasks, a task-shaped unit has no service.
+        @(Test-VesRunbookValues).Count | Should -Be 0
+        @(Test-VesRunbookValues -ScheduledTasks @()).Count | Should -Be 0
+    }
+}

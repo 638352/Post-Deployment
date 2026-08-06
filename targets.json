@@ -6,10 +6,14 @@
   "inventoryNotes": [
     "Fail-closed starter inventory only. Confirm every manual-copy target before setting inventoryComplete to true.",
     "Citrix server names are not yet documented in this repository and must be added to requiredServers and targets.",
-    "Confirm production processor paths, task names, and configuration paths from the deployment runbooks.",
+    "PROD entries below are derived from the 4.7 Deployment Instructions runbook (rollout section), which supplies target directories, scheduled-task and service names, and log directories. It does NOT supply baseline manifest paths, config-contract paths, backup roots, or release tags, so those stay CONFIRM/TBD and every PROD entry stays needs-confirmation.",
+    "inventoryStatus is left at needs-confirmation deliberately: only 'confirmed' entries count toward required-server coverage, so adding these documents the runbook without letting the inventory claim a coverage it does not have.",
+    "VESEMSEGRESS02 and VESEMSEGRESS03 each run TWO processors (XML and DBQ) as separate instances of one executable out of a SINGLE directory, distinguished only by the RTP/RTPDP mode argument. Each is one deployment unit with two scheduled tasks; the two entries per server share a releaseRoot on purpose.",
+    "VESEMSEGRESS01 and VESEMSEGRESS03 use the SAME releaseRoot path on different boxes. Per-server wrappers assert their own hostname; do not collapse these entries.",
+    "VESEMSEGRESS01 is the only unit whose 4.7 step replaces the exe.config ('delete all files INCLUDING the exe.config file'); every other unit preserves the server's own config.",
     "Excluded per brief Scope: cloud services (gateway services, MERA - VESMERA01, VESOMSVEMS01/02) already have standard deployment processes; joining them to the Git release discipline is later work.",
-    "Excluded per brief Scope: database objects (stored procedures, triggers, views) are a planned fast follow, outside the two-week window.",
-    "Starter OutboundDBQ paths match SERVERS.md UAT and processors/Deploy-OutboundDBQ-uat.ps1; PROD uses VESEMSEGRESS02/03 with different roots — confirm before inventoryComplete."
+    "Excluded per brief Scope: database objects (stored procedures, triggers, views) are a planned fast follow, outside the two-week window. The 4.7 runbook runs five SQL scripts on VESEMSINGRESS02 before its file copy; that step is not covered by these targets.",
+    "Starter OutboundDBQ paths match SERVERS.md UAT and processors/Deploy-OutboundDBQ-uat.ps1; PROD uses VESEMSEGRESS02/03 with different roots - confirm before inventoryComplete."
   ],
   "requiredServers": [
     "VESDEVAPPS01",
@@ -32,7 +36,85 @@
       "manifestPath": "D:\\baselines\\OutboundDBQ.json",
       "configContract": "D:\\baselines\\OutboundDBQ.config.json",
       "configPath": "C:\\VLER_TEST_OUTBOUND\\Processors\\VES.OutboundProcessor\\VES.OutboundDBQProcessor.exe.config",
-      "note": "UAT starter aligned with Deploy-OutboundDBQ-uat.ps1 / SERVERS.md. DBQ also deploys on VESEMSEGRESS02/03 in PROD — create one confirmed entry per deployed copy."
+      "note": "UAT starter aligned with Deploy-OutboundDBQ-uat.ps1 / SERVERS.md. DBQ also deploys on VESEMSEGRESS02/03 in PROD - create one confirmed entry per deployed copy."
+    },
+    {
+      "processor": "RealtimeInbound",
+      "server": "VESEMSINGRESS01",
+      "environment": "prod",
+      "inventoryStatus": "needs-confirmation",
+      "releaseTag": "TBD",
+      "releaseRoot": "C:\\VLER\\Processors\\VES.RealtimeInboundEventService",
+      "manifestPath": "CONFIRM baseline manifest path",
+      "configContract": "CONFIRM config contract path",
+      "configPath": "C:\\VLER\\Processors\\VES.RealtimeInboundEventService\\VES.RealtimeInboundEventService.exe.config",
+      "deployScript": "processors/Deploy-RealtimeInbound-vesemsingress01.ps1",
+      "note": "4.7 rollout: Windows SERVICE VES.RealtimeInboundEventService (the only service-shaped unit in 4.7), not a scheduled task. Logs C:\\VLER\\Logs\\VES.InboundProcessor. Config preserved (runbook: except the exe.config files). Config leaf name is assumed from the service name - confirm."
+    },
+    {
+      "processor": "InboundHandler",
+      "server": "VESEMSINGRESS02",
+      "environment": "prod",
+      "inventoryStatus": "needs-confirmation",
+      "releaseTag": "TBD",
+      "releaseRoot": "C:\\VLER\\Processors\\VES.InboundProcessor",
+      "manifestPath": "CONFIRM baseline manifest path",
+      "configContract": "CONFIRM config contract path",
+      "configPath": "C:\\VLER\\Processors\\VES.InboundProcessor\\VES.InboundProcessor.exe.config",
+      "deployScript": "processors/Deploy-InboundHandler-vesemsingress02.ps1",
+      "note": "4.7 rollout: scheduled task 'VLER EM Inbound _ Request _ Handler' (spaces around the underscores are literal). Logs C:\\VLER\\Logs\\VES.InboundProcessor. Config preserved. Five SQL rollout scripts run before the file copy and are OUT OF SCOPE here. The release zip nests a folder - flatten it when staging. Config leaf name is assumed - confirm."
+    },
+    {
+      "processor": "Outbound",
+      "server": "VESEMSEGRESS01",
+      "environment": "prod",
+      "inventoryStatus": "needs-confirmation",
+      "releaseTag": "TBD",
+      "releaseRoot": "C:\\VLER\\Processors\\VES.OutboundProcessor",
+      "manifestPath": "CONFIRM baseline manifest path",
+      "configContract": "CONFIRM config contract path",
+      "configPath": "C:\\VLER\\Processors\\VES.OutboundProcessor\\VES.OutboundDBQProcessor.exe.config",
+      "deployScript": "processors/Deploy-Outbound-vesemsegress01.ps1",
+      "note": "4.7 rollout: task VLER_EM_Real_Time_Outbound_Processor, mode RTP, logs E:\\VLER\\Logs\\VES.OutboundProcessor. The ONLY unit that REPLACES its config (runbook: including the exe.config file, plus a pre-edited replacement) - stage release and config as one tree so the gate approves what actually lands. The runbook heads this section 'Vesemsingress01'; it is VESEMSEGRESS01."
+    },
+    {
+      "processor": "Ack",
+      "server": "VESEMSEGRESS02",
+      "environment": "prod",
+      "inventoryStatus": "needs-confirmation",
+      "releaseTag": "TBD",
+      "releaseRoot": "C:\\VLER\\Processors\\VES.OutboundProcessor",
+      "manifestPath": "CONFIRM baseline manifest path",
+      "configContract": "CONFIRM config contract path",
+      "configPath": "C:\\VLER\\Processors\\VES.OutboundProcessor\\VES.OutboundDBQProcessor.exe.config",
+      "deployScript": "processors/Deploy-Ack-vesemsegress02.ps1",
+      "note": "4.7 rollout: task VLER_EM_Real_Time_Acknowledgement_Processor, mode RTP, logs E:\\VLER\\Logs\\VES.OutboundProcessor. Runbook notes only one instance should be running from this tree. Config preserved. Separate tree from this server's XML+DBQ unit."
+    },
+    {
+      "processor": "OutboundDBQ",
+      "server": "VESEMSEGRESS02",
+      "environment": "prod",
+      "inventoryStatus": "needs-confirmation",
+      "releaseTag": "TBD",
+      "releaseRoot": "C:\\VLER_OUTBOUND_AND_DBQ\\Processors\\VES.OutboundProcessor",
+      "manifestPath": "CONFIRM baseline manifest path",
+      "configContract": "CONFIRM config contract path",
+      "configPath": "C:\\VLER_OUTBOUND_AND_DBQ\\Processors\\VES.OutboundProcessor\\VES.OutboundDBQProcessor.exe.config",
+      "deployScript": "processors/Deploy-OutboundDBQ-vesemsegress02.ps1",
+      "note": "4.7 rollout: XML and DBQ share this ONE tree as two instances (RTP and RTPDP) with two tasks, VLER_EM_Real_Time_DBQ_Processor and VLER_EM_Real_Time_Outbound_Processor. Logs E:\\VLER_OUTBOUND_AND_DBQ\\Logs\\VES.OutboundProcessor, shared by both, so log freshness is not per-processor evidence. Config preserved."
+    },
+    {
+      "processor": "OutboundDBQ",
+      "server": "VESEMSEGRESS03",
+      "environment": "prod",
+      "inventoryStatus": "needs-confirmation",
+      "releaseTag": "TBD",
+      "releaseRoot": "C:\\VLER\\Processors\\VES.OutboundProcessor",
+      "manifestPath": "CONFIRM baseline manifest path",
+      "configContract": "CONFIRM config contract path",
+      "configPath": "C:\\VLER\\Processors\\VES.OutboundProcessor\\VES.OutboundDBQProcessor.exe.config",
+      "deployScript": "processors/Deploy-OutboundDBQ-vesemsegress03.ps1",
+      "note": "4.7 rollout: XML and DBQ share this ONE tree as two instances (RTP and RTPDP) with two tasks, VLER_EM_Real_Time_DBQ_Processor and VLER_EM_Real_Time_Outbound_Processor; the runbook notes both should be running. Logs E:\\VLER\\Logs\\VES.OutboundProcessor, shared by both. Config preserved. Same releaseRoot path as VESEMSEGRESS01 on a different box."
     }
   ]
 }

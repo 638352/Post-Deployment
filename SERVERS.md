@@ -61,7 +61,7 @@ part of the required manual-copy inventory in targets.json.
 ## How the outbound processors actually run
 
 There is ONE executable, `VES.OutboundDBQProcessor.exe`, deployed into a
-per-processor folder and launched by a `.bat` file with a mode argument. The
+processor folder and launched by a `.bat` file with a mode argument. The
 mode arg (not the exe name) selects the processor behavior:
 
 | Processor | Mode arg | Notes |
@@ -70,9 +70,23 @@ mode arg (not the exe name) selects the processor behavior:
 | DBQ | `RTPDP`  | |
 | XML / Outbound Request | `RTP` | same arg as Ack; the folder/batch distinguishes it |
 
-Because the same exe name runs 2-3 times per server (once per processor folder),
-you cannot identify or stop an instance by process name alone -- match on its
-working directory / command-line arg.
+Because the same exe name runs 2-3 times per server, you cannot identify or stop
+an instance by process name alone -- match on its working directory /
+command-line arg.
+
+**A folder is not always one processor.** XML and DBQ share a single directory on
+UAT, on VESEMSEGRESS02 and on VESEMSEGRESS03; only the mode argument tells the
+two instances apart. Where that happens the folder is one *deployment unit*
+carrying two processors, with consequences the scripts inherit:
+
+- Stopping the tree stops BOTH instances (`Stop-VesProcessorTarget` matches on
+  executable path under TargetRoot and takes no mode argument), so there is no
+  way to deploy one of them in isolation. The runbook does the same thing.
+- Both tasks must be listed on the wrapper, or the mirror runs while the
+  unlisted processor still holds files open and it is never restarted.
+- Both write to the same log directory, so `-FreshLogDir` proves only that
+  *something* in the tree is alive. Per-processor liveness comes from the task
+  last-run result and the `-ProcessArgumentPattern` match, not from log freshness.
 
 ### UAT VESMSEGRESSUAT
 | Processor | Batch | Working dir | Launch |
@@ -88,8 +102,41 @@ working directory / command-line arg.
 | DBQ | `E:\EMSEGRESSDBQ\VLER_Test\Batch\VLER_EM_Realtime_DBQ_Processor.bat` | `start E:\EMSEGRESSDBQ\VLER_Test\Processors\VES.OutboundProcessor\VES.OutboundDBQProcessor.exe RTPDP` |
 | XML | `E:\EMSEGRESS\VLER_Test\Batch\VLER_EM_Realtime_Outbound_Request_Processor.bat` | `cd C:\VLER_Test\Processors\VES.OutboundProcessor` then `start VES.OutboundDBQProcessor.exe RTP` |
 
-PROD paths are not captured here yet -- pull them from the Outbound Deployment
-Steps runbook per server before writing the PROD wrappers.
+### PROD deployment units
+
+Source: **4.7 Deployment Instructions** (rollout section). One row per unit that
+receives a deployment copy; the wrapper in `processors/` pins these values and
+refuses to run on any other server.
+
+| Server | Unit | Target dir | Stop/start | Log dir | Config |
+|--------|------|-----------|------------|---------|--------|
+| VESEMSINGRESS01 | Realtime inbound | `C:\VLER\Processors\VES.RealtimeInboundEventService` | **service** `VES.RealtimeInboundEventService` | `C:\VLER\Logs\VES.InboundProcessor` | preserved |
+| VESEMSINGRESS02 | Inbound handler | `C:\VLER\Processors\VES.InboundProcessor` | task `VLER EM Inbound _ Request _ Handler` | `C:\VLER\Logs\VES.InboundProcessor` | preserved |
+| VESEMSEGRESS01 | XML / Outbound | `C:\VLER\Processors\VES.OutboundProcessor` | task `VLER_EM_Real_Time_Outbound_Processor` | `E:\VLER\Logs\VES.OutboundProcessor` | **replaced** |
+| VESEMSEGRESS02 | Ack | `C:\VLER\Processors\VES.OutboundProcessor` | task `VLER_EM_Real_Time_Acknowledgement_Processor` | `E:\VLER\Logs\VES.OutboundProcessor` | preserved |
+| VESEMSEGRESS02 | XML + DBQ | `C:\VLER_OUTBOUND_AND_DBQ\Processors\VES.OutboundProcessor` | tasks `VLER_EM_Real_Time_DBQ_Processor` **and** `VLER_EM_Real_Time_Outbound_Processor` | `E:\VLER_OUTBOUND_AND_DBQ\Logs\VES.OutboundProcessor` | preserved |
+| VESEMSEGRESS03 | XML + DBQ | `C:\VLER\Processors\VES.OutboundProcessor` | tasks `VLER_EM_Real_Time_DBQ_Processor` **and** `VLER_EM_Real_Time_Outbound_Processor` | `E:\VLER\Logs\VES.OutboundProcessor` | preserved |
+
+Four things in that table are load-bearing:
+
+- **PROD task names use `Real_Time`, UAT uses `Realtime`.** They are different
+  strings. Do not copy a UAT wrapper's task name into a PROD one.
+- **VESEMSEGRESS01 and 03 share a TargetRoot path on different boxes.** Each
+  wrapper asserts its own hostname (`Test-VesRunbookValues -ExpectedServer`);
+  that assert is the only thing distinguishing them before the mirror runs.
+- **VESEMSEGRESS01 is the one unit that replaces its config** ("delete all files
+  INCLUDING the exe.config file", plus a pre-edited replacement). Its wrapper
+  leaves `PreserveFiles` empty, so the gate requires the config in the staged
+  package. Every other unit preserves the server's own config with `/XF`.
+- **VESEMSINGRESS02 also runs five SQL scripts before its file copy.** Database
+  objects are out of scope per the brief, so no script here deploys or verifies
+  them; the wrapper takes a separate `-ConfirmedSqlRolloutComplete`
+  acknowledgement rather than pretending the step does not exist.
+
+The 4.7 document has two known errors, corrected above: the VESEMSEGRESS01
+rollout section is headed "Vesemsingress01", and both inbound **rollback**
+sections name `VES.OutboundProcessor` where the rollout names the inbound tree.
+Following the rollback text literally would clear the wrong directory.
 
 ## What this means for the scripts
 
@@ -97,12 +144,20 @@ Steps runbook per server before writing the PROD wrappers.
   instance is a `VES.OutboundDBQProcessor.exe` process holding its folder's files
   open, so `Deploy-Processor.ps1` stops only the instance whose executable path
   is under the target root; the PID and command line/mode argument are audited.
+  Where two processors share that root, both are stopped -- see above.
 - **Health "is running"** uses `-ProcessPathRoot` plus optional
   `-ProcessArgumentPattern`, so the same executable name in another processor
-  folder cannot satisfy the check.
-- **Per-processor TargetRoot** is the `...\Processors\VES.OutboundProcessor`
-  folder for that processor, and it differs per server and tier (C:\ on UAT,
-  E:\ on DEV), so each wrapper hard-codes its own paths.
+  folder cannot satisfy the check. For a shared folder the mode pattern is what
+  does the work: `\bRTPDP\b` for DBQ alone, `\bRTP(DP)?\b` to cover both.
+- **TargetRoot** is the `...\Processors\VES.OutboundProcessor` folder for that
+  unit, and it differs per server and tier (C:\ on UAT, E:\ on DEV, and two
+  different C:\ roots on VESEMSEGRESS02), so each wrapper hard-codes its own
+  paths and asserts its own hostname.
+- **Multi-value parameters cross process boundaries joined, not repeated.** Every
+  stage runs as a `powershell.exe -File` child and -File cannot bind an array:
+  repeating a named argument is `ParameterAlreadyBound` and `-X a,b` binds as one
+  string. `ConvertTo-VesList`/`Expand-VesList` own that transport. This is why a
+  two-task unit works at all.
 - **Inventory is fail closed**: add one confirmed `targets.json` entry per
   server/processor deployment copy. The drift runner will not run while the
   required-server/Citrix inventory is incomplete.

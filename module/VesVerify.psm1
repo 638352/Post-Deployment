@@ -167,8 +167,15 @@ function Import-VesTargetInventory {
     param([Parameter(Mandatory)][string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path)) { throw "Targets file not found: $Path" }
-    try { $doc = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json }
+    $raw = Get-Content -LiteralPath $Path -Raw -Encoding utf8
+    try { $doc = $raw | ConvertFrom-Json }
     catch { throw "Targets file is not valid JSON: $($_.Exception.Message)" }
+    # Whether the document is a legacy bare array has to be read from the TEXT,
+    # not from $doc. PowerShell 7's ConvertFrom-Json unrolls the pipeline, so a
+    # single-element array arrives as a bare PSCustomObject and `$doc -is [Array]`
+    # is $false -- on 5.1 the same file is an Object[]. Reading the type would
+    # therefore let a one-target legacy file skip the legacy rejection on 7.
+    $isLegacyArray = ($doc -is [System.Array]) -or $raw.TrimStart().StartsWith('[')
 
     $errors = New-Object System.Collections.Generic.List[string]
     $warnings = New-Object System.Collections.Generic.List[string]
@@ -177,7 +184,7 @@ function Import-VesTargetInventory {
     $schema = $null
     $inventoryComplete = $false
 
-    if ($doc -is [System.Array]) {
+    if ($isLegacyArray) {
         $targets = @($doc)
         $errors.Add("Legacy bare-array inventory is not accepted; use schema 'ves.targets.v1' and set inventoryComplete=true after server/Citrix review.")
     }
@@ -634,6 +641,184 @@ function Get-VesWorstExitCode {
     return $worst
 }
 
+# --- Array transport across a `powershell.exe -File` boundary -----------------
+# Every stage in this suite is launched as a child process with -File, so that an
+# `exit N` inside the child terminates only the child and the parent can log the
+# stage failure. -File cannot carry an array, and both obvious workarounds fail
+# SILENTLY-ish rather than loudly:
+#
+#   -X a -X b   -> "Cannot bind parameter because parameter 'X' is specified more
+#                   than once" (ParameterAlreadyBound). The child never runs.
+#   -X a,b      -> binds as ONE string "a,b". Count is 1, not 2.
+#
+# So multi-values travel as a single delimiter-joined string and are split back
+# out by the receiving script. Both halves live here so they cannot drift apart.
+$Global:VES_LIST_DELIMITER = ','
+
+function ConvertTo-VesList {
+    <#
+    .SYNOPSIS Join a string array into one argument for a `-File` child process.
+    .DESCRIPTION
+      Returns $null for an empty/absent collection so callers can test the result
+      and omit the switch entirely -- passing a bare -X with no value would leave
+      the child's parameter binder waiting for one.
+
+      Throws when a value already contains the delimiter. Splitting such a value
+      on the far side would silently turn one task name into two, and a scheduled
+      task that does not exist is a stop-phase failure DURING a deploy. Refusing
+      up front is the fail-closed choice.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][AllowNull()][string[]]$Value,
+        # Parameter name, used only to make the refusal message actionable.
+        [string]$Name = 'value'
+    )
+    $items = @($Value | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($items.Count -eq 0) { return $null }
+    foreach ($item in $items) {
+        if ($item.Contains($Global:VES_LIST_DELIMITER)) {
+            throw ("Cannot pass $Name '$item' to a child process: it contains the list delimiter '$($Global:VES_LIST_DELIMITER)'. Rename it or invoke that stage directly.")
+        }
+    }
+    return ($items -join $Global:VES_LIST_DELIMITER)
+}
+
+function Expand-VesList {
+    <#
+    .SYNOPSIS Split a delimiter-joined argument back into a string array.
+    .DESCRIPTION
+      Idempotent by design: a real array bound in-process (Pester, a wrapper that
+      dot-sources) has no delimiter in it and comes back unchanged, so a script
+      can normalize its own parameters at the top without caring how it was
+      called. Empty and whitespace-only elements are dropped.
+    #>
+    [CmdletBinding()]
+    param([AllowEmptyCollection()][AllowNull()][string[]]$Value)
+    if ($null -eq $Value) { return @() }
+    return @($Value |
+            ForEach-Object { "$_".Split($Global:VES_LIST_DELIMITER) } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { $_.Trim() })
+}
+
+function Test-VesPreservedPath {
+    <#
+    .SYNOPSIS Would this staged-relative path be held back from the mirror?
+    .DESCRIPTION
+      Deploy-Processor turns -PreserveFiles/-PreserveDirs into robocopy /XF and
+      /XD. The gate separately demands that anything named in
+      -RequiredArtifactPaths exists in the staged tree. Those two must agree:
+      requiring an artifact the copy is not going to install is friction with no
+      safety value, so the deploy asks this before adding the live config to the
+      gate's required list.
+
+      Files match on leaf name with wildcards (robocopy /XF semantics); dirs match
+      on any path segment.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RelativePath,
+        [AllowEmptyCollection()][string[]]$PreserveFiles = @(),
+        [AllowEmptyCollection()][string[]]$PreserveDirs = @()
+    )
+    $leaf = Split-Path -Leaf $RelativePath
+    foreach ($pattern in $PreserveFiles) {
+        if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
+        if ($leaf -like $pattern -or $RelativePath -like $pattern) { return $true }
+    }
+    # PowerShell's -split with a character class, NOT String.Split(@('\','/'), ...):
+    # that argument is ambiguous between the char[] and string[] overloads and
+    # resolves differently on 5.1 and 7, so the dir match silently did nothing on 7.
+    $segments = @($RelativePath -split '[\\/]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    foreach ($pattern in $PreserveDirs) {
+        if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
+        foreach ($segment in $segments) {
+            if ($segment -like $pattern) { return $true }
+        }
+    }
+    return $false
+}
+
+function Test-VesRunbookValues {
+    <#
+    .SYNOPSIS Check a wrapper's hard-coded runbook values against the server it is on.
+    .DESCRIPTION
+      Each per-server wrapper pins paths, task names, a service name and a log
+      directory copied out of the deployment runbook. -ConfirmedRunbookValues is
+      an operator's word that those were checked; this makes the claim falsifiable
+      against the box itself, read-only, before the deploy opens production.
+
+      Left unchecked, a wrong task name surfaces in the stop phase and a wrong log
+      directory as a health failure -- both AFTER the mirror has already run. A
+      wrong TargetRoot is worse: robocopy /MIR happily creates it and the deploy
+      installs a release into a folder nothing runs from, while the real processor
+      keeps running the old bits and every check reports PASS.
+
+      Returns the list of mismatches (empty = everything named here exists). The
+      caller decides what to do with them; wrappers throw.
+    .OUTPUTS
+      string[] of human-readable mismatches.
+    #>
+    [CmdletBinding()]
+    param(
+        # The one server this wrapper describes. Checked first and reported on its
+        # own, because several PROD units share a TargetRoot path across different
+        # boxes (VESEMSEGRESS01 and 03 both deploy into
+        # C:\VLER\Processors\VES.OutboundProcessor). Path checks alone cannot tell
+        # those apart, and running the wrong wrapper mirrors the wrong release
+        # into a live tree.
+        [string]$ExpectedServer,
+        [string]$TargetRoot,
+        [AllowEmptyCollection()][string[]]$ScheduledTasks = @(),
+        [string]$ServiceName,
+        [string]$FreshLogDir,
+        # Where dated restore points go. Its PARENT must exist -- the deploy
+        # creates the folder itself, but a typo'd drive means no restore point and
+        # that is only discovered when a rollback is needed.
+        [string]$BackupRoot
+    )
+    $bad = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedServer) -and
+        "$env:COMPUTERNAME" -ne $ExpectedServer) {
+        # Ordinal-ignore-case: hostnames are ASCII and a culture-aware compare
+        # would be the wrong tool for an identity check.
+        if (-not [string]::Equals("$env:COMPUTERNAME", $ExpectedServer, [StringComparison]::OrdinalIgnoreCase)) {
+            $bad.Add("this wrapper describes $ExpectedServer but is running on $env:COMPUTERNAME")
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($TargetRoot) -and -not (Test-Path -LiteralPath $TargetRoot)) {
+        $bad.Add("target directory '$TargetRoot' does not exist on $env:COMPUTERNAME")
+    }
+    foreach ($taskName in $ScheduledTasks) {
+        if ([string]::IsNullOrWhiteSpace($taskName)) { continue }
+        # Get-ScheduledTask lives in the ScheduledTasks module, absent on some
+        # Server Core images. Missing cmdlet is "cannot check", not "does not
+        # exist" -- say which, rather than failing a correct wrapper.
+        if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+            $bad.Add("cannot verify scheduled task '$taskName': the ScheduledTasks module is not available here")
+            continue
+        }
+        if (-not (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
+            $bad.Add("scheduled task '$taskName' does not exist on $env:COMPUTERNAME")
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ServiceName) -and
+        -not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
+        $bad.Add("service '$ServiceName' does not exist on $env:COMPUTERNAME")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($FreshLogDir) -and -not (Test-Path -LiteralPath $FreshLogDir)) {
+        $bad.Add("fresh-log directory '$FreshLogDir' does not exist")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($BackupRoot)) {
+        $parent = Split-Path -Parent $BackupRoot
+        if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+            $bad.Add("backup root's parent '$parent' does not exist, so no restore point can be written")
+        }
+    }
+    return $bad.ToArray()
+}
+
 function Get-VesBackupSet {
     <#
     .SYNOPSIS Enumerate a processor's deploy backups, newest first.
@@ -1059,6 +1244,7 @@ Export-ModuleMember -Function `
     Import-VesManifest, Test-VesExcludePattern, Compare-VesFiles, `
     Invoke-VesGit, Test-VesReleaseTag, Get-VesManifestFromTag, `
     Get-VesWorstExitCode, Get-VesBackupSet, `
+    ConvertTo-VesList, Expand-VesList, Test-VesPreservedPath, Test-VesRunbookValues, `
     Stop-VesProcessorTarget, Start-VesProcessorTarget, `
     Get-VesAlertType
 # DATADOG DISABLED: Send-VesDatadogMetric, Send-VesDatadogEvent, Get-VesDatadogEnvTag

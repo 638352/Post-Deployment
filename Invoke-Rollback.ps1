@@ -106,6 +106,14 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+# Deploy-Processor's -Rollback alias and its auto-rollback handler both launch
+# this script with `powershell.exe -File`, which cannot carry an array, so
+# multi-values arrive delimiter-joined. Split them before the stop phase iterates
+# them -- a two-task processor arriving as one string would leave the second task
+# enabled and its instance holding the tree open through the mirror.
+$ScheduledTasks = Expand-VesList -Value $ScheduledTasks
+$RequiredAssemblies = Expand-VesList -Value $RequiredAssemblies
+$PreservePaths = Expand-VesList -Value $PreservePaths
 $here = $PSScriptRoot
 # Mutating script: log by default so a restore always leaves evidence.
 if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("rollback-{0}" -f $Processor) }
@@ -496,9 +504,13 @@ else {
     $hcArgs = @('-Processor', $Processor, '-Environment', $Environment)
     if ($ReleaseTag) { $hcArgs += '-ReleaseTag', $ReleaseTag }
     if ($LogFile) { $hcArgs += '-LogFile', $LogFile }
-    foreach ($dll in $RequiredAssemblies) { $hcArgs += '-RequiredAssemblies', $dll }
+    # Joined, not repeated: see ConvertTo-VesList. Repeating a named argument
+    # under -File is ParameterAlreadyBound and the child never runs.
+    $hcAssemblies = ConvertTo-VesList -Value $RequiredAssemblies -Name 'required assembly'
+    if ($hcAssemblies) { $hcArgs += '-RequiredAssemblies', $hcAssemblies }
     if ($ServiceName) { $hcArgs += '-ServiceName', $ServiceName }
-    foreach ($tn in $ScheduledTasks) { $hcArgs += '-ScheduledTasks', $tn }
+    $hcTasks = ConvertTo-VesList -Value $ScheduledTasks -Name 'scheduled task'
+    if ($hcTasks) { $hcArgs += '-ScheduledTasks', $hcTasks }
     if ($FreshLogDir) { $hcArgs += '-FreshLogDir', $FreshLogDir, '-FreshLogMaxAgeMinutes', "$FreshLogMaxAgeMinutes" }
     if ($ScheduledTasks.Count -gt 0) {
         $hcArgs += '-ProcessPathRoot', $TargetRoot

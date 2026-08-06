@@ -57,6 +57,13 @@ param(
 )
 Import-Module (Join-Path $PSScriptRoot 'module\VesVerify.psm1') -Force
 $ErrorActionPreference = 'Stop'
+# Deploy-Processor and Invoke-Rollback launch this script with `powershell.exe
+# -File`, which cannot carry an array, so multi-values arrive delimiter-joined.
+# Split them back out before anything counts or iterates them: $probeCount below
+# decides whether this run has any evidence at all, and a two-task processor
+# arriving as one string would under-count it.
+$RequiredAssemblies = Expand-VesList -Value $RequiredAssemblies
+$ScheduledTasks = Expand-VesList -Value $ScheduledTasks
 # JSONL audit log is opt-in: pass -LogFile to persist a record of this run.
 $runId = [guid]::NewGuid().ToString()
 Write-VesLog INFO 'RUN START: health verification' `
