@@ -233,7 +233,8 @@ server and refuses to run if either does not.
 
 ```powershell
 .\processors\Deploy-<system>.ps1 -StagedRoot <stagedRoot> -StagedCommit <sha> `
-  -ReleaseTag <releaseTag> -BaselineRepo <releaseArchivePath> -WhatIf
+  -ReleaseTag <releaseTag> -BaselineRepo <releaseArchivePath> `
+  -ConfirmedRunbookValues -WhatIf
 $LASTEXITCODE
 ```
 
@@ -241,9 +242,50 @@ $LASTEXITCODE
 
 ```powershell
 .\processors\Deploy-<system>.ps1 -StagedRoot <stagedRoot> -StagedCommit <sha> `
-  -ReleaseTag <releaseTag> -BaselineRepo <releaseArchivePath>
+  -ReleaseTag <releaseTag> -BaselineRepo <releaseArchivePath> `
+  -ConfirmedRunbookValues
 $LASTEXITCODE
 ```
+
+`-ConfirmedRunbookValues` is required by **every** wrapper, not just the UAT one,
+and the dry run refuses without it too. The inbound handler on VESEMSINGRESS02
+needs one more, `-ConfirmedSqlRolloutComplete`, because its release also changes
+the database — see section 5a.
+
+---
+
+## 5a) If a deploy has to be undone
+
+Ask the technical runbook owner to run the rollback (`docs/RUNBOOK.md` §7.1). The
+one thing to understand before you sign anything off:
+
+**A rollback puts the *files* back. It does not always put the *database* back.**
+
+Most units are files only, so a successful rollback (`0`) really does mean
+production is back to the previous release. **The inbound request handler on
+VESEMSINGRESS02 is different**: its release changes the database as well as the
+files. For that unit, a rollback has two halves, and the script can only do one of
+them — nothing in this repo can reach the database.
+
+So for that one unit:
+
+- A rollback that reports success means **the files are back**, not that the
+  release is undone.
+- Someone must separately run the database rollback scripts, in the order given in
+  `docs/RUNBOOK.md` §7.1.1. Until that happens the restored software will fail on
+  every incoming message, even though the health check looks fine — the health
+  check only confirms the program is writing logs, not that the messages worked.
+- When the database half is still outstanding the run says **DATABASE ROLLBACK
+  STILL OWED** (and, if it was an automatic rollback, **AUTO-ROLLBACK COMPLETE
+  (FILES ONLY)**). If you see either line, the rollback is **not** finished — do
+  not record it as complete.
+- The database rollback is **destructive and one-way**: it deletes data captured
+  while the new release was live. It is not the reverse of a backup restore. Treat
+  it as a change in its own right, with its own approval.
+
+Also outstanding after any rollback: the approved release tag still points at the
+release that was just removed. Re-pointing it is an approval decision and is done
+by a person, never automatically.
 
 ---
 

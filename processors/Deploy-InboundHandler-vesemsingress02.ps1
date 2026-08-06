@@ -14,12 +14,22 @@
       6. start the scheduled task
       7. confirm activity under C:\VLER\Logs\VES.InboundProcessor
 
-    DATABASE STEP IS OUT OF SCOPE. Step 3 (TableModifications, EM_VAFTPContentions,
-    EM_VAFTPDependentInfo, EM_VAFTPInboundStack, EM_VAFTPVeteran) is a database
-    change, and database objects are excluded from the current effort per the
-    brief's Scope -- they are a planned fast follow. This script deploys files
-    only. Run the SQL step by hand, in the runbook's order, BEFORE invoking this
-    wrapper, and record it separately. Nothing here verifies it happened.
+    DATABASE STEP IS OUT OF SCOPE FOR THIS SCRIPT. Step 3 -- TableModifications,
+    EM_VAFTPContentions_Insert, EM_VAFTPDependentInfo_Insert,
+    EM_VAFTPInboundStack_Update, EM_VAFTPVeteran_Insert, in that order -- is a
+    database change, and database objects are excluded from the current effort per
+    the brief's Scope. This script deploys files only. Run the SQL step by hand
+    BEFORE invoking this wrapper, and record it separately: nothing here can reach
+    the database, so -ConfirmedSqlRolloutComplete is the operator's word for it.
+
+    "Out of scope" is NOT "unrelated". This unit is DATABASE-COUPLED: the 4.7
+    procedures take parameters that have no defaults and that the prior binaries do
+    not pass, so file state and database state have to move together in BOTH
+    directions. That is why Invoke-Rollback.ps1 refuses to restore this processor
+    without -ConfirmedSqlRollbackComplete (or -SqlRollbackDeferred, which records
+    the debt), and why the rollback order is the REVERSE of the list above --
+    retire the procedures first, or TableModifications Rollback drops columns they
+    still reference. See docs/RUNBOOK.md 7.1.1.
 
     STAGING NOTE from the runbook: "there is a folder in the zip folder -- ensure
     that the effective files are in the directory above, not the folder containing

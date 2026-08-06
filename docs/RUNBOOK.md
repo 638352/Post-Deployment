@@ -305,15 +305,24 @@ egress first** before any PROD use.
 
 ```powershell
 .\processors\Deploy-<system>.ps1 -StagedRoot D:\stage\<system> -StagedCommit <sha> `
-  -ReleaseTag <releaseTag> -BaselineRepo <baselineRepo> -WhatIf
+  -ReleaseTag <releaseTag> -BaselineRepo <baselineRepo> -ConfirmedRunbookValues -WhatIf
 ```
 
 **How (real deploy):**
 
 ```powershell
 .\processors\Deploy-<system>.ps1 -StagedRoot D:\stage\<system> -StagedCommit <sha> `
-  -ReleaseTag <releaseTag> -BaselineRepo <baselineRepo>
+  -ReleaseTag <releaseTag> -BaselineRepo <baselineRepo> -ConfirmedRunbookValues
 ```
+
+`-ConfirmedRunbookValues` is **required by every wrapper**, not just the UAT one,
+and it is checked before anything else runs — including under `-WhatIf`, so the
+dry run refuses without it too. It is the operator stating they have re-checked
+that wrapper's hardcoded paths, task names and log directories against the current
+deployment runbook; the wrapper then verifies what it can on the box itself
+(`Test-VesRunbookValues`) and refuses if it is running on the wrong server.
+`processors\Deploy-InboundHandler-vesemsingress02.ps1` requires a **second**
+acknowledgement, `-ConfirmedSqlRolloutComplete` — see §7.1.1.
 
 `-ReleaseTag` and `-BaselineRepo` are **mandatory** on the wrappers and
 required by `Deploy-Processor.ps1` itself (exit `10` without them) — there is
@@ -338,10 +347,37 @@ release that overwrote it.
 
 Each system's thin wrapper in `processors/` pins the fixed per-server values
 (`TargetRoot`, `ScheduledTasks`, paths) and calls `Deploy-Processor.ps1`. Copy
-`processors/Deploy-SYSTEM_NAME.ps1` to onboard a new system. The UAT OutboundDBQ
-wrapper (`Deploy-OutboundDBQ-uat.ps1`) also requires `-ConfirmedRunbookValues`
-and then checks that its scheduled-task name and fresh-log directory exist on
-the box before deploying.
+`processors/Deploy-SYSTEM_NAME.ps1` to onboard a new system.
+
+**Every wrapper asserts its own hostname.** Each one names the single server it is
+for and calls `Test-VesRunbookValues -ExpectedServer <that box>`, so running the
+wrong wrapper on the right-looking box refuses instead of deploying. Pass only the
+wrapper for the server you are standing on:
+
+| Wrapper (`processors\`) | Server | Unit |
+|---|---|---|
+| `Deploy-RealtimeInbound-vesemsingress01.ps1` | VESEMSINGRESS01 | Real-time inbound |
+| `Deploy-InboundHandler-vesemsingress02.ps1` | VESEMSINGRESS02 | Inbound request handler — **database-coupled, see §7.1.1** |
+| `Deploy-Outbound-vesemsegress01.ps1` | VESEMSEGRESS01 | Outbound — **the only unit whose deploy replaces the `.exe.config`** |
+| `Deploy-Ack-vesemsegress02.ps1` | VESEMSEGRESS02 | Acknowledgement |
+| `Deploy-OutboundDBQ-vesemsegress02.ps1` | VESEMSEGRESS02 | OutboundDBQ |
+| `Deploy-OutboundDBQ-vesemsegress03.ps1` | VESEMSEGRESS03 | OutboundDBQ (same `releaseRoot` path, different box) |
+| `Deploy-OutboundDBQ-uat.ps1` | UAT | OutboundDBQ pilot |
+
+**Three of these deploy to the identical path on three different boxes.**
+`Deploy-Outbound-vesemsegress01.ps1`, `Deploy-Ack-vesemsegress02.ps1` and
+`Deploy-OutboundDBQ-vesemsegress03.ps1` all target
+`C:\VLER\Processors\VES.OutboundProcessor`; only VESEMSEGRESS02's OutboundDBQ sits
+elsewhere (`C:\VLER_OUTBOUND_AND_DBQ\...`). The path therefore identifies nothing —
+the hostname assertion is the only thing standing between a correct deploy and one
+aimed at the wrong server, which is why these are separate files rather than one
+parameterised wrapper.
+
+Several wrappers still carry `# CONFIRM` markers on baseline, contract and backup
+paths that the 4.7 document does not name. Resolve those against the current
+runbook before a PROD run; `targets.json` tracks the same gaps as
+`needs-confirmation` entries and `Invoke-Preflight.ps1` reports the inventory as
+incomplete until they are filled in.
 
 **Console-EXE note:** the same `VES.OutboundDBQProcessor.exe` runs 2–3 times per
 box from different folders. The deploy stops only the instance whose executable
@@ -399,14 +435,32 @@ refuses this processor unless you say which is true:
 ```powershell
 .\Invoke-Rollback.ps1 -Processor InboundHandler -TargetRoot <releaseRoot> `
   -BackupRoot <backupRoot> -Reason 'VEMS-1234 bad release' `
+  -BaselineRepo <baselineRepo> -ReleaseTag <priorReleaseTag> `
   -ConfirmedSqlRollbackComplete
 ```
 
+`-BaselineRepo` and `-ReleaseTag` are **not optional here** just because the SQL
+switch is the new part. They are the same anchoring parameters §7.1 requires, and
+`-ReleaseTag` names the **prior** release — the one being restored, not the one
+that failed. Drop them and the run still exits `0`, but it verifies against the
+backup's own manifest instead of the approved tag: it proves the restore matches
+pre-deploy production, not that pre-deploy production was ever approved, and the
+attestation records an empty `restoredReleaseTag`.
+
 Use `-SqlRollbackDeferred` instead to restore the files now and have the run
-record that the database rollback is still owed; the attestation then carries a
-**DATABASE ROLLBACK STILL OWED** line. `-AutoRollback` always passes that switch,
-because a child process launched by a failing deploy cannot answer a refusal and
-leaving production on the failed release would be worse.
+record that the database rollback is still owed; the run then carries a
+**DATABASE ROLLBACK STILL OWED** line and `sqlRollbackOwed: true` in its log
+record. Passing **both** switches is refused (exit `10`) — they are contradictory
+claims about a database no script here can query.
+
+**Which invocation takes which switch:** both. `Invoke-Rollback.ps1` owns the gate,
+and `Deploy-Processor.ps1 -Rollback` forwards either switch to it, so the direct
+script and the alias behave the same. `-AutoRollback` always passes
+`-SqlRollbackDeferred` itself, because a child process launched by a failing deploy
+cannot answer a refusal and leaving production on the failed release would be
+worse. When it does, the deploy's own summary says **AUTO-ROLLBACK COMPLETE (FILES
+ONLY)** rather than claiming a healthy restore, and carries `sqlRollbackOwed` in
+its terminal record — the file rollback is finished, the release rollback is not.
 
 **Run the SQL rollback scripts in the REVERSE of the rollout order:**
 
@@ -604,7 +658,7 @@ into the record.
 | Verify files      | `Invoke-Verification.ps1 -Mode VerifyFiles`    | PROD target server      | `0`        |
 | Pre-deploy gate   | `Invoke-PreDeployGate.ps1`                     | Staging/deploy box      | `0`        |
 | Deploy            | `processors\Deploy-<system>.ps1`               | Target server           | `0`        |
-| Rollback          | `Invoke-Rollback.ps1`                          | Target server           | `0` + tag re-point |
+| Rollback          | `Invoke-Rollback.ps1`                          | Target server           | `0` + tag re-point (+ SQL rollback for InboundHandler, §7.1.1) |
 | Config            | `Verify-Config.ps1` (via `-Mode VerifyConfig`) | Server with config      | `0`        |
 | Health            | `Invoke-HealthCheck.ps1`                       | Target server           | `0`        |
 | Drift (manual)    | `Start-DriftRunner.ps1`                        | Target / central runner | `0`        |
