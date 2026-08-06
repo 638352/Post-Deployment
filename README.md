@@ -622,6 +622,10 @@ and fresh-log health probes; do not pass their binaries to
 
 ## Testing
 
+For a plain-language overview of the whole testing process — the script self-test
+versus the release verification flow, and what each script does — see
+[docs/CHEAT-SHEET.md](docs/CHEAT-SHEET.md).
+
 The automated Pester suite covers verification, config contracts, the pre-deploy
 gate (`tests/Invoke-PreDeployGate.Tests.ps1`), preflight, deploy, rollback,
 backup helpers, the drift runner, module unit tests, and health-check scripts.
