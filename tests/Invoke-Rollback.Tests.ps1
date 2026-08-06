@@ -43,13 +43,16 @@ BeforeAll {
         -Processor 'rbtest' -ManifestPath $script:V2Manifest -Tag 'rbtest/v2.0.0' | Out-Null
 
     # Fresh target (holding the bad v2) + a backup of v1, per test.
-    function script:New-Case([string]$Name, [hashtable]$Record = @{}, [switch]$NoRecord, [switch]$EmptyBackup) {
+    # -Processor defaults to 'rbtest', which is what every pre-existing case uses.
+    # The database-coupled gate keys on the processor NAME, so those cases need the
+    # backup folder named for the real unit instead.
+    function script:New-Case([string]$Name, [hashtable]$Record = @{}, [switch]$NoRecord, [switch]$EmptyBackup, [string]$Processor = 'rbtest') {
         $case = Join-Path $script:Root $Name
         $target = New-VesTree (Join-Path $case 'target') 'version-two'
         Set-Content -Path (Join-Path $target 'leftover-from-bad-release.txt') -Value 'junk' -NoNewline
         $backupRoot = Join-Path $case 'backups'
         $args = @{
-            BackupRoot = $backupRoot; Processor = 'rbtest'
+            BackupRoot = $backupRoot; Processor = $Processor
             Stamp      = '20260804T120000'; Initials = 'RH'
             Record     = $Record
         }
@@ -64,6 +67,12 @@ BeforeAll {
     # opt out of it explicitly. The health case below passes a real probe instead.
     function script:New-RollbackArgs($c, [string[]]$Extra = @()) {
         @('-Processor', 'rbtest', '-TargetRoot', $c.Target, '-BackupRoot', $c.BackupRoot,
+            '-Reason', 'pester', '-SkipHealth') + $Extra
+    }
+
+    # Same shape, but for the one database-coupled unit.
+    function script:New-CoupledArgs($c, [string[]]$Extra = @()) {
+        @('-Processor', 'InboundHandler', '-TargetRoot', $c.Target, '-BackupRoot', $c.BackupRoot,
             '-Reason', 'pester', '-SkipHealth') + $Extra
     }
 }
@@ -189,6 +198,94 @@ Describe 'safety gates (nothing may happen)' {
         $r.Output | Should -Match 'WhatIf: would restore'
         (Get-Content -LiteralPath (Join-Path $c.Target 'app.txt') -Raw) | Should -Be 'version-two'
         Test-Path (Join-Path $c.Target 'leftover-from-bad-release.txt') | Should -BeTrue
+    }
+}
+
+Describe 'database-coupled rollback gate' {
+    # InboundHandler's release is half database: the 4.7 procedures take parameters
+    # the prior binaries do not pass, so a file-only restore is a broken state. The
+    # gate refuses the operator path and lets the automated one through with the
+    # debt recorded -- blocking auto-rollback would strand production on the failed
+    # release, which is worse.
+    It 'refuses a file-only restore of a coupled unit, and touches nothing' {
+        $c = New-Case 'coupled-refuse' -Processor 'InboundHandler'
+        $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-CoupledArgs $c)
+        $r.ExitCode | Should -Be 10
+        $r.Output | Should -Match 'database-coupled'
+        $r.Output | Should -Match 'REVERSE of the rollout order'
+        # production untouched: the gate runs before a backup is even chosen
+        (Get-Content -LiteralPath (Join-Path $c.Target 'app.txt') -Raw) | Should -Be 'version-two'
+        Test-Path (Join-Path $c.Target 'leftover-from-bad-release.txt') | Should -BeTrue
+    }
+
+    # Two contradictory claims about a database the script cannot query. Caught with
+    # the other usage gates rather than resolved by branch order, which would have
+    # let the confirming switch win and erase the debt the caller also asked for.
+    It 'refuses both SQL switches at once rather than picking one' {
+        $c = New-Case 'coupled-both' -Processor 'InboundHandler'
+        $r = Invoke-VesScript 'Invoke-Rollback.ps1' `
+            (New-CoupledArgs $c @('-ConfirmedSqlRollbackComplete', '-SqlRollbackDeferred'))
+        $r.ExitCode | Should -Be 10
+        $r.Output | Should -Match 'contradict each other'
+        (Get-Content -LiteralPath (Join-Path $c.Target 'app.txt') -Raw) | Should -Be 'version-two'
+    }
+
+    # The fixture's sidecar carries no baselineRepo/priorReleaseTag and the backup
+    # has no backup-manifest.json, so every restore below is unprovable and exits 2
+    # (NO-BASELINE) by the contract at the top of this file. That is the documented
+    # outcome, not an incidental one -- pin it, or a regression that changed the
+    # coupled path's exit code would satisfy these tests unnoticed.
+    It 'restores the files when the operator confirms the SQL rollback ran' {
+        $c = New-Case 'coupled-confirmed' -Processor 'InboundHandler'
+        $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-CoupledArgs $c @('-ConfirmedSqlRollbackComplete'))
+        $r.ExitCode | Should -Be 2
+        $r.Output | Should -Match 'Operator confirms the SQL rollback ran'
+        $r.Output | Should -Not -Match 'DATABASE ROLLBACK STILL OWED'
+        (Get-Content -LiteralPath (Join-Path $c.Target 'app.txt') -Raw) | Should -Be 'version-one'
+    }
+
+    It 'restores under -SqlRollbackDeferred and records the debt as a machine-readable field' {
+        $c = New-Case 'coupled-deferred' -Processor 'InboundHandler'
+        $log = Join-Path $c.Case 'deferred.jsonl'
+        $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-CoupledArgs $c @('-SqlRollbackDeferred', '-LogFile', $log))
+        $r.ExitCode | Should -Be 2
+        (Get-Content -LiteralPath (Join-Path $c.Target 'app.txt') -Raw) | Should -Be 'version-one'
+        $r.Output | Should -Match 'SQL ROLLBACK NOT DONE'
+        # Outside the attested/not-attested branch on purpose: this run is NOT
+        # attested (exit 2) and the debt is still real, so the banner must fire.
+        $r.Output | Should -Match 'DATABASE ROLLBACK STILL OWED'
+        # the debt is machine-readable, not just prose in the console
+        $records = @(Get-Content -LiteralPath $log | ForEach-Object { $_ | ConvertFrom-Json })
+        @($records | Where-Object { $_.PSObject.Properties['sqlRollbackOwed'] -and $_.sqlRollbackOwed }).Count |
+            Should -BeGreaterThan 0
+        # ... and it reaches the RUN END record, which is what a log consumer reads
+        $runEnd = @($records | Where-Object { $_.msg -match 'RUN END' })[-1]
+        $runEnd.sqlRollbackOwed | Should -BeTrue
+    }
+
+    # -WhatIf changed nothing, so it owes nothing. The refusal must still happen
+    # (the operator needs to learn the unit is coupled), but a dry run must not
+    # leave a debt record implying a half-finished rollback sitting in production.
+    It 'records no debt for a -WhatIf run, which restored nothing' {
+        $c = New-Case 'coupled-whatif' -Processor 'InboundHandler'
+        $log = Join-Path $c.Case 'whatif.jsonl'
+        $r = Invoke-VesScript 'Invoke-Rollback.ps1' `
+            (New-CoupledArgs $c @('-SqlRollbackDeferred', '-WhatIf', '-LogFile', $log))
+        $r.ExitCode | Should -Be 0
+        $r.Output | Should -Not -Match 'DATABASE ROLLBACK STILL OWED'
+        (Get-Content -LiteralPath (Join-Path $c.Target 'app.txt') -Raw) | Should -Be 'version-two'
+        $records = @(Get-Content -LiteralPath $log | ForEach-Object { $_ | ConvertFrom-Json })
+        $runEnd = @($records | Where-Object { $_.msg -match 'RUN END' })[-1]
+        $runEnd.sqlRollbackOwed | Should -BeFalse
+    }
+
+    It 'leaves an uncoupled processor exactly as it was (regression guard)' {
+        $c = New-Case 'coupled-none'
+        $r = Invoke-VesScript 'Invoke-Rollback.ps1' (New-RollbackArgs $c)
+        $r.ExitCode | Should -Be 2
+        $r.Output | Should -Not -Match 'database-coupled'
+        $r.Output | Should -Not -Match 'SQL ROLLBACK NOT DONE'
+        (Get-Content -LiteralPath (Join-Path $c.Target 'app.txt') -Raw) | Should -Be 'version-one'
     }
 }
 

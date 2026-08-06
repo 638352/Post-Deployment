@@ -388,6 +388,58 @@ tag; that is deliberate — moving a tag is an approval decision.
 > deploy's own verify or health stage fails, and the same attestation and
 > manual tag re-point apply.
 
+#### 7.1.1 InboundHandler (VESEMSINGRESS02) — the file restore is only half
+
+This unit's release is half database. The 4.7 procedures take parameters that
+have **no defaults** and that the 4.6 binaries do not pass, so a file-only
+restore leaves the old code calling the new procedures and every insert fails
+with *"expects parameter … which was not supplied"*. `Invoke-Rollback.ps1`
+refuses this processor unless you say which is true:
+
+```powershell
+.\Invoke-Rollback.ps1 -Processor InboundHandler -TargetRoot <releaseRoot> `
+  -BackupRoot <backupRoot> -Reason 'VEMS-1234 bad release' `
+  -ConfirmedSqlRollbackComplete
+```
+
+Use `-SqlRollbackDeferred` instead to restore the files now and have the run
+record that the database rollback is still owed; the attestation then carries a
+**DATABASE ROLLBACK STILL OWED** line. `-AutoRollback` always passes that switch,
+because a child process launched by a failing deploy cannot answer a refusal and
+leaving production on the failed release would be worse.
+
+**Run the SQL rollback scripts in the REVERSE of the rollout order:**
+
+1. `EM_VAFTPVeteran_Insert Rollback.sql`
+2. `EM_VAFTPInboundStack_Update Rollback.sql`
+3. `EM_VAFTPDependentInfo_Insert Rollback.sql`
+4. `EM_VAFTPContentions_Insert Rollback.sql`
+5. `TableModifications Rollback.sql`
+
+The 4.7 document lists them in rollout order. That is wrong: `TableModifications
+Rollback.sql` drops the columns the four procedures reference, so it must run
+last.
+
+Three things to know before running the database rollback:
+
+- **It is destructive and one-way.** `DROP COLUMN` discards every
+  `HasBeenRemoved`, `ParticipantID`, and `AuthorizedThirdParty*` value captured
+  while 4.7 was live. The file rollback restores; this does not.
+- **It can fail halfway and keep going.** Narrowing
+  `PrefExaminerGenderIndicator` back to `VARCHAR(10)` fails on truncation if any
+  4.7 row exceeds 10 characters — which is exactly why it was widened to 15.
+  `TableModifications Rollback.sql` has no transaction, no `SET XACT_ABORT ON`
+  and no `GO`, so the batch continues past that error and leaves the schema
+  half-rolled-back. Check the column's longest value first, and read the whole
+  output rather than the last line.
+- **In-flight 4.7 traffic is stranded, not delayed.** Rolling back
+  `EM_VAFTPInboundStack_Update` removes `'4.7'` from the `ModelVersion`
+  whitelist, so 4.7 messages still arriving are set to
+  `EventStackStatusID = 80`. That procedure only ever touches rows where
+  `EventStackStatusID IS NULL`, so those rows are never revisited — recovering
+  them is a manual `UPDATE`. Stop 4.7 traffic upstream before rolling the
+  database back.
+
 ---
 
 ## 8. Config contract check — `Verify-Config.ps1`

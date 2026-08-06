@@ -26,6 +26,20 @@ $Global:VES_EXIT_NOBASE = 2      # Baseline missing, unreadable, or failed trust
 $Global:VES_EXIT_HEALTH = 3      # Functional health failure (independent of baseline).
 $Global:VES_EXIT_USAGE = 10     # Caller passed bad/missing parameters.
 
+# --- Database-coupled processors (single source of truth) --------------------
+# Units whose release is half database, so file state and database state must move
+# together in BOTH directions. VESEMSINGRESS02's InboundHandler is the only one
+# today: the 4.7 procedures take parameters that have no defaults and that the
+# prior binaries do not pass, so a file-only restore leaves old code calling new
+# procedures and every insert fails.
+#
+# Defined here rather than in Invoke-Rollback.ps1 because two scripts need the same
+# answer: Invoke-Rollback gates the restore on it, and Deploy-Processor uses it to
+# decide whether its auto-rollback may claim the rollback is finished. A copy in
+# each would let them drift, and the one that drifts silently is the attestation.
+# Add a processor here if another turns out to be coupled; nothing else keys off it.
+$Global:VES_DB_COUPLED_PROCESSORS = @('InboundHandler')
+
 # --- Default manifest exclude pattern (single source of truth) ---------------
 # Capture and compare MUST use the same rules: if they disagree, files excluded at
 # capture time resurface as "Extra" at verify time and every check reports drift.

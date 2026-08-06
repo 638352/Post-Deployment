@@ -130,6 +130,18 @@ param(
     # rather than always degrading to the backup's own manifest.
     [string]$RollbackReleaseTag,
     [string]$RollbackManifestPath,
+    # Rollback only: forwarded to Invoke-Rollback, which refuses to restore a
+    # database-coupled unit (InboundHandler) without one of them. Declared here so
+    # an operator holding the deploy command line can still reverse it in one step;
+    # the claim itself, and the gate, belong to Invoke-Rollback.
+    #
+    # BOTH are declared deliberately. Invoke-Rollback's own refusal text tells the
+    # operator to "pass -SqlRollbackDeferred instead", and this script is documented
+    # as a thin alias for it (RUNBOOK 7.1). Accepting only the confirming switch made
+    # that instruction fail parameter binding on the alias, and left a false positive
+    # attestation as the only way through -- the opposite of what the gate is for.
+    [switch]$ConfirmedSqlRollbackComplete,
+    [switch]$SqlRollbackDeferred,
     [string]$Initials = $env:USERNAME,
     [string]$HealthUrl,
     # liveness for endpoint-less .exe processors; passed through to the health check
@@ -173,12 +185,19 @@ Write-VesLog INFO 'RUN START: deployment' `
 # rollback was attempted and how it went -- a rollback must never be silent.
 $script:rolledBack = $false
 $script:rollbackExitCode = $null
+# Whether this unit's release is half database. Read from the module so this script
+# and Invoke-Rollback cannot disagree about it -- and they must not, because the one
+# that drifts silently is the attestation. Auto-rollback of a coupled unit restores
+# files against a database that still carries the new objects, so the run owes a
+# manual SQL rollback that no exit code here can represent.
+$script:dbCoupled = $VES_DB_COUPLED_PROCESSORS -contains $Processor
+$script:sqlRollbackOwed = $false
 
 function Stop-Deploy([int]$code) {
     $outcome = Get-VesOutcome -ExitCode $code
     Write-VesLog ($(if ($outcome -eq 'PASS') { 'OK' } elseif ($outcome -eq 'FAIL') { 'ERROR' } else { 'ERROR' })) `
         "RUN END: deployment outcome=$outcome exit=$code" `
-        -Data @{runId = $runId; outcome = $outcome; exitCode = $code; processor = $Processor; release = $StagedCommit; releaseTag = $ReleaseTag; rolledBack = $script:rolledBack; rollbackExitCode = $script:rollbackExitCode } -LogFile $LogFile
+        -Data @{runId = $runId; outcome = $outcome; exitCode = $code; processor = $Processor; release = $StagedCommit; releaseTag = $ReleaseTag; rolledBack = $script:rolledBack; rollbackExitCode = $script:rollbackExitCode; databaseCoupled = $script:dbCoupled; sqlRollbackOwed = $script:sqlRollbackOwed } -LogFile $LogFile
     exit $code
 }
 
@@ -234,6 +253,8 @@ if ($Rollback) {
     if ($HealthUrl) { $rbArgs += '-HealthUrl', $HealthUrl }
     if ($FreshLogDir) { $rbArgs += '-FreshLogDir', $FreshLogDir, '-FreshLogMaxAgeMinutes', "$FreshLogMaxAgeMinutes" }
     if ($ProcessArgumentPattern) { $rbArgs += '-ProcessArgumentPattern', $ProcessArgumentPattern }
+    if ($ConfirmedSqlRollbackComplete) { $rbArgs += '-ConfirmedSqlRollbackComplete' }
+    if ($SqlRollbackDeferred) { $rbArgs += '-SqlRollbackDeferred' }
     $rbArgs += '-Initials', $Initials, '-Environment', $Environment
     if ($LogFile) { $rbArgs += '-LogFile', $LogFile }
     # -WhatIf does not cross a -File boundary; forward it explicitly.
@@ -260,7 +281,9 @@ $gateRequired = New-Object System.Collections.Generic.List[string]
 $rollbackOnlyProvided = (-not [string]::IsNullOrWhiteSpace($RollbackBackup)) -or
                         (-not [string]::IsNullOrWhiteSpace($RollbackReason)) -or
                         (-not [string]::IsNullOrWhiteSpace($RollbackReleaseTag)) -or
-                        (-not [string]::IsNullOrWhiteSpace($RollbackManifestPath))
+                        (-not [string]::IsNullOrWhiteSpace($RollbackManifestPath)) -or
+                        [bool]$ConfirmedSqlRollbackComplete -or
+                        [bool]$SqlRollbackDeferred
 if (-not $Rollback) {
     if ($rollbackOnlyProvided) {
         Write-VesLog ERROR 'Rollback-only parameters require -Rollback.' -LogFile $LogFile
@@ -598,6 +621,14 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 # by stage 4 the finally above has already restarted the tasks, so the
                 # processor may be live and holding files again
                 if ($KillProcesses) { $rbArgs += '-KillProcesses' }
+                # Always, and unconditionally: Invoke-Rollback refuses a
+                # database-coupled unit without one of its two SQL switches, and a
+                # child process launched by a failing deploy cannot answer that
+                # refusal. Blocking here would leave production on the release that
+                # just failed -- strictly worse than restoring the files and
+                # recording that the database rollback is still owed. For units
+                # that are not coupled the switch is inert.
+                $rbArgs += '-SqlRollbackDeferred'
                 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'Invoke-Rollback.ps1') @rbArgs
                 $rbCode = $LASTEXITCODE
             }
@@ -609,10 +640,28 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             $global:LASTEXITCODE = 0
             $script:rolledBack = $true
             $script:rollbackExitCode = $rbCode
+            # Exit 10 is the child refusing on a usage gate before it touched
+            # anything -- and it can no longer be the SQL gate, since -SqlRollbackDeferred
+            # is always passed above. Every other outcome means the child got past
+            # the gates and may have mirrored, so a coupled unit owes the SQL half.
+            # Overstating the debt costs an operator one query; understating it
+            # leaves 4.6 binaries calling 4.7 procedures with nothing recorded.
+            $script:sqlRollbackOwed = $script:dbCoupled -and ($rbCode -ne $VES_EXIT_USAGE)
             Write-VesLog ($(if ($rbCode -eq 0) { 'OK' } else { 'ERROR' })) 'ROLLBACK OUTCOME' `
                 -Data @{runId = $runId; stage = $stageName; stageExitCode = $stageCode; rollbackExitCode = $rbCode; backupDir = $backupDir } -LogFile $LogFile
             if ($rbCode -eq 0) {
-                Write-VesLog OK "AUTO-ROLLBACK COMPLETE: prior release restored, re-verified, healthy. The deploy still FAILED (exit $stageCode)." -LogFile $LogFile
+                # "restored, re-verified, healthy" is a claim about files. For a
+                # coupled unit it is only half the rollback, and the health probe
+                # cannot see the other half: it checks log freshness, and a binary
+                # logging "expects parameter ... which was not supplied" on every
+                # message keeps it green. Say files, and name what is still owed.
+                if ($script:dbCoupled) {
+                    Write-VesLog WARN ("AUTO-ROLLBACK COMPLETE (FILES ONLY): prior release files restored, re-verified, log-active. But {0} is database-coupled and the restore ran with -SqlRollbackDeferred, so the DATABASE ROLLBACK IS STILL OWED -- production is NOT back on the prior release until the SQL rollback scripts have been run in the REVERSE of the rollout order. The deploy still FAILED (exit {1})." -f $Processor, $stageCode) `
+                        -Data @{runId = $runId; sqlRollbackOwed = $true; databaseCoupled = $true } -LogFile $LogFile
+                }
+                else {
+                    Write-VesLog OK "AUTO-ROLLBACK COMPLETE: prior release restored, re-verified, healthy. The deploy still FAILED (exit $stageCode)." -LogFile $LogFile
+                }
                 $script:onFailExitCode = $stageCode
             }
             elseif ($rbCode -eq $VES_EXIT_DRIFT -or $rbCode -eq $VES_EXIT_HEALTH) {

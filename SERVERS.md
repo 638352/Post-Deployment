@@ -128,10 +128,21 @@ Four things in that table are load-bearing:
   INCLUDING the exe.config file", plus a pre-edited replacement). Its wrapper
   leaves `PreserveFiles` empty, so the gate requires the config in the staged
   package. Every other unit preserves the server's own config with `/XF`.
-- **VESEMSINGRESS02 also runs five SQL scripts before its file copy.** Database
+- **VESEMSINGRESS02 also runs five SQL scripts — in both directions.** Database
   objects are out of scope per the brief, so no script here deploys or verifies
   them; the wrapper takes a separate `-ConfirmedSqlRolloutComplete`
-  acknowledgement rather than pretending the step does not exist.
+  acknowledgement rather than pretending the step does not exist. **Rollback
+  runs five scripts too**, and this unit's release is genuinely half database:
+  the 4.7 procedures take parameters that have no defaults and that the prior
+  binaries do not pass, so restoring files alone leaves old code calling new
+  procedures and every insert fails. `Invoke-Rollback.ps1` therefore refuses an
+  operator-driven restore of `InboundHandler` without
+  `-ConfirmedSqlRollbackComplete`; `-AutoRollback` passes `-SqlRollbackDeferred`
+  instead, so automated remediation is never blocked, and the debt is recorded
+  in the run's attestation. **The 4.7 document lists the rollback scripts in
+  rollout order, which is wrong** — the procedures must be retired before
+  `TableModifications Rollback.sql` drops the columns they reference, so the
+  rollback order is the reverse of the rollout's.
 
 The 4.7 document has two known errors, corrected above: the VESEMSEGRESS01
 rollout section is headed "Vesemsingress01", and both inbound **rollback**

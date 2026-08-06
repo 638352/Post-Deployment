@@ -34,6 +34,20 @@ BeforeAll {
     $script:Archive = New-VesBaselineArchive -Path (Join-Path $script:Root 'archive') `
         -Processor 'dptest' -ManifestPath $script:ManifestPath -Tag 'dptest/v1.0.0'
 
+    # A second identity for the one database-coupled unit. Same trees, so the
+    # manifest hash is unchanged and only the processor NAME differs -- which is
+    # exactly what the coupled gate keys on. Without this fixture, -AutoRollback's
+    # SQL-deferral is unreachable from this file and its one line is untested.
+    $script:CoupledManifestPath = Join-Path $script:Root 'InboundHandler.json'
+    $capCoupled = Invoke-VesScript 'Invoke-Verification.ps1' @(
+        '-Mode', 'Capture', '-ReleaseRoot', $script:Release,
+        '-ManifestPath', $script:CoupledManifestPath, '-Processor', 'InboundHandler',
+        '-CommitSha', 'abc1234', '-AllowUnarchivedCapture')
+    if ($capCoupled.ExitCode -ne 0) { throw "coupled baseline capture failed: $($capCoupled.Output)" }
+    New-VesBaselineArchive -Path $script:Archive `
+        -Processor 'InboundHandler' -ManifestPath $script:CoupledManifestPath `
+        -Tag 'InboundHandler/v1.0.0' | Out-Null
+
     # A log dir with a file written just now: the fresh-log liveness probe passes.
     $script:FreshLogs = Join-Path $script:Root 'logs-fresh'
     New-Item -ItemType Directory -Path $script:FreshLogs -Force | Out-Null
@@ -348,6 +362,40 @@ Describe '-AutoRollback' {
         Test-Path (Join-Path $target 'backup-manifest.json') | Should -BeFalse
     }
 
+    # Invoke-Rollback refuses a database-coupled unit that asserts neither SQL switch,
+    # and a child launched by a failing deploy cannot answer a refusal. Deploy-Processor
+    # therefore always passes -SqlRollbackDeferred. Without this case that line is
+    # unobservable -- deleting it fails no assertion -- while three documents
+    # (RUNBOOK 7.1.1, SERVERS.md, targets.json) promise the behaviour.
+    It 'defers the SQL rollback for a coupled unit rather than being blocked by its own gate' {
+        $target = New-LiveTarget 'target-auto-coupled'
+        $log = Join-Path $script:Root 'auto-coupled.jsonl'
+        $r = Invoke-VesScript 'Deploy-Processor.ps1' @(
+            '-Processor', 'InboundHandler', '-StagedRoot', $script:Staged, '-TargetRoot', $target,
+            '-StagedCommit', 'abc1234', '-ManifestPath', $script:CoupledManifestPath,
+            '-BaselineRepo', $script:Archive, '-ReleaseTag', 'InboundHandler/v1.0.0',
+            '-BackupRoot', (Join-Path $script:Root 'backups-auto-coupled'),
+            '-FreshLogDir', (Join-Path $target 'logs'), '-AutoRollback', '-LogFile', $log)
+        # the failing stage's code, exactly as for an uncoupled unit: the gate must
+        # not turn a remediable health failure into a usage refusal (10) that leaves
+        # production sitting on the release that just failed
+        $r.ExitCode | Should -Be 3
+        $r.Output | Should -Not -Match 'AUTO-ROLLBACK FAILED'
+        # the child ran with -SqlRollbackDeferred and said so, loudly
+        $r.Output | Should -Match 'SQL ROLLBACK NOT DONE'
+        $r.Output | Should -Match 'DATABASE ROLLBACK STILL OWED'
+        # the files really are back
+        (Get-Content -LiteralPath (Join-Path $target 'app.txt') -Raw) | Should -Be 'previous-release'
+        # ...but the parent must not call that a finished, healthy rollback
+        $r.Output | Should -Match 'AUTO-ROLLBACK COMPLETE \(FILES ONLY\)'
+        # and the debt reaches the DEPLOY's own terminal record -- the child's
+        # attestation is a different log consumer's problem
+        $records = @(Get-Content -LiteralPath $log | ForEach-Object { $_ | ConvertFrom-Json })
+        $runEnd = @($records | Where-Object { $_.msg -match 'RUN END: deployment' })[-1]
+        $runEnd.databaseCoupled | Should -BeTrue
+        $runEnd.sqlRollbackOwed | Should -BeTrue
+    }
+
     It 'says RESTORED BUT UNPROVEN (exit 2) when the restore lands but cannot prove itself' {
         $target = New-LiveTarget 'target-auto-unproven'
         # health probe points at a directory that stays empty whatever we restore,
@@ -415,5 +463,44 @@ Describe '-Rollback alias' {
         $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $target @('-RollbackBackup', $script:Root))
         $r.ExitCode | Should -Not -Be 0
         $r.Output | Should -Match 'Rollback-only parameters require -Rollback'
+    }
+
+    It 'rejects the SQL rollback switches outside rollback mode' {
+        $target = Join-Path $script:Root 'target-alias-sqlmisuse'
+        foreach ($sw in @('-ConfirmedSqlRollbackComplete', '-SqlRollbackDeferred')) {
+            $r = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $target @($sw))
+            $r.ExitCode | Should -Be 10 -Because "$sw is rollback-only"
+            $r.Output | Should -Match 'Rollback-only parameters require -Rollback'
+        }
+    }
+
+    # Invoke-Rollback's refusal tells the operator to "pass -SqlRollbackDeferred
+    # instead". The alias must actually accept it: when it did not, following that
+    # instruction failed parameter binding, and the only way through the alias was
+    # -ConfirmedSqlRollbackComplete -- a false attestation that the SQL rollback ran.
+    It 'forwards both SQL switches to the child for a database-coupled unit' {
+        $target = New-LiveTarget 'target-alias-coupled'
+        $backups = Join-Path $script:Root 'backups-alias-coupled'
+        $deploy = Invoke-VesScript 'Deploy-Processor.ps1' @(
+            '-Processor', 'InboundHandler', '-StagedRoot', $script:Staged, '-TargetRoot', $target,
+            '-StagedCommit', 'abc1234', '-ManifestPath', $script:CoupledManifestPath,
+            '-BaselineRepo', $script:Archive, '-ReleaseTag', 'InboundHandler/v1.0.0',
+            '-BackupRoot', $backups, '-FreshLogDir', $script:FreshLogs)
+        $deploy.ExitCode | Should -Be 0
+
+        $base = @('-Processor', 'InboundHandler', '-TargetRoot', $target, '-BackupRoot', $backups,
+            '-Rollback', '-RollbackReason', 'pester coupled alias')
+
+        # with neither switch the child's gate refuses, and that refusal survives
+        # the -File boundary as the usage code rather than a binding error
+        $none = Invoke-VesScript 'Deploy-Processor.ps1' $base
+        $none.ExitCode | Should -Be 10
+        $none.Output | Should -Match 'database-coupled'
+        (Get-Content -LiteralPath (Join-Path $target 'app.txt') -Raw) | Should -Be 'hello'
+
+        $deferred = Invoke-VesScript 'Deploy-Processor.ps1' ($base + @('-SqlRollbackDeferred'))
+        $deferred.Output | Should -Match 'SQL ROLLBACK NOT DONE'
+        $deferred.Output | Should -Match 'DATABASE ROLLBACK STILL OWED'
+        (Get-Content -LiteralPath (Join-Path $target 'app.txt') -Raw) | Should -Be 'previous-release'
     }
 }
