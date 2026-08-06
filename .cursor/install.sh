@@ -26,14 +26,27 @@ pwsh --version
 
 # --- Pester 5.x ---------------------------------------------------------------
 # Invoke-Tests.ps1 needs Pester >= 5.5.0. Pin 5.7.1 to match the repo's 5.x
-# target rather than pulling the newer 6.x line.
-pwsh -NoProfile -Command '
+# target rather than pulling the newer 6.x line. Prefer Install-PSResource
+# (ships with pwsh 7.4+, non-interactive by design) so a headless build pod
+# never stalls on the legacy PowerShellGet "install NuGet provider?" prompt.
+pwsh -NoProfile -NonInteractive -Command '
     $ErrorActionPreference = "Stop"
-    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
     $have = Get-Module -ListAvailable Pester |
         Where-Object { $_.Version -ge [version]"5.5.0" -and $_.Version -lt [version]"6.0.0" }
     if (-not $have) {
-        Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        if (Get-Command Install-PSResource -ErrorAction SilentlyContinue) {
+            Install-PSResource -Name Pester -Version "[5.7.1]" -Repository PSGallery `
+                -TrustRepository -Scope CurrentUser
+        }
+        else {
+            # Fallback for hosts without PSResourceGet: bootstrap the NuGet
+            # provider explicitly so Install-Module cannot block on a prompt.
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+            Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck -Confirm:$false
+        }
     }
     $v = (Get-Module -ListAvailable Pester | Sort-Object Version -Descending | Select-Object -First 1).Version
     Write-Host "Pester $v"
