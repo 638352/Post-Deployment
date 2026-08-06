@@ -111,7 +111,7 @@ function Out-Result([int]$code) {
 try {
     switch ($Mode) {
 
-        # Capture: snapshot the UAT-approved tree into a manifest and (optionally) pin its hash to SSM
+        # Capture: snapshot the UAT-approved tree into a manifest and archive it under the release tag
         'Capture' {
             if (-not $ReleaseRoot) { Write-VesLog ERROR '-ReleaseRoot required for Capture' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
             if (-not $ManifestPath) { Write-VesLog ERROR '-ManifestPath required for Capture' -LogFile $LogFile; Out-Result $VES_EXIT_USAGE }
@@ -355,7 +355,7 @@ try {
         Out-Result ($(if ($allOk) { $VES_EXIT_OK } else { $VES_EXIT_DRIFT }))
     }
 }
-# any unhandled error (bad SSM read, unreadable tree, etc.) lands here
+# any unhandled error (unreadable archive/tag, unreadable tree, etc.) lands here
 catch {
     Write-VesLog ERROR "Verification error: $($_.Exception.Message)" -LogFile $LogFile
     $result.status = 'error'; $result['detail']['error'] = $_.Exception.Message

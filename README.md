@@ -27,6 +27,7 @@ targets.json                 fail-closed server/Citrix inventory starter
 sample.config.json           example config contract
 SERVERS.md                   authoritative server + processor path map
 docs/                        operator runbooks (start at docs/README.md)
+.docx-review/                STALE Word/PDF snapshot — do not use; see its README
 Invoke-Tests.ps1             dev-time Pester runner (see Testing)
 tests/                       Pester test suite + fixtures
 ```
@@ -586,7 +587,9 @@ and fresh-log health probes; do not pass their binaries to
   VLER_EM_Outbound_Request_Handler / \_Processor (and \_2 / \_12 variants) and
   VLER_EM_Real_Time_Outbound_Processor. **Citrix server names are not yet
   documented** and must be added to `requiredServers` and `targets` before
-  `inventoryComplete` can be set to true. `processors/` has the template plus
+  `inventoryComplete` can be set to true. Ops fill-in fields:
+  [docs/STATUS-RAID-SOLUTIONS-2026-08-06.md](docs/STATUS-RAID-SOLUTIONS-2026-08-06.md)
+  (inventory sign-off worksheet). `processors/` has the template plus
   filled wrappers (e.g. `Deploy-OutboundDBQ-uat.ps1`); copy the template per
   confirmed system and server (3-5 person-days each incl. pilot).
 - Database objects (stored procedures, triggers, views) are **out of scope** for

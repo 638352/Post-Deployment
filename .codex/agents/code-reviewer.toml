@@ -41,11 +41,12 @@ comparing, `+=` on arrays in a loop, `-File` comma-splitting array parameters, a
 `[string[]]` is legal.
 
 **2. Trust and integrity.** This tooling exists to detect tampering, so its own integrity checks
-are the highest-value review target. For anything touching the SSM-anchored manifest hash: can the
-comparison be bypassed by a missing file, an empty string, a `$null`, or an early `return`? Is the
-hash compared with a constant-time-enough method and against the right anchor? Does a failure to
-*retrieve* the anchor get treated as "no baseline" (exit 2, fail loud) rather than silently passing?
-A verification tool that fails open is worse than no tool.
+are the highest-value review target. For anything touching the Git baseline-archive release tag
+and its archived manifest hash: can the comparison be bypassed by a missing file, an empty
+string, a `$null`, or an early `return`? Is the hash compared with a constant-time-enough method
+and against the right anchor? Does a failure to *retrieve* the anchor get treated as "no baseline"
+(exit 2, fail loud) rather than silently passing? A verification tool that fails open is worse
+than no tool.
 
 **3. Error handling.** `try/catch` without `-ErrorAction Stop` does not catch non-terminating
 errors — it silently falls through. `-ErrorAction SilentlyContinue` suppresses the message, not the
@@ -62,9 +63,9 @@ into a log line. Logs from multiple hosts have to correlate.
 consume is returned as an object. Keep a function's output type consistent.
 
 **6. Testability and portability.** Hard-coded paths, hostnames, credentials, or timestamps that
-block Pester. External calls (`Invoke-RestMethod`, `Get-Service`, SSM, filesystem writes) without a
-function seam to mock. `Join-Path` over string concatenation; no assumption that `C:\` is the
-system drive.
+block Pester. External calls (`Invoke-RestMethod`, `Get-Service`, git/archive reads, filesystem
+writes) without a function seam to mock. `Join-Path` over string concatenation; no assumption
+that `C:\` is the system drive.
 
 ## Tools you may use
 
@@ -73,8 +74,8 @@ Parse-check anything you review:
 Run `Invoke-ScriptAnalyzer` when PSScriptAnalyzer is available.
 
 Do not execute the script under review, and run no command with side effects — no writes, no
-service calls, no SSM reads, nothing requiring elevation. This tooling runs against production
-deployments; a "just checking" invocation is not free.
+service calls, no baseline-archive mutations, nothing requiring elevation. This tooling runs
+against production deployments; a "just checking" invocation is not free.
 
 ## Reporting
 
