@@ -396,6 +396,42 @@ Describe '-AutoRollback' {
         $runEnd.sqlRollbackOwed | Should -BeTrue
     }
 
+    # Exit 2 alone is not "files restored": a held rollback lock makes the child
+    # refuse before the mirror, and the parent must not invent SQL debt from that
+    # exit code. The case above already pins the true-positive (files back => debt).
+    It 'does not claim SQL debt when auto-rollback never mirrored the files' {
+        $lockPath = Join-Path $env:ProgramData 'ves-verify\InboundHandler.rollback.lock'
+        $lockDir = Split-Path -Parent $lockPath
+        if (-not (Test-Path -LiteralPath $lockDir)) {
+            New-Item -ItemType Directory -Path $lockDir -Force | Out-Null
+        }
+        $lock = $null
+        try {
+            $lock = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $target = New-LiveTarget 'target-auto-coupled-locked'
+            $log = Join-Path $script:Root 'auto-coupled-locked.jsonl'
+            $r = Invoke-VesScript 'Deploy-Processor.ps1' @(
+                '-Processor', 'InboundHandler', '-StagedRoot', $script:Staged, '-TargetRoot', $target,
+                '-StagedCommit', 'abc1234', '-ManifestPath', $script:CoupledManifestPath,
+                '-BaselineRepo', $script:Archive, '-ReleaseTag', 'InboundHandler/v1.0.0',
+                '-BackupRoot', (Join-Path $script:Root 'backups-auto-coupled-locked'),
+                '-FreshLogDir', (Join-Path $target 'logs'), '-AutoRollback', '-LogFile', $log)
+            # child exits 2 (lock); parent surfaces that as AUTO-ROLLBACK FAILED / exit 2
+            $r.ExitCode | Should -Be 2
+            $r.Output | Should -Match 'AUTO-ROLLBACK FAILED'
+            # new release is still on disk -- the mirror never ran
+            (Get-Content -LiteralPath (Join-Path $target 'app.txt') -Raw) | Should -Be 'hello'
+            $records = @(Get-Content -LiteralPath $log | ForEach-Object { $_ | ConvertFrom-Json })
+            $runEnd = @($records | Where-Object { $_.msg -match 'RUN END: deployment' })[-1]
+            $runEnd.databaseCoupled | Should -BeTrue
+            $runEnd.sqlRollbackOwed | Should -BeFalse
+        }
+        finally {
+            if ($lock) { $lock.Close(); $lock.Dispose() }
+            Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     It 'says RESTORED BUT UNPROVEN (exit 2) when the restore lands but cannot prove itself' {
         $target = New-LiveTarget 'target-auto-unproven'
         # health probe points at a directory that stays empty whatever we restore,

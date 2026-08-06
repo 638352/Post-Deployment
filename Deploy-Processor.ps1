@@ -640,13 +640,33 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             $global:LASTEXITCODE = 0
             $script:rolledBack = $true
             $script:rollbackExitCode = $rbCode
-            # Exit 10 is the child refusing on a usage gate before it touched
-            # anything -- and it can no longer be the SQL gate, since -SqlRollbackDeferred
-            # is always passed above. Every other outcome means the child got past
-            # the gates and may have mirrored, so a coupled unit owes the SQL half.
-            # Overstating the debt costs an operator one query; understating it
-            # leaves 4.6 binaries calling 4.7 procedures with nothing recorded.
-            $script:sqlRollbackOwed = $script:dbCoupled -and ($rbCode -ne $VES_EXIT_USAGE)
+            # Debt follows files on disk, not exit codes. Exit 2 can mean "never
+            # mirrored" (empty backup, lock held, launch failure) OR "mirrored but
+            # unproven" (no baseline). Exit codes alone cannot tell those apart;
+            # Invoke-Rollback already records sqlRollbackOwed only after the mirror
+            # succeeds. Read that signal from the shared log. No child RUN END
+            # (launch catch / missing log) means no debt -- inventing one would
+            # attest a database rollback after a restore that never happened.
+            $script:sqlRollbackOwed = $false
+            if ($script:dbCoupled -and $LogFile -and (Test-Path -LiteralPath $LogFile)) {
+                try {
+                    $rbEnds = @(Get-Content -LiteralPath $LogFile -ErrorAction Stop |
+                            ForEach-Object {
+                            try { $_ | ConvertFrom-Json } catch { $null }
+                        } |
+                            Where-Object { $_ -and $_.PSObject.Properties['msg'] -and $_.msg -match '^RUN END: rollback' })
+                    if ($rbEnds.Count -gt 0) {
+                        $lastRb = $rbEnds[-1]
+                        if ($lastRb.PSObject.Properties['sqlRollbackOwed'] -and $lastRb.sqlRollbackOwed) {
+                            $script:sqlRollbackOwed = $true
+                        }
+                    }
+                }
+                catch {
+                    # An unreadable log must not invent debt, and must not abort
+                    # the already-failed deploy's exit path.
+                }
+            }
             Write-VesLog ($(if ($rbCode -eq 0) { 'OK' } else { 'ERROR' })) 'ROLLBACK OUTCOME' `
                 -Data @{runId = $runId; stage = $stageName; stageExitCode = $stageCode; rollbackExitCode = $rbCode; backupDir = $backupDir } -LogFile $LogFile
             if ($rbCode -eq 0) {
