@@ -676,8 +676,12 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 # logging "expects parameter ... which was not supplied" on every
                 # message keeps it green. Say files, and name what is still owed.
                 if ($script:dbCoupled) {
+                    # Use the debt signal already read from the child's RUN END --
+                    # never hardcode $true here. That field and the deploy's own
+                    # terminal record must agree; inventing debt when the child
+                    # log said otherwise (or was unreadable) is a false attestation.
                     Write-VesLog WARN ("AUTO-ROLLBACK COMPLETE (FILES ONLY): prior release files restored, re-verified, log-active. But {0} is database-coupled and the restore ran with -SqlRollbackDeferred, so the DATABASE ROLLBACK IS STILL OWED -- production is NOT back on the prior release until the SQL rollback scripts have been run in the REVERSE of the rollout order. The deploy still FAILED (exit {1})." -f $Processor, $stageCode) `
-                        -Data @{runId = $runId; sqlRollbackOwed = $true; databaseCoupled = $true } -LogFile $LogFile
+                        -Data @{runId = $runId; sqlRollbackOwed = $script:sqlRollbackOwed; databaseCoupled = $true } -LogFile $LogFile
                 }
                 else {
                     Write-VesLog OK "AUTO-ROLLBACK COMPLETE: prior release restored, re-verified, healthy. The deploy still FAILED (exit $stageCode)." -LogFile $LogFile

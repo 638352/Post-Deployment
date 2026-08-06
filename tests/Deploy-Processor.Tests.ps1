@@ -394,6 +394,10 @@ Describe '-AutoRollback' {
         $runEnd = @($records | Where-Object { $_.msg -match 'RUN END: deployment' })[-1]
         $runEnd.databaseCoupled | Should -BeTrue
         $runEnd.sqlRollbackOwed | Should -BeTrue
+        # the FILES ONLY warning must carry the same debt flag as RUN END -- not a
+        # hardcoded $true that could disagree with the child's signal
+        $filesOnly = @($records | Where-Object { $_.msg -match 'AUTO-ROLLBACK COMPLETE \(FILES ONLY\)' })[-1]
+        $filesOnly.sqlRollbackOwed | Should -Be $runEnd.sqlRollbackOwed
     }
 
     # Exit 2 alone is not "files restored": a held rollback lock makes the child
