@@ -8,6 +8,7 @@ Use this folder as the canonical run-guide index for verification and testing wo
 - [RUNBOOK.md](RUNBOOK.md) — the detailed technical runbook
 - [UAT-PILOT-CHECKLIST.md](UAT-PILOT-CHECKLIST.md) — first UAT OutboundDBQ pilot (ops checklist)
 - [AUTOMATION-POSTURE.md](AUTOMATION-POSTURE.md) — what is automated vs still manual
+- [REPO-HYGIENE.md](REPO-HYGIENE.md) — tracked content that is not part of the deliverable (maintainers)
 
 ## Which one should I use?
 
