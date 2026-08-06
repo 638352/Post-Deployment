@@ -15,6 +15,12 @@ baselines/
 # at any depth is covered.
 tmp/
 
+# linked git worktrees checked out inside this repo. Committed once as a bare
+# 160000 gitlink with no .gitmodules, which git cannot populate: a fresh clone got
+# an empty directory and `git archive` shipped a phantom entry. Ignored BEFORE it
+# was untracked, so `git status` does not immediately offer it back.
+Post-Deployment-datadog-558667ed/
+
 # editor / OS noise
 *.swp
 *~
