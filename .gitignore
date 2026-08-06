@@ -10,6 +10,11 @@ ves-verify/
 baselines/
 *.manifest.json
 
+# scratch: rendered page images, document-review output, pre-change snapshots.
+# Working material, never part of the deliverable. Unanchored so a scratch dir
+# at any depth is covered.
+tmp/
+
 # editor / OS noise
 *.swp
 *~
