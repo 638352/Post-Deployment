@@ -58,6 +58,23 @@ param(
     # Restore this specific backup folder instead of the newest one.
     [Parameter(ParameterSetName = 'Restore')][string]$BackupDir,
 
+    # --- database coupling ----------------------------------------------------
+    # Some units are not file-only. The 4.7 InboundHandler procedures take
+    # parameters that have no defaults and that the 4.6 binaries do not pass, so
+    # restoring files without rolling the database back leaves old code calling
+    # new procedures: every insert fails with "expects parameter ... which was
+    # not supplied". Neither half is safe alone, and nothing here can reach the
+    # database to check.
+    #
+    # Two switches, because the two callers make different claims. The operator
+    # states the SQL rollback was done. -SqlRollbackDeferred is for the automated
+    # path: Deploy-Processor's -AutoRollback runs this script as a child process
+    # that cannot answer a refusal, and blocking it would leave production
+    # carrying the failed release -- worse than an incomplete rollback that says
+    # so loudly and records the debt.
+    [Parameter(ParameterSetName = 'Restore')][switch]$ConfirmedSqlRollbackComplete,
+    [Parameter(ParameterSetName = 'Restore')][switch]$SqlRollbackDeferred,
+
     # --- restore scope --------------------------------------------------------
     # Live config path. When it sits outside TargetRoot it is restored from the
     # backup's _ves-config stash; when it sits inside, it rides along in the mirror.
@@ -120,6 +137,13 @@ if (-not $LogFile) { $LogFile = New-VesLogFile -Prefix ("rollback-{0}" -f $Proce
 $runId = [guid]::NewGuid().ToString()
 $script:chosen = $null
 $script:restored = $false
+# Two flags, not one. The deferral is an INTENT recorded at the gate; the debt is
+# only real once files are actually on disk. Collapsing them would make every run
+# that aborted after the gate -- and every -WhatIf -- report a database rollback it
+# never made necessary. $VES_DB_COUPLED_PROCESSORS lives in the module, because
+# Deploy-Processor needs the same answer to decide what its auto-rollback may claim.
+$script:sqlRollbackDeferralRequested = $false
+$script:sqlRollbackOwed = $false
 
 # -Initials is carried into the audit record: a restore of production is an
 # operator action, and "who" belongs in the evidence next to "why" ($Reason).
@@ -132,7 +156,7 @@ function Stop-Rollback([int]$code) {
     $outcome = Get-VesOutcome -ExitCode $code
     Write-VesLog ($(if ($outcome -eq 'PASS') { 'OK' } else { 'ERROR' })) `
         "RUN END: rollback outcome=$outcome exit=$code" `
-        -Data @{runId = $runId; outcome = $outcome; exitCode = $code; processor = $Processor; backupDir = $script:chosen; restored = $script:restored } -LogFile $LogFile
+        -Data @{runId = $runId; outcome = $outcome; exitCode = $code; processor = $Processor; backupDir = $script:chosen; restored = $script:restored; sqlRollbackOwed = $script:sqlRollbackOwed } -LogFile $LogFile
     exit $code
 }
 
@@ -186,6 +210,55 @@ if ([string]::IsNullOrWhiteSpace($Reason)) {
 if ([string]::IsNullOrWhiteSpace($BackupRoot) -and [string]::IsNullOrWhiteSpace($BackupDir)) {
     Write-VesLog ERROR 'Rollback requires -BackupRoot (newest backup) or -BackupDir (a specific one).' -LogFile $LogFile
     Stop-Rollback $VES_EXIT_USAGE
+}
+
+# Database-coupled units: the file restore is only half the rollback. Checked
+# here with the other usage gates -- before a backup is chosen, long before the
+# mirror -- so a refusal costs nothing and changes nothing.
+if ($VES_DB_COUPLED_PROCESSORS -contains $Processor) {
+    # The REVERSE of the rollout order, and that matters: the rollout adds the
+    # columns first and then the procedures that use them, so the rollback has to
+    # retire the procedures before TableModifications drops those columns out
+    # from under them.
+    $sqlOrder = 'EM_VAFTPVeteran_Insert, EM_VAFTPInboundStack_Update, EM_VAFTPDependentInfo_Insert, EM_VAFTPContentions_Insert, then TableModifications'
+    # Both switches at once is not caution, it is two contradictory claims about a
+    # database this script cannot query. An if/elseif would resolve it silently in
+    # favour of whichever branch is written first -- and that is the confirmed one,
+    # so the safer claim would lose and the debt would vanish from the audit record.
+    # Refuse, with the other usage gates above.
+    if ($ConfirmedSqlRollbackComplete -and $SqlRollbackDeferred) {
+        Write-VesLog ERROR ("-ConfirmedSqlRollbackComplete and -SqlRollbackDeferred contradict each other: the first states the SQL rollback for {0} has been run, the second states it is still owed. Both cannot be true, and this script cannot reach the database to settle it. Pass exactly one." -f $Processor) `
+            -Data @{runId = $runId; sqlRollbackRefused = $true; sqlRollbackRefusalReason = 'contradictory-switches' } -LogFile $LogFile
+        Stop-Rollback $VES_EXIT_USAGE
+    }
+    if ($ConfirmedSqlRollbackComplete) {
+        Write-VesLog INFO ("Operator confirms the SQL rollback ran for {0}; proceeding with the file restore." -f $Processor) `
+            -Data @{runId = $runId; sqlRollbackConfirmed = $true } -LogFile $LogFile
+    }
+    elseif ($SqlRollbackDeferred) {
+        # Intent only. It becomes a debt where $script:restored is set, because what
+        # is owed is the reconciliation of files that are actually on disk against a
+        # database that no longer matches them. A run that aborts before the mirror
+        # -- overlapping roots, empty payload, lock held -- and every -WhatIf owes
+        # nothing, and must not leave a debt record implying otherwise.
+        $script:sqlRollbackDeferralRequested = $true
+        $deferMsg = if ($WhatIfPreference) {
+            'SQL ROLLBACK NOT DONE (WhatIf): this run would restore {0} files while the database still carries the 4.7 objects. Nothing changed, so no debt is recorded. A real run needs the rollback scripts in this order: {1}.'
+        }
+        else {
+            'SQL ROLLBACK NOT DONE: restoring {0} files while the database still carries the 4.7 objects. The restored binaries do not pass the parameters those procedures require, so inserts will fail until the rollback scripts are run in this order: {1}.'
+        }
+        Write-VesLog WARN ($deferMsg -f $Processor, $sqlOrder) `
+            -Data @{runId = $runId; sqlRollbackDeferred = $true; whatIf = [bool]$WhatIfPreference } -LogFile $LogFile
+    }
+    else {
+        # -Data, not just console prose: a refusal is an audit event, and the two
+        # branches above both record one. Without it the only machine-readable trace
+        # of a blocked production rollback is the exit code.
+        Write-VesLog ERROR ("{0} is database-coupled: its release includes stored procedures, so restoring files alone leaves the prior binaries calling the 4.7 procedures and every insert fails. Run the SQL rollback scripts in the REVERSE of the rollout order ({1}), then pass -ConfirmedSqlRollbackComplete. To restore the files now and record that the database rollback is still owed, pass -SqlRollbackDeferred instead (Deploy-Processor.ps1 -Rollback accepts both switches too). This script cannot reach the database to check." -f $Processor, $sqlOrder) `
+            -Data @{runId = $runId; sqlRollbackRefused = $true; sqlRollbackRefusalReason = 'no-sql-attestation' } -LogFile $LogFile
+        Stop-Rollback $VES_EXIT_USAGE
+    }
 }
 
 # Nesting check BEFORE anything else: /MIR from a source that lives under its own
@@ -356,7 +429,12 @@ try {
         # robocopy: 0-7 are success variants, 8+ is failure
         if ($LASTEXITCODE -ge 8) { Write-VesLog ERROR "Restore copy failed ($LASTEXITCODE)" -LogFile $LogFile; $restoreFailed = $true }
         $global:LASTEXITCODE = 0
-        if (-not $restoreFailed) { $script:restored = $true }
+        if (-not $restoreFailed) {
+            $script:restored = $true
+            # Files are now on disk carrying code the database no longer matches.
+            # That mismatch is the debt, so this is the earliest point it is real.
+            if ($script:sqlRollbackDeferralRequested) { $script:sqlRollbackOwed = $true }
+        }
 
         # Out-of-tree config: not in the mirror, so restore it explicitly. Stash the
         # current one first so the rollback is itself reversible.
@@ -544,6 +622,16 @@ else {
         runId = $runId; attested = $true; restoredReleaseTag = $ReleaseTag
         restoredFromBackup = $chosenPath; operator = "$env:USERNAME@$env:COMPUTERNAME"; reason = $Reason
     } -LogFile $LogFile
+}
+
+# The database half of a coupled rollback is not something this script can do or
+# check. So, exactly like the release-tag re-point above, it names the action the
+# operator still owes rather than letting a clean file restore imply the rollback
+# is finished. Outside the attested/not-attested branch on purpose: the debt is
+# real either way.
+if ($script:sqlRollbackOwed) {
+    Write-VesLog WARN ("DATABASE ROLLBACK STILL OWED for {0}: the files are restored but the 4.7 database objects are still in place, so the restored binaries will fail on insert. Run the SQL rollback scripts in the REVERSE of the rollout order before this processor is trusted." -f $Processor) `
+        -Data @{runId = $runId; sqlRollbackOwed = $true; processor = $Processor } -LogFile $LogFile
 }
 
 # Severity, not numeric order: 2 (ERROR) outranks 3 (FAIL).
