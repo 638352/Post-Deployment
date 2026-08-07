@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A push made with a GitHub App installation token does not raise a `push`
+  # event, so a commit landed on main by an agent gets no run at all. Without a
+  # manual trigger there is then no way to verify that SHA short of a new push.
+  workflow_dispatch:
 
 jobs:
   pester:

@@ -38,6 +38,11 @@ Treat `Post-Deployment-datadog-558667ed/` as a snapshot/reference copy only. Do 
 
 - Use `./Invoke-Tests.ps1` for the main test pass.
 - If you touch a specific script, prefer the matching test file under `tests/` for a narrower check.
+- When a rollback test fails on an exit code alone, run
+  [tests/Debug-RollbackFailure.ps1](tests/Debug-RollbackFailure.ps1) rather than
+  guessing: six paths in `Invoke-Rollback.ps1` return `2`, and it reads the audit
+  JSONL to say which one fired. Do not attribute an exit `2` to any single cause
+  without that evidence.
 - Keep behavior aligned with the module in [module/VesVerify.psm1](module/VesVerify.psm1); most shared rules live there.
 
 ## Editing guidance
