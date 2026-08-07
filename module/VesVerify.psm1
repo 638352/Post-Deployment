@@ -1260,5 +1260,6 @@ Export-ModuleMember -Function `
     Get-VesWorstExitCode, Get-VesBackupSet, `
     ConvertTo-VesList, Expand-VesList, Test-VesPreservedPath, Test-VesRunbookValues, `
     Stop-VesProcessorTarget, Start-VesProcessorTarget, `
-    Get-VesAlertType
+    Get-VesAlertType    # Datadog-only; its only consumers are the disabled emit blocks.
+                        # Not covered by unit tests by design; restore with the emit blocks.
 # DATADOG DISABLED: Send-VesDatadogMetric, Send-VesDatadogEvent, Get-VesDatadogEnvTag

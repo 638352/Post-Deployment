@@ -39,15 +39,11 @@ BeforeAll {
 
     # The trust anchor: a baseline archive repo with the captured manifest committed
     # under pftest/v1.0.0. This is what replaced the SSM pin.
-    $script:Archive = Join-Path $script:Root 'archive'
-    New-Item -ItemType Directory -Path (Join-Path $script:Archive 'baselines\pftest') -Force | Out-Null
-    Copy-Item -LiteralPath $script:ManifestPath -Destination (Join-Path $script:Archive 'baselines\pftest\pftest.json')
-    & git -C $script:Archive init -q .
-    & git -C $script:Archive config user.email 'test@ves.local'
-    & git -C $script:Archive config user.name 'ves tests'
-    & git -C $script:Archive add -A
-    & git -C $script:Archive commit -qm 'pftest baseline v1.0.0'
-    & git -C $script:Archive tag 'pftest/v1.0.0'
+    # Use the shared helper so the gc.auto guard, mtime-bump, and post-archive
+    # integrity check run here too -- the manual path was missing those steps and
+    # was a source of the tag-points-at-wrong-commit flake documented in _helpers.ps1.
+    $script:Archive = New-VesBaselineArchive -Path (Join-Path $script:Root 'archive') `
+        -Processor 'pftest' -ManifestPath $script:ManifestPath -Tag 'pftest/v1.0.0'
 
     function script:New-Inventory([string]$Name, [hashtable]$Overrides = @{}) {
         $target = [ordered]@{
@@ -77,14 +73,7 @@ BeforeAll {
 AfterAll {
     $env:PATH = $script:OrigPath
     $env:VES_STUB_LOG = $null
-    # git writes its loose objects read-only, and Pester's TestDrive teardown does a
-    # plain Delete() that throws UnauthorizedAccessException on them -- which fails
-    # the whole container even when every test passed. Clear the attribute first.
-    if ($script:Archive -and (Test-Path -LiteralPath $script:Archive)) {
-        Get-ChildItem -LiteralPath $script:Archive -Recurse -Force -File -ErrorAction SilentlyContinue |
-            ForEach-Object { try { $_.IsReadOnly = $false } catch {} }
-        Remove-Item -LiteralPath $script:Archive -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    Remove-VesBaselineArchive -Path $script:Archive
 }
 
 Describe 'Invoke-Preflight -TargetsFile' {
