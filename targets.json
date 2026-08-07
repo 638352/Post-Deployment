@@ -37,7 +37,7 @@
       "manifestPath": "D:\\baselines\\OutboundDBQ.json",
       "configContract": "D:\\baselines\\OutboundDBQ.config.json",
       "configPath": "C:\\VLER_TEST_OUTBOUND\\Processors\\VES.OutboundProcessor\\VES.OutboundDBQProcessor.exe.config",
-      "note": "UAT starter aligned with Deploy-OutboundDBQ-uat.ps1 / SERVERS.md. DBQ also deploys on VESEMSEGRESS02/03 in PROD - create one confirmed entry per deployed copy."
+      "note": "UAT starter aligned with Deploy-OutboundDBQ-uat.ps1 / SERVERS.md. XML and DBQ share this releaseRoot on UAT (two tasks, one tree); the wrapper lists both. DBQ also deploys on VESEMSEGRESS02/03 in PROD - create one confirmed entry per deployed copy."
     },
     {
       "processor": "RealtimeInbound",
@@ -63,7 +63,7 @@
       "configContract": "CONFIRM config contract path",
       "configPath": "C:\\VLER\\Processors\\VES.InboundProcessor\\VES.InboundProcessor.exe.config",
       "deployScript": "processors/Deploy-InboundHandler-vesemsingress02.ps1",
-      "note": "4.7 rollout: scheduled task 'VLER EM Inbound _ Request _ Handler' (spaces around the underscores are literal). Logs C:\\VLER\\Logs\\VES.InboundProcessor. Config preserved. Five SQL rollout scripts run before the file copy and are OUT OF SCOPE here. The release zip nests a folder - flatten it when staging. Config leaf name is assumed - confirm."
+      "note": "4.7 rollout: scheduled task 'VLER EM Inbound _ Request _ Handler' (spaces around the underscores are literal). Logs C:\\VLER\\Logs\\VES.InboundProcessor. Config preserved. DATABASE-COUPLED: five SQL scripts run before the file copy and five more on rollback -- Deploy-InboundHandler-vesemsingress02.ps1 requires -ConfirmedSqlRolloutComplete; Invoke-Rollback.ps1 requires -ConfirmedSqlRollbackComplete or -SqlRollbackDeferred (see inventoryNotes). Nothing here deploys or verifies the SQL objects themselves. The release zip nests a folder - flatten it when staging. Config leaf name is assumed - confirm."
     },
     {
       "processor": "Outbound",

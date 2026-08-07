@@ -450,6 +450,19 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
         # Local time to match how operators read these names; createdUtc in the
         # sidecar is the unambiguous value.
         $backupDir = Join-Path $BackupRoot ("{0}_{1}_{2}" -f (Get-Date).ToString('yyyyMMddTHHmmss'), $Initials, $Processor)
+        # The release currently on disk is whatever the previous deploy installed.
+        # That deploy wrote replacedByReleaseTag into ITS sidecar; reuse it as this
+        # backup's priorReleaseTag so a later restore (manual or -AutoRollback) can
+        # verify against the approved prior tag without the operator re-typing it.
+        # Read BEFORE creating $backupDir so the incomplete new folder is not first.
+        $priorReleaseTag = $null
+        if (Test-Path -LiteralPath $BackupRoot) {
+            $prevSet = @(Get-VesBackupSet -BackupRoot $BackupRoot -Processor $Processor | Select-Object -First 1)
+            if ($prevSet.Count -and $prevSet[0].HasRecord -and $prevSet[0].Record) {
+                $prevTag = $prevSet[0].Record.replacedByReleaseTag
+                if (-not [string]::IsNullOrWhiteSpace("$prevTag")) { $priorReleaseTag = "$prevTag" }
+            }
+        }
         if (Test-Path -LiteralPath $TargetRoot) {
             Write-VesLog INFO "Backup $TargetRoot -> $backupDir" -LogFile $LogFile
             if ((Test-Path -LiteralPath $backupDir) -and
@@ -560,7 +573,7 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                     sourceTargetRoot    = $TargetRoot
                     replacedByCommit    = $StagedCommit
                     replacedByReleaseTag = $ReleaseTag
-                    priorReleaseTag     = $null
+                    priorReleaseTag     = $priorReleaseTag
                     backupManifestHash  = $backupHash
                     backupFileCount     = $backupFileCount
                     manifestPath        = $ManifestPath

@@ -48,7 +48,12 @@
     The in-scope system list is unconfirmed as of 2026-07; the values below are
     documented examples, confirm against the "Outbound Deployment Steps" runbook.
 .EXAMPLE
-    .\Deploy-SYSTEM_NAME.ps1 -StagedRoot D:\stage\SYSTEM_NAME -StagedCommit abc1234 -WhatIf
+    .\Deploy-SYSTEM_NAME.ps1 -StagedRoot D:\stage\SYSTEM_NAME -StagedCommit abc1234 `
+      -ReleaseTag SYSTEM_NAME/v1.4.0 -BaselineRepo D:\ves-baselines -WhatIf
+
+    Live wrappers also require -ConfirmedRunbookValues (and assert hostname /
+    tasks via Test-VesRunbookValues). Copy that pattern when filling this
+    template in — see processors/Deploy-OutboundDBQ-uat.ps1.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(

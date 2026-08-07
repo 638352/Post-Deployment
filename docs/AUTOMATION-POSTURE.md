@@ -80,6 +80,11 @@ at all, selecting which restore point, supplying the reason for the audit record
 re-establishing the trust anchor afterward (deliberately operator-only, so that no
 automated action can quietly redefine what "approved" means).
 
+For the database-coupled `InboundHandler` unit, file restore is additionally gated on
+an operator attestation that the SQL rollback ran (`-ConfirmedSqlRollbackComplete`) or
+was deliberately deferred (`-SqlRollbackDeferred`). Auto-rollback always defers the
+SQL half and records the debt — nothing here can reach the database to check.
+
 ### Ongoing
 
 - Running the regression test suite (CI runs it on pull requests; operators can
