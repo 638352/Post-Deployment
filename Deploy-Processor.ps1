@@ -640,31 +640,43 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
             $global:LASTEXITCODE = 0
             $script:rolledBack = $true
             $script:rollbackExitCode = $rbCode
-            # Debt follows files on disk, not exit codes. Exit 2 can mean "never
-            # mirrored" (empty backup, lock held, launch failure) OR "mirrored but
-            # unproven" (no baseline). Exit codes alone cannot tell those apart;
-            # Invoke-Rollback already records sqlRollbackOwed only after the mirror
-            # succeeds. Read that signal from the shared log. No child RUN END
-            # (launch catch / missing log) means no debt -- inventing one would
-            # attest a database rollback after a restore that never happened.
+            # Debt follows files on disk, not exit codes alone. Exit 2 can mean
+            # "never mirrored" (empty backup, lock held, launch failure) OR
+            # "mirrored but unproven" (no baseline). Auto-rollback always passes
+            # -SqlRollbackDeferred, so:
+            #   * exit 0 on a coupled unit => files restored and re-verified =>
+            #     debt is owed. Set it here; do not depend on parsing the child
+            #     RUN END. A missing/unreadable child log must not leave the
+            #     FILES ONLY prose saying STILL OWED while sqlRollbackOwed is
+            #     false -- downstream consumers that key on the field would
+            #     treat production as recovered.
+            #   * non-zero => only the child knows whether the mirror completed.
+            #     Read sqlRollbackOwed from its RUN END. No RUN END means no debt
+            #     (inventing one would attest a SQL rollback after a restore that
+            #     never happened).
             $script:sqlRollbackOwed = $false
-            if ($script:dbCoupled -and $LogFile -and (Test-Path -LiteralPath $LogFile)) {
-                try {
-                    $rbEnds = @(Get-Content -LiteralPath $LogFile -ErrorAction Stop |
-                            ForEach-Object {
-                            try { $_ | ConvertFrom-Json } catch { $null }
-                        } |
-                            Where-Object { $_ -and $_.PSObject.Properties['msg'] -and $_.msg -match '^RUN END: rollback' })
-                    if ($rbEnds.Count -gt 0) {
-                        $lastRb = $rbEnds[-1]
-                        if ($lastRb.PSObject.Properties['sqlRollbackOwed'] -and $lastRb.sqlRollbackOwed) {
-                            $script:sqlRollbackOwed = $true
+            if ($script:dbCoupled) {
+                if ($rbCode -eq 0) {
+                    $script:sqlRollbackOwed = $true
+                }
+                elseif ($LogFile -and (Test-Path -LiteralPath $LogFile)) {
+                    try {
+                        $rbEnds = @(Get-Content -LiteralPath $LogFile -ErrorAction Stop |
+                                ForEach-Object {
+                                try { $_ | ConvertFrom-Json } catch { $null }
+                            } |
+                                Where-Object { $_ -and $_.PSObject.Properties['msg'] -and $_.msg -match '^RUN END: rollback' })
+                        if ($rbEnds.Count -gt 0) {
+                            $lastRb = $rbEnds[-1]
+                            if ($lastRb.PSObject.Properties['sqlRollbackOwed'] -and $lastRb.sqlRollbackOwed) {
+                                $script:sqlRollbackOwed = $true
+                            }
                         }
                     }
-                }
-                catch {
-                    # An unreadable log must not invent debt, and must not abort
-                    # the already-failed deploy's exit path.
+                    catch {
+                        # An unreadable log must not invent debt on a failed
+                        # restore path, and must not abort the deploy exit path.
+                    }
                 }
             }
             Write-VesLog ($(if ($rbCode -eq 0) { 'OK' } else { 'ERROR' })) 'ROLLBACK OUTCOME' `
@@ -676,10 +688,8 @@ if ($PSCmdlet.ShouldProcess($TargetRoot, "Deploy $Processor $StagedCommit")) {
                 # logging "expects parameter ... which was not supplied" on every
                 # message keeps it green. Say files, and name what is still owed.
                 if ($script:dbCoupled) {
-                    # Use the debt signal already read from the child's RUN END --
-                    # never hardcode $true here. That field and the deploy's own
-                    # terminal record must agree; inventing debt when the child
-                    # log said otherwise (or was unreadable) is a false attestation.
+                    # sqlRollbackOwed was forced true above for this exit-0 path so
+                    # the prose and the machine field cannot disagree.
                     Write-VesLog WARN ("AUTO-ROLLBACK COMPLETE (FILES ONLY): prior release files restored, re-verified, log-active. But {0} is database-coupled and the restore ran with -SqlRollbackDeferred, so the DATABASE ROLLBACK IS STILL OWED -- production is NOT back on the prior release until the SQL rollback scripts have been run in the REVERSE of the rollout order. The deploy still FAILED (exit {1})." -f $Processor, $stageCode) `
                         -Data @{runId = $runId; sqlRollbackOwed = $script:sqlRollbackOwed; databaseCoupled = $true } -LogFile $LogFile
                 }

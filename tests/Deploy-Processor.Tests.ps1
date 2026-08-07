@@ -393,10 +393,12 @@ Describe '-AutoRollback' {
         $records = @(Get-Content -LiteralPath $log | ForEach-Object { $_ | ConvertFrom-Json })
         $runEnd = @($records | Where-Object { $_.msg -match 'RUN END: deployment' })[-1]
         $runEnd.databaseCoupled | Should -BeTrue
+        # exit 0 + coupled + auto-rollback's -SqlRollbackDeferred => debt is owed
+        # even if the child RUN END could not be parsed; the FILES ONLY prose and
+        # the machine field must both say so
         $runEnd.sqlRollbackOwed | Should -BeTrue
-        # the FILES ONLY warning must carry the same debt flag as RUN END -- not a
-        # hardcoded $true that could disagree with the child's signal
         $filesOnly = @($records | Where-Object { $_.msg -match 'AUTO-ROLLBACK COMPLETE \(FILES ONLY\)' })[-1]
+        $filesOnly.sqlRollbackOwed | Should -BeTrue
         $filesOnly.sqlRollbackOwed | Should -Be $runEnd.sqlRollbackOwed
     }
 
