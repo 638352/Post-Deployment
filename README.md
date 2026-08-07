@@ -329,6 +329,22 @@ source — the deploy refuses this too), and a missing `-Reason`. A live
 instance under `TargetRoot` blocks the
 restore unless `-KillProcesses` is passed, exactly as it blocks a deploy.
 
+**Database-coupled units (`InboundHandler` on VESEMSINGRESS02):** that release is
+half database. Restoring files alone leaves old binaries calling new procedures
+and every insert fails. `Invoke-Rollback.ps1` therefore refuses a coupled restore
+unless exactly one of these is passed:
+
+- `-ConfirmedSqlRollbackComplete` — operator attests the five SQL rollback scripts
+  already ran (procedures first, then `TableModifications Rollback.sql` last —
+  the 4.7 document lists them in rollout order, which is wrong).
+- `-SqlRollbackDeferred` — file restore proceeds; debt is recorded in the
+  attestation. `-AutoRollback` always forwards this so automated remediation is
+  never blocked by a question a child process cannot answer; the deploy's
+  completion message then says FILES ONLY rather than claiming the rollback
+  finished.
+
+Uncoupled processors are unchanged. See SERVERS.md and RUNBOOK §7.1.1.
+
 Scheduled drift check, every 30 min or whatever cadence fits. Register it once
 (elevated) and it runs as SYSTEM from Task Scheduler. The installer creates
 both the drift task and an independent heartbeat watchdog; the watchdog exits 2
@@ -603,10 +619,12 @@ and fresh-log health probes; do not pass their binaries to
   preserving would also close the measured `/MIR` incident where a mirror
   replaced a per-server config and deleted server-only files while the
   post-deploy verify still reported PASS.
-- Database objects (stored procedures, triggers, views) are **out of scope** for
-  the current two-week window. They fit the same SHA-256 capture-and-verify
-  pattern and are planned as a fast follow; no script changes are needed to
-  support them — the same manifest/compare approach applies to SQL files.
+- Database objects (stored procedures, triggers, views) are still **out of scope**
+  for SHA-256 capture-and-verify — nothing here deploys or compares SQL — but
+  `InboundHandler` is already gated: deploy requires
+  `-ConfirmedSqlRolloutComplete`, and rollback requires
+  `-ConfirmedSqlRollbackComplete` or `-SqlRollbackDeferred` (see Rollback above
+  and SERVERS.md). Full SQL capture/verify remains a fast follow.
 - Server split (VEMS-5346): PROD spreads the outbound processors across
   VESEMSEGRESS01/02/03 while UAT runs all three on one box, so deploy is
   server-aware (set the processor list per server). See SERVERS.md.
@@ -638,9 +656,12 @@ and fresh-log health probes; do not pass their binaries to
 
 The automated Pester suite covers verification, config contracts, the pre-deploy
 gate (`tests/Invoke-PreDeployGate.Tests.ps1`), preflight, deploy, rollback,
-backup helpers, the drift runner, module unit tests, and health-check scripts.
-Run it on a workstation/CI host, not on production servers. GitHub Actions runs
-the same entry point on every push and pull request (`.github/workflows/tests.yml`).
+backup helpers, the drift runner, the drift-heartbeat watchdog, module unit
+tests, and health-check scripts. Per-server wrappers under `processors/` and
+`Install-DriftTask.ps1` are not covered by Pester (they need the real box /
+elevation); exercise them with the UAT pilot checklist. Run the suite on a
+workstation/CI host, not on production servers. GitHub Actions runs the same
+entry point on every push and pull request (`.github/workflows/tests.yml`).
 
 It needs Pester **5.x** (not 6+; the in-box Pester 3.4 will not parse the tests).
 `Invoke-Tests.ps1` selects the highest installed 5.x even if Pester 6 is also

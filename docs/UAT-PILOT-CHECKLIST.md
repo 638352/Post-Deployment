@@ -16,11 +16,18 @@ paths are confirmed — do not claim fleet coverage from a single-target pilot.
 
 Against the current Outbound Deployment Steps runbook, confirm and update
 [processors/Deploy-OutboundDBQ-uat.ps1](../processors/Deploy-OutboundDBQ-uat.ps1)
-and [SERVERS.md](../SERVERS.md) if needed:
+and [SERVERS.md](../SERVERS.md) if needed.
 
-- [ ] Scheduled task name (wrapper default: `VLER_EM_Realtime_DBQ_Processor`)
+XML and DBQ share `C:\VLER_TEST_OUTBOUND\Processors\VES.OutboundProcessor` on this
+box (SERVERS.md). The wrapper is one deployment unit with **two** scheduled tasks;
+a deploy stops and restarts both. Confirm both names, not just DBQ:
+
+- [ ] DBQ scheduled task (wrapper default: `VLER_EM_Realtime_DBQ_Processor`)
+- [ ] XML / Outbound Request scheduled task (wrapper default:
+      `VLER_EM_Realtime_Outbound_Request_Processor`)
 - [ ] Fresh log directory (wrapper default: `C:\VLER_TEST_OUTBOUND\Logs\VES.OutboundProcessor`)
 - [ ] TargetRoot / BackupRoot / config path still match the box
+- [ ] Hostname is `VESMSEGRESSUAT` (wrapper asserts it via `Test-VesRunbookValues`)
 - [ ] Only then use `-ConfirmedRunbookValues` on a real run
 
 ## 3. Config contract
@@ -86,7 +93,8 @@ On the UAT approval host, with the release owner present:
 
 Then the real deploy (same args without `-WhatIf`), using the wrapper's
 `-KillProcesses` / `-StartTasksAfter` defaults after the kill/restart behavior
-has been observed once under change control.
+has been observed once under change control. Expect both the DBQ and XML
+instances under that shared folder to stop for the copy and restart afterward.
 
 - [ ] The staged tree carries `VES.OutboundDBQProcessor.exe.config` with this
       box's values. `/MIR` replaces the config on the server, so whatever ships
@@ -95,6 +103,8 @@ has been observed once under change control.
 - [ ] Preflight READY (or WARN only for unanchored items you intentionally skipped)
 - [ ] `-WhatIf` gate passes
 - [ ] Real deploy exits `0`; health probes populated so health is not empty → `10`
+- [ ] Both scheduled tasks show a successful last-run after restart (fresh-log
+      alone only proves something in the shared tree is alive)
 - [ ] JSONL deploy log written under `VES_AUDIT_LOG_DIR` or the wrapper log dir
 
 ## 6. Evidence and ownership until monitoring is wired

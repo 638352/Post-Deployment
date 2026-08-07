@@ -269,6 +269,29 @@ Describe 'backup and rollback record' {
         $rec.replacedByReleaseTag | Should -Be 'dptest/v1.0.0'
     }
 
+    It 'leaves priorReleaseTag null on the first backup (nothing earlier was tagged)' {
+        $rec = Get-Content -LiteralPath (Join-Path $script:BkDir.FullName 'rollback-record.json') -Raw | ConvertFrom-Json
+        [string]::IsNullOrWhiteSpace("$($rec.priorReleaseTag)") | Should -BeTrue
+    }
+
+    It 'copies the previous backup''s replacedByReleaseTag into the next priorReleaseTag' {
+        # Second deploy into the same BackupRoot: the tree now holds the first
+        # deploy's bits, and that deploy's sidecar named the tag that replaced
+        # the pre-deploy tree. That tag IS the prior release for the new backup.
+        $target2 = New-LiveTarget 'target-backup-2'
+        # Seed the live tree from the staged release so verify/health still pass.
+        robocopy $script:Staged $target2 /E /NP /R:0 /W:0 | Out-Null
+        $global:LASTEXITCODE = 0
+        $r2 = Invoke-VesScript 'Deploy-Processor.ps1' (New-DeployArgs $target2 @('-BackupRoot', $script:BkRoot))
+        $r2.ExitCode | Should -Be 0
+        $dirs = @(Get-ChildItem -LiteralPath $script:BkRoot -Directory | Sort-Object Name)
+        $dirs.Count | Should -Be 2
+        $newest = $dirs[-1]
+        $rec2 = Get-Content -LiteralPath (Join-Path $newest.FullName 'rollback-record.json') -Raw | ConvertFrom-Json
+        $rec2.priorReleaseTag | Should -Be 'dptest/v1.0.0'
+        $rec2.replacedByReleaseTag | Should -Be 'dptest/v1.0.0'
+    }
+
     It 'writes a backup-manifest.json of the pre-deploy tree' {
         $mf = Get-Content -LiteralPath (Join-Path $script:BkDir.FullName 'backup-manifest.json') -Raw | ConvertFrom-Json
         $mf.schema | Should -Be 'ves.manifest.v1'
